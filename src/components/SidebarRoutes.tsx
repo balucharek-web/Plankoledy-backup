@@ -49,7 +49,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
             Optymalizacja kolejności odwiedzin...
           </p>
           <p className="text-xs text-slate-500 mt-1">
-            Google Routes API układa najkrótsze trasy dla każdego księdza.
+            Algorytm układa najkrótsze trasy dla każdego księdza.
           </p>
         </div>
       </div>

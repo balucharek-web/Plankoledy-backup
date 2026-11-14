@@ -10,17 +10,20 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
-import { ParishMap } from './components/ParishMap';
+import { OsmParishMap } from './components/OsmParishMap';
+import { ParishMap, RoutePolylineEntry } from './components/ParishMap';
 import { SelectedPlaceData } from './components/PlaceSearchInput';
 import { PrintScheduleSheet } from './components/PrintScheduleSheet';
 import { SidebarRoutes } from './components/SidebarRoutes';
 import { SidebarSetup } from './components/SidebarSetup';
 import { SidebarStops } from './components/SidebarStops';
+import { MapEngineProvider } from './contexts/MapEngineContext';
 import {
   FIREBASE_CONSOLE_UPGRADE_URL,
   auth,
   googleProvider,
 } from './firebase';
+import { useOsmRouteOptimizer } from './hooks/useOsmRouteOptimizer';
 import { useParishRouteOptimizer } from './hooks/useParishRouteOptimizer';
 import {
   fetchStreetHousesAtLocation,
@@ -49,6 +52,7 @@ import {
   PRIEST_PALETTE,
   ParishCenter,
   PlanConfig,
+  PriestRouteResult,
   SavedParishRecord,
   StreetPickFeedback,
   VisitStop,
@@ -66,6 +70,19 @@ type MobilePane = 'panel' | 'map';
 
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
+interface RouteOptimizerHandle {
+  routes: PriestRouteResult[];
+  routeObjects: RoutePolylineEntry[];
+  isComputing: boolean;
+  error: string | null;
+  computeAllRoutes: (
+    parish: ParishCenter,
+    stops: VisitStop[],
+    config: PlanConfig
+  ) => Promise<void>;
+  clearRoutes: () => void;
+}
+
 function clearLegacyLocalStorage() {
   try {
     window.localStorage.removeItem('planer_koledy_plan_v1');
@@ -79,10 +96,14 @@ function ParishPlannerWorkspace({
   authUser,
   onSignInGoogle,
   onSignOutGoogle,
+  optimizer,
+  useGoogleMaps,
 }: {
   authUser: User | null;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
+  optimizer: RouteOptimizerHandle;
+  useGoogleMaps: boolean;
 }) {
   const [savedParishes, setSavedParishes] = useState<SavedParishRecord[]>([]);
   const [activeParishId, setActiveParishId] = useState<string | null>(null);
@@ -134,7 +155,7 @@ function ParishPlannerWorkspace({
     error: routeError,
     computeAllRoutes,
     clearRoutes,
-  } = useParishRouteOptimizer();
+  } = optimizer;
 
   // Parishes must only be persisted for signed-in users: purge any old local cache
   useEffect(() => {
@@ -1092,31 +1113,59 @@ function ParishPlannerWorkspace({
           </aside>
 
           <section className="flex-1 min-h-0 relative h-full w-full">
-            <ParishMap
-              parish={parish}
-              boundary={boundary}
-              stops={stops}
-              routes={routes}
-              routeObjects={routeObjects}
-              interactionMode={interactionMode}
-              highlightedStopId={highlightedStopId}
-              streetPickFeedback={streetPickFeedback}
-              onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-              onSetInteractionMode={setInteractionMode}
-              onCreatePresetBoundary={handleCreatePresetBoundary}
-              onScaleBoundary={handleScaleBoundary}
-              onClearBoundary={handleClearBoundary}
-              onBoundaryComplete={handleBoundaryComplete}
-              onBoundaryUpdate={(pts) => updateBoundaryAndRecheckStops(pts, true)}
-              onCancelInteraction={() => setInteractionMode('pan')}
-              onMapAddStop={handleMapAddStop}
-              onMapPickStreet={handleMapPickStreet}
-              onSelectStop={setHighlightedStopId}
-              onDeleteStop={handleDeleteStop}
-            />
+            {useGoogleMaps ? (
+              <ParishMap
+                parish={parish}
+                boundary={boundary}
+                stops={stops}
+                routes={routes}
+                routeObjects={routeObjects}
+                interactionMode={interactionMode}
+                highlightedStopId={highlightedStopId}
+                streetPickFeedback={streetPickFeedback}
+                onDismissStreetFeedback={() => setStreetPickFeedback(null)}
+                onSetInteractionMode={setInteractionMode}
+                onCreatePresetBoundary={handleCreatePresetBoundary}
+                onScaleBoundary={handleScaleBoundary}
+                onClearBoundary={handleClearBoundary}
+                onBoundaryComplete={handleBoundaryComplete}
+                onBoundaryUpdate={(pts) =>
+                  updateBoundaryAndRecheckStops(pts, true)
+                }
+                onCancelInteraction={() => setInteractionMode('pan')}
+                onMapAddStop={handleMapAddStop}
+                onMapPickStreet={handleMapPickStreet}
+                onSelectStop={setHighlightedStopId}
+                onDeleteStop={handleDeleteStop}
+              />
+            ) : (
+              <OsmParishMap
+                parish={parish}
+                boundary={boundary}
+                stops={stops}
+                routes={routes}
+                interactionMode={interactionMode}
+                highlightedStopId={highlightedStopId}
+                streetPickFeedback={streetPickFeedback}
+                onDismissStreetFeedback={() => setStreetPickFeedback(null)}
+                onSetInteractionMode={setInteractionMode}
+                onCreatePresetBoundary={handleCreatePresetBoundary}
+                onScaleBoundary={handleScaleBoundary}
+                onClearBoundary={handleClearBoundary}
+                onBoundaryComplete={handleBoundaryComplete}
+                onBoundaryUpdate={(pts) =>
+                  updateBoundaryAndRecheckStops(pts, true)
+                }
+                onCancelInteraction={() => setInteractionMode('pan')}
+                onMapAddStop={handleMapAddStop}
+                onMapPickStreet={handleMapPickStreet}
+                onSelectStop={setHighlightedStopId}
+                onDeleteStop={handleDeleteStop}
+              />
+            )}
 
             {stops.length > 0 && (
-              <div className="no-print absolute top-3 left-3 sm:top-auto sm:bottom-4 sm:left-4 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
+              <div className="no-print absolute top-3 left-3 sm:top-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
                 {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                   <span key={p.id} className="inline-flex items-center gap-1.5">
                     <span
@@ -1137,6 +1186,52 @@ function ParishPlannerWorkspace({
         onClose={() => setGuideOpen(false)}
       />
     </div>
+  );
+}
+
+function GoogleMapsWorkspace({
+  authUser,
+  onSignInGoogle,
+  onSignOutGoogle,
+}: {
+  authUser: User | null;
+  onSignInGoogle: () => void;
+  onSignOutGoogle: () => void;
+}) {
+  const optimizer = useParishRouteOptimizer();
+  return (
+    <MapEngineProvider engine="google">
+      <ParishPlannerWorkspace
+        authUser={authUser}
+        onSignInGoogle={onSignInGoogle}
+        onSignOutGoogle={onSignOutGoogle}
+        optimizer={optimizer}
+        useGoogleMaps={true}
+      />
+    </MapEngineProvider>
+  );
+}
+
+function OsmFreeWorkspace({
+  authUser,
+  onSignInGoogle,
+  onSignOutGoogle,
+}: {
+  authUser: User | null;
+  onSignInGoogle: () => void;
+  onSignOutGoogle: () => void;
+}) {
+  const optimizer = useOsmRouteOptimizer();
+  return (
+    <MapEngineProvider engine="osm">
+      <ParishPlannerWorkspace
+        authUser={authUser}
+        onSignInGoogle={onSignInGoogle}
+        onSignOutGoogle={onSignOutGoogle}
+        optimizer={optimizer}
+        useGoogleMaps={false}
+      />
+    </MapEngineProvider>
   );
 }
 
@@ -1238,21 +1333,11 @@ export default function App() {
       )}
 
       {!MAPS_API_KEY ? (
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="max-w-md bg-white border border-slate-200 rounded-xl p-6 text-center space-y-2">
-            <h1 className="text-base font-semibold text-slate-900">
-              Brak klucza Google Maps API
-            </h1>
-            <p className="text-xs text-slate-600">
-              Skonfiguruj zmienną środowiskową{' '}
-              <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">
-                VITE_GOOGLE_MAPS_API_KEY
-              </code>{' '}
-              w ustawieniach Google Maps Platform, aby uruchomić mapę i
-              wyznaczanie tras.
-            </p>
-          </div>
-        </div>
+        <OsmFreeWorkspace
+          authUser={authUser}
+          onSignInGoogle={handleSignInGoogle}
+          onSignOutGoogle={handleSignOutGoogle}
+        />
       ) : (
         <APIProvider
           apiKey={MAPS_API_KEY}
@@ -1260,7 +1345,7 @@ export default function App() {
           region="PL"
           libraries={['places', 'routes', 'marker', 'geometry']}
         >
-          <ParishPlannerWorkspace
+          <GoogleMapsWorkspace
             authUser={authUser}
             onSignInGoogle={handleSignInGoogle}
             onSignOutGoogle={handleSignOutGoogle}

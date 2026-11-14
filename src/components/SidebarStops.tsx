@@ -11,6 +11,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { useMapEngine } from '../contexts/MapEngineContext';
+import { searchPlacesNominatim } from '../services/osmSearchAndRouting';
 import {
   LatLng,
   MapInteractionMode,
@@ -45,36 +47,25 @@ interface SidebarStopsProps {
   isComputing: boolean;
 }
 
-export const SidebarStops: React.FC<SidebarStopsProps> = ({
+interface BatchImportFormProps {
+  parish: ParishCenter;
+  onBatchAddStops: (places: SelectedPlaceData[]) => void;
+  onClose: () => void;
+  onDoneMessage: (msg: string) => void;
+}
+
+const GoogleBatchImportForm: React.FC<BatchImportFormProps> = ({
   parish,
-  boundary,
-  stops,
-  config,
-  interactionMode,
-  streetPickFeedback,
-  onDismissStreetFeedback,
-  onAddPlaceStop,
   onBatchAddStops,
-  onTogglePickStreetMode,
-  onToggleMapAddMode,
-  onUpdateStop,
-  onDeleteStop,
-  onClearStops,
-  onAutoPartition,
-  onSelectStop,
-  onComputeRoutes,
-  isComputing,
+  onClose,
+  onDoneMessage,
 }) => {
   const placesLib = useMapsLibrary('places');
-  const [showBatch, setShowBatch] = useState(false);
-  const [osmModalOpen, setOsmModalOpen] = useState(false);
   const [batchText, setBatchText] = useState('');
   const [batchLoading, setBatchLoading] = useState(false);
-  const [batchStatus, setBatchStatus] = useState<string | null>(null);
-  const [stopFilter, setStopFilter] = useState('');
 
-  const handleBatchImport = async () => {
-    if (!placesLib || !parish) return;
+  const handleImport = async () => {
+    if (!placesLib) return;
     const lines = batchText
       .split('\n')
       .map((l) => l.trim())
@@ -83,7 +74,6 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
     if (lines.length === 0) return;
 
     setBatchLoading(true);
-    setBatchStatus(null);
     const found: SelectedPlaceData[] = [];
     let failedCount = 0;
 
@@ -113,25 +103,162 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
         }
       } catch (err) {
         failedCount += 1;
-        if (notifyIfQuotaExceeded(err)) {
-          break;
-        }
+        if (notifyIfQuotaExceeded(err)) break;
       }
     }
 
-    if (found.length > 0) {
-      onBatchAddStops(found);
-    }
-
+    if (found.length > 0) onBatchAddStops(found);
     setBatchLoading(false);
     setBatchText('');
-    setShowBatch(false);
-    setBatchStatus(
+    onClose();
+    onDoneMessage(
       `Dodano ${found.length} adresów${
         failedCount > 0 ? `, nie znaleziono ${failedCount}` : ''
       }.`
     );
   };
+
+  return (
+    <div className="pt-2 border-t border-slate-100 space-y-2">
+      <label htmlFor="batch-addresses" className="block text-xs text-slate-600">
+        Wpisz lub wklej po jednym adresie w linii (maks. 25 naraz):
+      </label>
+      <textarea
+        id="batch-addresses"
+        rows={4}
+        value={batchText}
+        onChange={(e) => setBatchText(e.target.value)}
+        placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
+        className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
+      />
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900"
+        >
+          Anuluj
+        </button>
+        <button
+          type="button"
+          disabled={batchLoading || batchText.trim().length < 3}
+          onClick={handleImport}
+          className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-lg inline-flex items-center gap-1.5"
+        >
+          {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          Wyszukaj i dodaj
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const OsmBatchImportForm: React.FC<BatchImportFormProps> = ({
+  parish,
+  onBatchAddStops,
+  onClose,
+  onDoneMessage,
+}) => {
+  const [batchText, setBatchText] = useState('');
+  const [batchLoading, setBatchLoading] = useState(false);
+
+  const handleImport = async () => {
+    const lines = batchText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length >= 3);
+
+    if (lines.length === 0) return;
+
+    setBatchLoading(true);
+    const found: SelectedPlaceData[] = [];
+    let failedCount = 0;
+
+    for (const line of lines.slice(0, 20)) {
+      try {
+        const res = await searchPlacesNominatim(line, parish.location, 1);
+        if (res[0]) {
+          found.push(res[0]);
+        } else {
+          failedCount += 1;
+        }
+      } catch {
+        failedCount += 1;
+      }
+      await new Promise((r) => setTimeout(r, 350));
+    }
+
+    if (found.length > 0) onBatchAddStops(found);
+    setBatchLoading(false);
+    setBatchText('');
+    onClose();
+    onDoneMessage(
+      `Dodano ${found.length} adresów${
+        failedCount > 0 ? `, nie znaleziono ${failedCount}` : ''
+      }.`
+    );
+  };
+
+  return (
+    <div className="pt-2 border-t border-slate-100 space-y-2">
+      <label htmlFor="batch-addresses" className="block text-xs text-slate-600">
+        Wpisz lub wklej po jednym adresie w linii (maks. 20 naraz):
+      </label>
+      <textarea
+        id="batch-addresses"
+        rows={4}
+        value={batchText}
+        onChange={(e) => setBatchText(e.target.value)}
+        placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
+        className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
+      />
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900"
+        >
+          Anuluj
+        </button>
+        <button
+          type="button"
+          disabled={batchLoading || batchText.trim().length < 3}
+          onClick={handleImport}
+          className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-lg inline-flex items-center gap-1.5"
+        >
+          {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          Wyszukaj i dodaj
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export const SidebarStops: React.FC<SidebarStopsProps> = ({
+  parish,
+  boundary,
+  stops,
+  config,
+  interactionMode,
+  streetPickFeedback,
+  onDismissStreetFeedback,
+  onAddPlaceStop,
+  onBatchAddStops,
+  onTogglePickStreetMode,
+  onToggleMapAddMode,
+  onUpdateStop,
+  onDeleteStop,
+  onClearStops,
+  onAutoPartition,
+  onSelectStop,
+  onComputeRoutes,
+  isComputing,
+}) => {
+  const engine = useMapEngine();
+  const [showBatch, setShowBatch] = useState(false);
+  const [osmModalOpen, setOsmModalOpen] = useState(false);
+  const [batchStatus, setBatchStatus] = useState<string | null>(null);
+  const [stopFilter, setStopFilter] = useState('');
 
   const outsideCount =
     boundary.length >= 3
@@ -261,42 +388,23 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           </div>
         )}
 
-        {showBatch && (
-          <div className="pt-2 border-t border-slate-100 space-y-2">
-            <label
-              htmlFor="batch-addresses"
-              className="block text-xs text-slate-600"
-            >
-              Wpisz lub wklej po jednym adresie w linii (maks. 25 naraz):
-            </label>
-            <textarea
-              id="batch-addresses"
-              rows={4}
-              value={batchText}
-              onChange={(e) => setBatchText(e.target.value)}
-              placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
-              className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
+        {showBatch &&
+          parish &&
+          (engine === 'google' ? (
+            <GoogleBatchImportForm
+              parish={parish}
+              onBatchAddStops={onBatchAddStops}
+              onClose={() => setShowBatch(false)}
+              onDoneMessage={setBatchStatus}
             />
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowBatch(false)}
-                className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900"
-              >
-                Anuluj
-              </button>
-              <button
-                type="button"
-                disabled={batchLoading || batchText.trim().length < 3}
-                onClick={handleBatchImport}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-lg inline-flex items-center gap-1.5"
-              >
-                {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                Wyszukaj i dodaj
-              </button>
-            </div>
-          </div>
-        )}
+          ) : (
+            <OsmBatchImportForm
+              parish={parish}
+              onBatchAddStops={onBatchAddStops}
+              onClose={() => setShowBatch(false)}
+              onDoneMessage={setBatchStatus}
+            />
+          ))}
 
         {batchStatus && (
           <p className="text-xs text-slate-600">{batchStatus}</p>

@@ -45,10 +45,13 @@ Przeglądarkowa aplikacja do planowania odwiedzin duszpasterskich na terenie par
 
    Aplikacja będzie dostępna pod adresem `http://localhost:3000`.
 
-## Wdrożenie na GitHub Pages
+## Wdrożenie na GitHub Pages (100% za darmo, bez karty i bez kluczy API)
 
-Repozytorium zawiera gotowy workflow `.github/workflows/deploy.yml`. Aby uruchomić działającą wersję pod adresem `https://balucharek-web.github.io/Plankoledy/`:
+Repozytorium zawiera gotowy workflow `.github/workflows/deploy.yml`. Gdy zmienna `VITE_GOOGLE_MAPS_API_KEY` nie jest ustawiona, aplikacja automatycznie uruchamia **w pełni darmowy tryb OpenStreetMap (Leaflet + Nominatim + Overpass + OSRM)**.
 
-1. W ustawieniach repozytorium na GitHubie (**Settings -> Pages -> Build and deployment -> Source**) wybierz **GitHub Actions** (w przypadku darmowego konta GitHub repozytorium musi być publiczne).
-2. W **Settings -> Secrets and variables -> Actions** dodaj sekret `VITE_GOOGLE_MAPS_API_KEY` ze swoim kluczem Google Maps API.
+Aby uruchomić działającą wersję pod adresem `https://balucharek-web.github.io/Plankoledy/`:
+
+1. Zmień widoczność repozytorium na publiczną w **Settings -> Danger Zone** (wymagane dla darmowego GitHub Pages).
+2. W **Settings -> Pages -> Build and deployment -> Source** wybierz **GitHub Actions**.
 3. W konsoli Firebase (**Authentication -> Settings -> Authorized domains**) dodaj domenę `balucharek-web.github.io`, aby działało logowanie Google.
+*(Opcjonalnie)* Jeśli zechcesz później przełączyć wersję na Mapy Google, dodaj sekret `VITE_GOOGLE_MAPS_API_KEY` w **Settings -> Secrets and variables -> Actions**.
