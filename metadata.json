@@ -1,0 +1,6 @@
+{
+  "name": "Planer Kolędy",
+  "description": "Przeglądarkowa aplikacja do planowania odwiedzin duszpasterskich na terenie parafii i wyznaczania optymalnych tras dla księży za pomocą Map Google.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
