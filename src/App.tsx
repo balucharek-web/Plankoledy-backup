@@ -1,11 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
   CalendarCheck,
+  ChevronLeft,
+  ChevronRight,
   Church,
   HelpCircle,
   LayoutDashboard,
+  ListOrdered,
   LogIn,
   LogOut,
   Map as MapIcon,
@@ -39,6 +42,7 @@ import {
 } from './services/overpassStreets';
 import {
   DEFAULT_PLAN_CONFIG,
+  DEFAULT_SEASON_CONFIG,
   batchUpdateStopFieldInFirestore,
   clearParishStopsInFirestore,
   createStopInFirestore,
@@ -52,6 +56,7 @@ import {
   subscribeUserParishes,
   updateParishBoundaryInFirestore,
   updateParishConfigInFirestore,
+  updateParishSeasonConfigInFirestore,
   updateStopInFirestore,
 } from './services/parishStorage';
 import {
@@ -62,9 +67,16 @@ import {
   PlanConfig,
   PriestRouteResult,
   SavedParishRecord,
+  SeasonPlanConfig,
   StreetPickFeedback,
   VisitStop,
 } from './types/parish';
+import {
+  autoScheduleSeason,
+  buildSeasonDaySummaries,
+  formatPolishDateChip,
+  getDayStartTime,
+} from './utils/seasonScheduler';
 import {
   createPresetBoundaryPolygon,
   isPointInsideBoundary,
@@ -94,7 +106,10 @@ interface RouteOptimizerHandle {
     parish: ParishCenter,
     stops: VisitStop[],
     config: PlanConfig
-  ) => Promise<void>;
+  ) => Promise<{
+    routes: PriestRouteResult[];
+    routeObjects: RoutePolylineEntry[];
+  } | undefined>;
   clearRoutes: () => void;
 }
 
@@ -126,7 +141,19 @@ function ParishPlannerWorkspace({
   const [parish, setParish] = useState<ParishCenter | null>(null);
   const [boundary, setBoundary] = useState<LatLng[]>([]);
   const [config, setConfig] = useState<PlanConfig>(DEFAULT_PLAN_CONFIG);
+  const [seasonConfig, setSeasonConfig] = useState<SeasonPlanConfig>(
+    DEFAULT_SEASON_CONFIG
+  );
   const [stops, setStops] = useState<VisitStop[]>([]);
+
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [focusedPriestId, setFocusedPriestId] = useState<number | null>(null);
+  const [exactRoutesCache, setExactRoutesCache] = useState<
+    Record<
+      string,
+      { routes: PriestRouteResult[]; routeObjects: RoutePolylineEntry[] }
+    >
+  >({});
 
   const [activeSection, setActiveSection] =
     useState<WorkspaceSection>('overview');
@@ -171,13 +198,16 @@ function ParishPlannerWorkspace({
   );
 
   const {
-    routes,
-    routeObjects,
     isComputing,
     error: routeError,
     computeAllRoutes,
-    clearRoutes,
+    clearRoutes: clearOptimizerRoutes,
   } = optimizer;
+
+  const clearRoutes = useCallback(() => {
+    clearOptimizerRoutes();
+    setExactRoutesCache({});
+  }, [clearOptimizerRoutes]);
 
   // Parishes must only be persisted for signed-in users: purge any old local cache
   useEffect(() => {
@@ -192,7 +222,10 @@ function ParishPlannerWorkspace({
       setParish(null);
       setBoundary([]);
       setConfig(DEFAULT_PLAN_CONFIG);
+      setSeasonConfig(DEFAULT_SEASON_CONFIG);
       setStops([]);
+      setSelectedDate(null);
+      setFocusedPriestId(null);
       clearRoutes();
       return;
     }
@@ -208,6 +241,7 @@ function ParishPlannerWorkspace({
           parish,
           boundary,
           config,
+          seasonConfig,
           updatedAtMs: Date.now(),
         };
         activeParishIdRef.current = newId;
@@ -236,15 +270,18 @@ function ParishPlannerWorkspace({
           setParish(matched.parish);
           setBoundary(matched.boundary);
           setConfig(matched.config);
+          setSeasonConfig(matched.seasonConfig ?? DEFAULT_SEASON_CONFIG);
         } else if (matched) {
           setParish(matched.parish);
           setBoundary(matched.boundary);
           setConfig(matched.config);
+          setSeasonConfig(matched.seasonConfig ?? DEFAULT_SEASON_CONFIG);
         } else {
           setActiveParishId(null);
           setParish(null);
           setBoundary([]);
           setStops([]);
+          setSelectedDate(null);
         }
       });
     })();
@@ -287,7 +324,10 @@ function ParishPlannerWorkspace({
         setParish(nextParish);
         setBoundary([]);
         setConfig(DEFAULT_PLAN_CONFIG);
+        setSeasonConfig(DEFAULT_SEASON_CONFIG);
         setStops([]);
+        setSelectedDate(null);
+        setFocusedPriestId(null);
         return;
       }
 
@@ -303,6 +343,9 @@ function ParishPlannerWorkspace({
         setParish(existing.parish);
         setBoundary(existing.boundary);
         setConfig(existing.config);
+        setSeasonConfig(existing.seasonConfig ?? DEFAULT_SEASON_CONFIG);
+        setSelectedDate(null);
+        setFocusedPriestId(null);
         return;
       }
 
@@ -311,6 +354,7 @@ function ParishPlannerWorkspace({
         parish: nextParish,
         boundary: [],
         config: DEFAULT_PLAN_CONFIG,
+        seasonConfig: DEFAULT_SEASON_CONFIG,
         updatedAtMs: Date.now(),
       };
 
@@ -319,7 +363,10 @@ function ParishPlannerWorkspace({
       setParish(nextParish);
       setBoundary([]);
       setConfig(DEFAULT_PLAN_CONFIG);
+      setSeasonConfig(DEFAULT_SEASON_CONFIG);
       setStops([]);
+      setSelectedDate(null);
+      setFocusedPriestId(null);
 
       void saveParishToFirestore(authUser.uid, newRecord, true).catch(() => {});
     },
@@ -335,10 +382,13 @@ function ParishPlannerWorkspace({
       clearRoutes();
       setInteractionMode('pan');
       setHighlightedStopId(null);
+      setSelectedDate(null);
+      setFocusedPriestId(null);
       setActiveParishId(target.id);
       setParish(target.parish);
       setBoundary(target.boundary);
       setConfig(target.config);
+      setSeasonConfig(target.seasonConfig ?? DEFAULT_SEASON_CONFIG);
     },
     [authUser, clearRoutes, savedParishes]
   );
@@ -356,7 +406,10 @@ function ParishPlannerWorkspace({
         setParish(fallback?.parish ?? null);
         setBoundary(fallback?.boundary ?? []);
         setConfig(fallback?.config ?? DEFAULT_PLAN_CONFIG);
+        setSeasonConfig(fallback?.seasonConfig ?? DEFAULT_SEASON_CONFIG);
         setStops([]);
+        setSelectedDate(null);
+        setFocusedPriestId(null);
       }
 
       void deleteParishFromFirestore(authUser.uid, parishId).catch(() => {});
@@ -476,6 +529,26 @@ function ParishPlannerWorkspace({
       }
     },
     [authUser, clearRoutes]
+  );
+
+  const handleChangeSeasonConfig = useCallback(
+    (nextSeason: SeasonPlanConfig) => {
+      setSeasonConfig(nextSeason);
+      const currentId = activeParishIdRef.current;
+      if (authUser && currentId) {
+        setSavedParishes((prev) =>
+          prev.map((r) =>
+            r.id === currentId
+              ? { ...r, seasonConfig: nextSeason, updatedAtMs: Date.now() }
+              : r
+          )
+        );
+        void updateParishSeasonConfigInFirestore(currentId, nextSeason).catch(
+          () => {}
+        );
+      }
+    },
+    [authUser]
   );
 
   const nextPriestRoundRobin = useCallback(
@@ -913,16 +986,226 @@ function ParishPlannerWorkspace({
     }
   }, [authUser, parish, config.priestCount, clearRoutes]);
 
+  const handleAutoScheduleSeason = useCallback(
+    (targetMode: 'all' | 'unscheduled') => {
+      if (!parish || stopsRef.current.length === 0) return;
+      const currentId = activeParishIdRef.current;
+      const scheduled = autoScheduleSeason({
+        parish,
+        stops: stopsRef.current,
+        config,
+        seasonConfig,
+        targetMode,
+      });
+
+      setStops(scheduled);
+      clearRoutes();
+
+      const firstDate =
+        scheduled
+          .map((s) => (s.visitDate ?? '').trim())
+          .filter(Boolean)
+          .sort()[0] ?? null;
+      if (firstDate) {
+        setSelectedDate(firstDate);
+      }
+      setFocusedPriestId(null);
+
+      if (authUser && currentId) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          scheduled,
+          'schedule'
+        ).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes, config, parish, seasonConfig]
+  );
+
+  const handleClearAllDates = useCallback(() => {
+    const currentId = activeParishIdRef.current;
+    const changed: VisitStop[] = [];
+    setStops((prev) =>
+      prev.map((s) => {
+        if (!(s.visitDate ?? '').trim()) return s;
+        const next = { ...s, visitDate: '' };
+        changed.push(next);
+        return next;
+      })
+    );
+    setSelectedDate(null);
+    setFocusedPriestId(null);
+    clearRoutes();
+
+    if (authUser && currentId && changed.length > 0) {
+      void batchUpdateStopFieldInFirestore(
+        currentId,
+        changed,
+        'visitDate'
+      ).catch(() => {});
+    }
+  }, [authUser, clearRoutes]);
+
+  const handleAssignStopsDate = useCallback(
+    (stopIds: string[], visitDate: string) => {
+      if (stopIds.length === 0) return;
+      const idSet = new Set(stopIds);
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          if (!idSet.has(s.id)) return s;
+          const next = {
+            ...s,
+            visitDate,
+            included: visitDate ? true : s.included,
+          };
+          changed.push(next);
+          return next;
+        })
+      );
+      clearRoutes();
+      if (visitDate) {
+        setSelectedDate(visitDate);
+      }
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'schedule'
+        ).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes]
+  );
+
   const activeStopsCount = stops.filter((s) => s.included !== false).length;
 
+  const exactRoutesOnlyByDay = useMemo(() => {
+    const out: Record<string, PriestRouteResult[]> = {};
+    for (const [key, entry] of Object.entries(exactRoutesCache)) {
+      if (key !== 'current') out[key] = entry.routes;
+    }
+    return out;
+  }, [exactRoutesCache]);
+
+  const seasonSummary = useMemo(
+    () =>
+      buildSeasonDaySummaries(
+        stops,
+        parish,
+        config,
+        seasonConfig,
+        exactRoutesOnlyByDay
+      ),
+    [stops, parish, config, seasonConfig, exactRoutesOnlyByDay]
+  );
+
+  const plannedDays = seasonSummary.days;
+  const unscheduledStops = seasonSummary.unscheduledStops;
+
+  // Keep selectedDate valid if dates were cleared/changed
+  useEffect(() => {
+    if (
+      selectedDate &&
+      !plannedDays.some((d) => d.date === selectedDate)
+    ) {
+      setSelectedDate(plannedDays[0]?.date ?? null);
+    }
+  }, [plannedDays, selectedDate]);
+
+  const selectedDaySummary = useMemo(
+    () => plannedDays.find((d) => d.date === selectedDate) ?? null,
+    [plannedDays, selectedDate]
+  );
+
+  const activeRouteCacheKey = selectedDate ?? 'current';
+  const cachedExact = exactRoutesCache[activeRouteCacheKey];
+  const isExactRoute = Boolean(cachedExact && cachedExact.routes.length > 0);
+  const displayedRoutes = useMemo(() => {
+    if (cachedExact && cachedExact.routes.length > 0) {
+      return cachedExact.routes;
+    }
+    if (selectedDaySummary) {
+      return selectedDaySummary.estimatedRoutes;
+    }
+    return [];
+  }, [cachedExact, selectedDaySummary]);
+
+  const displayedRouteObjects = useMemo(
+    () => (cachedExact ? cachedExact.routeObjects : []),
+    [cachedExact]
+  );
+
+  const exactDayKeys = useMemo(() => {
+    const out: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(exactRoutesCache)) {
+      if (v.routes.length > 0) out[k] = true;
+    }
+    return out;
+  }, [exactRoutesCache]);
+
+  const effectiveStartTime = useMemo(
+    () => getDayStartTime(selectedDate, seasonConfig, config.startTime),
+    [selectedDate, seasonConfig, config.startTime]
+  );
+
+  const handleComputeRoutesForDate = useCallback(
+    async (explicitDate?: string | null) => {
+      if (!parish) return;
+      let targetDate =
+        explicitDate !== undefined ? explicitDate : selectedDate;
+      if (!targetDate && plannedDays.length > 0) {
+        targetDate = plannedDays[0].date;
+        setSelectedDate(targetDate);
+      }
+
+      const targetStops = targetDate
+        ? stops.filter((s) => (s.visitDate ?? '').trim() === targetDate)
+        : stops.filter((s) => s.included !== false);
+
+      if (targetStops.length === 0) return;
+
+      const dayStart = getDayStartTime(
+        targetDate,
+        seasonConfig,
+        config.startTime
+      );
+      const dayConfig: PlanConfig = { ...config, startTime: dayStart };
+
+      setInteractionMode('pan');
+      setActiveSection('routes');
+      setMobilePane('panel');
+
+      const computed = await computeAllRoutes(parish, targetStops, dayConfig);
+      if (computed) {
+        const key = targetDate ?? 'current';
+        setExactRoutesCache((prev) => ({ ...prev, [key]: computed }));
+      }
+    },
+    [
+      parish,
+      selectedDate,
+      plannedDays,
+      stops,
+      seasonConfig,
+      config,
+      computeAllRoutes,
+    ]
+  );
+
   const handleComputeRoutes = useCallback(async () => {
-    const activeStops = stops.filter((s) => s.included !== false);
-    if (!parish || activeStops.length === 0) return;
+    await handleComputeRoutesForDate(undefined);
+  }, [handleComputeRoutesForDate]);
+
+  const handleViewDayOnMap = useCallback((date: string | null) => {
+    setSelectedDate(date);
+    setFocusedPriestId(null);
     setInteractionMode('pan');
-    setActiveSection('routes');
-    setMobilePane('panel');
-    await computeAllRoutes(parish, activeStops, config);
-  }, [parish, stops, config, computeAllRoutes]);
+    setMobilePane('map');
+  }, []);
 
   const navItems: Array<{
     id: WorkspaceSection;
@@ -936,13 +1219,18 @@ function ParishPlannerWorkspace({
       id: 'stops',
       label: 'Układanie planu',
       icon: MapPin,
-      count: activeStopsCount > 0 ? activeStopsCount : undefined,
+      count:
+        plannedDays.length > 0
+          ? plannedDays.length
+          : activeStopsCount > 0
+            ? activeStopsCount
+            : undefined,
     },
     {
       id: 'routes',
       label: 'Trasy księży',
       icon: Route,
-      count: routes.length > 0 ? routes.length : undefined,
+      count: displayedRoutes.length > 0 ? displayedRoutes.length : undefined,
     },
     { id: 'schedule', label: 'Harmonogram', icon: CalendarCheck },
     { id: 'settings', label: 'Ustawienia planu', icon: SlidersHorizontal },
@@ -1088,7 +1376,20 @@ function ParishPlannerWorkspace({
             <PrintScheduleSheet
               parish={parish}
               config={config}
-              routes={routes}
+              routes={displayedRoutes}
+              isExactRoute={isExactRoute}
+              plannedDays={plannedDays}
+              unscheduledCount={unscheduledStops.length}
+              selectedDate={selectedDate}
+              effectiveStartTime={effectiveStartTime}
+              exactDayKeys={exactDayKeys}
+              onSelectDate={setSelectedDate}
+              onInspectDay={(date) => {
+                setSelectedDate(date);
+                setFocusedPriestId(null);
+              }}
+              onViewDayOnMap={handleViewDayOnMap}
+              onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
               onBackToMap={() => {
                 setActiveSection('overview');
                 setMobilePane('map');
@@ -1129,7 +1430,9 @@ function ParishPlannerWorkspace({
                     boundary={boundary}
                     stops={stops}
                     config={config}
-                    routes={routes}
+                    routes={displayedRoutes}
+                    plannedDays={plannedDays}
+                    selectedDate={selectedDate}
                     isSignedIn={Boolean(authUser)}
                     userEmail={authUser?.email ?? null}
                     isComputing={isComputing}
@@ -1141,6 +1444,7 @@ function ParishPlannerWorkspace({
                       setInteractionMode(mode);
                       setMobilePane('map');
                     }}
+                    onViewDayOnMap={(date) => handleViewDayOnMap(date)}
                     onComputeRoutes={handleComputeRoutes}
                   />
                 )}
@@ -1201,6 +1505,18 @@ function ParishPlannerWorkspace({
                     boundary={boundary}
                     stops={stops}
                     config={config}
+                    seasonConfig={seasonConfig}
+                    plannedDays={plannedDays}
+                    selectedDate={selectedDate}
+                    exactDayKeys={exactDayKeys}
+                    onSelectDate={(d) => {
+                      setSelectedDate(d);
+                      setFocusedPriestId(null);
+                    }}
+                    onChangeSeasonConfig={handleChangeSeasonConfig}
+                    onAutoScheduleSeason={handleAutoScheduleSeason}
+                    onClearAllDates={handleClearAllDates}
+                    onAssignStopsDate={handleAssignStopsDate}
                     onToggleStreetIncluded={handleToggleStreetIncluded}
                     onAssignStreetPriest={handleAssignStreetPriest}
                     onSetAllIncluded={handleSetAllIncluded}
@@ -1212,8 +1528,11 @@ function ParishPlannerWorkspace({
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
+                    onViewDayOnMap={(d) => handleViewDayOnMap(d)}
+                    onComputeDayRoute={(d) =>
+                      void handleComputeRoutesForDate(d)
+                    }
                     onGoToSetup={() => navigateToSection('parish')}
-                    onComputeRoutes={handleComputeRoutes}
                     isComputing={isComputing}
                   />
                 )}
@@ -1222,21 +1541,39 @@ function ParishPlannerWorkspace({
                   <SidebarRoutes
                     parish={parish}
                     config={config}
-                    routes={routes}
+                    routes={displayedRoutes}
+                    isExactRoute={isExactRoute}
+                    plannedDays={plannedDays}
+                    selectedDate={selectedDate}
+                    effectiveStartTime={effectiveStartTime}
+                    focusedPriestId={focusedPriestId}
                     isComputing={isComputing}
                     globalError={routeError}
+                    onSelectDate={(d) => {
+                      setSelectedDate(d);
+                      setFocusedPriestId(null);
+                    }}
+                    onFocusPriestOnMap={setFocusedPriestId}
                     onRecompute={handleComputeRoutes}
                     onSelectStop={(id) => {
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
+                    onViewRouteOnMap={(priestId) => {
+                      if (priestId !== undefined) setFocusedPriestId(priestId);
+                      setInteractionMode('pan');
+                      setMobilePane('map');
+                    }}
+                    onOpenSchedule={() => navigateToSection('schedule')}
                   />
                 )}
 
                 {activeSection === 'settings' && (
                   <SidebarSettings
                     config={config}
+                    seasonConfig={seasonConfig}
                     onChangeConfig={handleChangeConfig}
+                    onChangeSeasonConfig={handleChangeSeasonConfig}
                     onOpenGuide={() => setGuideOpen(true)}
                   />
                 )}
@@ -1254,8 +1591,11 @@ function ParishPlannerWorkspace({
                   parish={parish}
                   boundary={boundary}
                   stops={stops}
-                  routes={routes}
-                  routeObjects={routeObjects}
+                  routes={displayedRoutes}
+                  routeObjects={displayedRouteObjects}
+                  isExactRoute={isExactRoute}
+                  selectedDate={selectedDate}
+                  focusedPriestId={focusedPriestId}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -1275,7 +1615,10 @@ function ParishPlannerWorkspace({
                   parish={parish}
                   boundary={boundary}
                   stops={stops}
-                  routes={routes}
+                  routes={displayedRoutes}
+                  isExactRoute={isExactRoute}
+                  selectedDate={selectedDate}
+                  focusedPriestId={focusedPriestId}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -1291,6 +1634,119 @@ function ParishPlannerWorkspace({
                   onDeleteStop={handleDeleteStop}
                 />
               )}
+
+              {/* Floating Map Route & Day Preview HUD (bottom-right on desktop, bottom bar on mobile) */}
+              {interactionMode === 'pan' &&
+                (plannedDays.length > 0 || displayedRoutes.length > 0) && (
+                  <div className="no-print absolute bottom-3 inset-x-3 sm:inset-x-auto sm:right-4 sm:bottom-4 z-[460] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 max-w-full sm:max-w-[460px]">
+                    {plannedDays.length > 0 && (
+                      <div className="flex items-center gap-1 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const idx = plannedDays.findIndex(
+                              (d) => d.date === selectedDate
+                            );
+                            const nextIdx =
+                              idx <= 0 ? plannedDays.length - 1 : idx - 1;
+                            setSelectedDate(plannedDays[nextIdx].date);
+                            setFocusedPriestId(null);
+                          }}
+                          aria-label="Poprzedni dzień"
+                          className="min-w-[32px] min-h-[32px] inline-flex items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+
+                        <select
+                          value={selectedDate ?? ''}
+                          onChange={(e) => {
+                            setSelectedDate(e.target.value || null);
+                            setFocusedPriestId(null);
+                          }}
+                          aria-label="Wybierz dzień na mapie"
+                          className="min-h-[32px] px-2 py-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg text-slate-900 tabular-nums focus:outline-none focus:border-amber-600 max-w-[180px]"
+                        >
+                          {plannedDays.map((d) => (
+                            <option key={d.date} value={d.date}>
+                              {formatPolishDateChip(d.date)} · {d.startTime}–
+                              {d.estimatedEndTime}
+                            </option>
+                          ))}
+                          <option value="">Wszystkie zaznaczone</option>
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const idx = plannedDays.findIndex(
+                              (d) => d.date === selectedDate
+                            );
+                            const nextIdx =
+                              idx < 0 || idx >= plannedDays.length - 1
+                                ? 0
+                                : idx + 1;
+                            setSelectedDate(plannedDays[nextIdx].date);
+                            setFocusedPriestId(null);
+                          }}
+                          aria-label="Następny dzień"
+                          className="min-w-[32px] min-h-[32px] inline-flex items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+
+                    {displayedRoutes.length > 1 && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setFocusedPriestId(null)}
+                          className={`min-h-[30px] px-2 py-1 text-[11px] font-medium rounded-lg transition-colors ${
+                            focusedPriestId === null
+                              ? 'bg-slate-900 text-white'
+                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          }`}
+                        >
+                          Wszyscy
+                        </button>
+                        {displayedRoutes.map((r) => (
+                          <button
+                            key={r.priestId}
+                            type="button"
+                            onClick={() =>
+                              setFocusedPriestId(
+                                focusedPriestId === r.priestId
+                                  ? null
+                                  : r.priestId
+                              )
+                            }
+                            className={`min-h-[30px] px-2 py-1 text-[11px] font-medium rounded-lg inline-flex items-center gap-1 transition-colors ${
+                              focusedPriestId === r.priestId
+                                ? 'bg-slate-900 text-white'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full"
+                              style={{ backgroundColor: r.color }}
+                            />
+                            Ks. {r.priestId}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => navigateToSection('routes')}
+                      className="lg:hidden min-h-[32px] px-2.5 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1 ml-auto whitespace-nowrap"
+                    >
+                      <ListOrdered className="w-3.5 h-3.5" />
+                      Szczegóły
+                    </button>
+                  </div>
+                )}
 
               {activeStopsCount > 0 && (
                 <div className="no-print absolute top-3 right-3 sm:top-auto sm:right-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
@@ -1370,7 +1826,7 @@ function ParishPlannerWorkspace({
         >
           <Route className="w-5 h-5" />
           <span className="tabular-nums">
-            Trasy{routes.length > 0 ? ` (${routes.length})` : ''}
+            Trasy{displayedRoutes.length > 0 ? ` (${displayedRoutes.length})` : ''}
           </span>
         </button>
 

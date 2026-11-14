@@ -26,6 +26,9 @@ interface OsmParishMapProps {
   boundary: LatLng[];
   stops: VisitStop[];
   routes: PriestRouteResult[];
+  isExactRoute: boolean;
+  selectedDate: string | null;
+  focusedPriestId: number | null;
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
   streetPickFeedback: StreetPickFeedback | null;
@@ -54,6 +57,9 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   boundary,
   stops,
   routes,
+  isExactRoute,
+  selectedDate,
+  focusedPriestId,
   interactionMode,
   highlightedStopId,
   streetPickFeedback,
@@ -345,17 +351,22 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         PRIEST_PALETTE.find((p) => p.id === stop.priestId) ?? PRIEST_PALETTE[0];
       const orderNum = orderByStopId[stop.id];
       const isSelected = highlightedStopId === stop.id;
-      const isIncluded = stop.included !== false;
-      const size = !isIncluded ? 14 : orderNum ? 28 : 22;
+      const isActiveInView = selectedDate
+        ? (stop.visitDate ?? '').trim() === selectedDate
+        : stop.included !== false;
+      const isDimmedByPriest =
+        focusedPriestId !== null && stop.priestId !== focusedPriestId;
+      const size = !isActiveInView ? 12 : orderNum ? 28 : 22;
+      const opacity = !isActiveInView ? 0.32 : isDimmedByPriest ? 0.38 : 1;
 
       const icon = L.divIcon({
         className: '',
         html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${
-          isIncluded ? palette.color : '#CBD5E1'
+          isActiveInView ? palette.color : '#CBD5E1'
         };border:2.5px solid ${
-          isSelected ? '#0F172A' : isIncluded ? palette.borderColor : '#64748B'
-        };opacity:${isIncluded ? 1 : 0.65};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${
-          isIncluded ? (orderNum ?? '') : ''
+          isSelected ? '#0F172A' : isActiveInView ? palette.borderColor : '#64748B'
+        };opacity:${opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${
+          isActiveInView ? (orderNum ?? '') : ''
         }</div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
@@ -365,11 +376,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         icon,
         zIndexOffset: isSelected
           ? 400
-          : !isIncluded
-            ? 40
-            : orderNum
-              ? 200 - orderNum
-              : 100,
+          : !isActiveInView
+            ? 30
+            : isDimmedByPriest
+              ? 50
+              : orderNum
+                ? 200 - orderNum
+                : 100,
       }).addTo(layer);
 
       const popupEl = document.createElement('div');
@@ -377,15 +390,22 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       popupEl.style.maxWidth = '240px';
       popupEl.innerHTML = `
         <div style="color:#64748B;font-weight:500;">${
-          isIncluded
+          isActiveInView
             ? `${escapeHtml(palette.name)}${
                 orderNum ? ` · Przystanek #${orderNum}` : ''
               }`
-            : 'Zapamiętany adres (poza bieżącym planem)'
+            : 'Poza wybranym dniem / bieżącym planem'
         }</div>
         <div style="font-weight:700;color:#0F172A;margin-top:2px;">${escapeHtml(
           stop.address
         )}</div>
+        ${
+          stop.visitDate
+            ? `<div style="color:#92400E;font-weight:600;margin-top:2px;">Zaplanowano: ${escapeHtml(
+                stop.visitDate
+              )}</div>`
+            : ''
+        }
         <div style="color:#64748B;margin-top:4px;">Czas wizyty: ${
           stop.durationMinutes
         } min${
@@ -417,7 +437,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
       markersByStopIdRef.current[stop.id] = marker;
     });
-  }, [stops, orderByStopId, highlightedStopId]);
+  }, [stops, orderByStopId, highlightedStopId, selectedDate, focusedPriestId]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -439,22 +459,31 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     if (routesWithPath.length === 0) return;
 
     const bounds = L.latLngBounds([]);
+    let hasBounds = false;
     routesWithPath.forEach((route) => {
+      const isFocused =
+        focusedPriestId === null || focusedPriestId === route.priestId;
       const latLngs = route.encodedPathPoints.map(
         (p) => [p.lat, p.lng] as [number, number]
       );
       L.polyline(latLngs, {
         color: route.color,
-        weight: 5,
-        opacity: 0.88,
+        weight: isFocused ? 5 : 3,
+        opacity: isFocused ? 0.9 : 0.25,
+        dashArray: isExactRoute ? undefined : '7, 8',
       }).addTo(layer);
-      latLngs.forEach((ll) => bounds.extend(ll));
+      if (isFocused) {
+        latLngs.forEach((ll) => {
+          bounds.extend(ll);
+          hasBounds = true;
+        });
+      }
     });
 
-    if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [48, 48] });
+    if (hasBounds && bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [48, 72] });
     }
-  }, [routes]);
+  }, [routes, isExactRoute, focusedPriestId]);
 
   return (
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">

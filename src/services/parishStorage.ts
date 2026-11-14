@@ -19,6 +19,7 @@ import {
   ParishCenter,
   PlanConfig,
   SavedParishRecord,
+  SeasonPlanConfig,
   VisitStop,
 } from '../types/parish';
 import { OperationType, handleFirestoreError } from '../utils/firestoreError';
@@ -29,6 +30,14 @@ export const DEFAULT_PLAN_CONFIG: PlanConfig = {
   defaultVisitMinutes: 15,
   travelMode: 'WALKING',
   returnToParish: true,
+};
+
+export const DEFAULT_SEASON_CONFIG: SeasonPlanConfig = {
+  startDate: '2026-12-28',
+  weekdayStartTime: '15:30',
+  weekendStartTime: '10:00',
+  dailyEndTime: '20:30',
+  weekdaysMask: '1,2,3,4,5,6',
 };
 
 function cleanStr(value: string | undefined | null, maxLen: number): string {
@@ -90,6 +99,40 @@ export function sanitizeConfig(config: PlanConfig): PlanConfig {
   };
 }
 
+export function sanitizeSeasonConfig(
+  sc?: Partial<SeasonPlanConfig> | null
+): SeasonPlanConfig {
+  const rawDate = cleanStr(sc?.startDate, 10);
+  const startDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+    ? rawDate
+    : DEFAULT_SEASON_CONFIG.startDate;
+  const weekdayStartTime =
+    cleanStr(sc?.weekdayStartTime, 5).length >= 4
+      ? cleanStr(sc?.weekdayStartTime, 5)
+      : DEFAULT_SEASON_CONFIG.weekdayStartTime;
+  const weekendStartTime =
+    cleanStr(sc?.weekendStartTime, 5).length >= 4
+      ? cleanStr(sc?.weekendStartTime, 5)
+      : DEFAULT_SEASON_CONFIG.weekendStartTime;
+  const dailyEndTime =
+    cleanStr(sc?.dailyEndTime, 5).length >= 4
+      ? cleanStr(sc?.dailyEndTime, 5)
+      : DEFAULT_SEASON_CONFIG.dailyEndTime;
+  const rawMask = cleanStr(sc?.weekdaysMask, 20).replace(/[^0-6,]/g, '');
+  return {
+    startDate,
+    weekdayStartTime,
+    weekendStartTime,
+    dailyEndTime,
+    weekdaysMask: rawMask || DEFAULT_SEASON_CONFIG.weekdaysMask,
+  };
+}
+
+function cleanVisitDate(raw: string | undefined | null): string {
+  const v = cleanStr(raw, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+}
+
 function sanitizeStopPayload(
   uid: string,
   parishId: string,
@@ -111,6 +154,7 @@ function sanitizeStopPayload(
     priestId: clampInt(stop.priestId, 1, 4, 1),
     inBoundary: stop.inBoundary ?? true,
     included: stop.included !== false,
+    visitDate: cleanVisitDate(stop.visitDate),
     notes: cleanStr(stop.notes || '', 500),
   };
 }
@@ -148,6 +192,9 @@ export function subscribeUserParishes(
           config: d.config
             ? sanitizeConfig(d.config as PlanConfig)
             : DEFAULT_PLAN_CONFIG,
+          seasonConfig: d.seasonConfig
+            ? sanitizeSeasonConfig(d.seasonConfig as SeasonPlanConfig)
+            : DEFAULT_SEASON_CONFIG,
           updatedAtMs: timestampToMs(d.updatedAt),
         };
       });
@@ -197,6 +244,7 @@ export function subscribeParishStops(
               priestId: Number(d.priestId ?? 1),
               inBoundary: d.inBoundary !== false,
               included: d.included !== false,
+              visitDate: d.visitDate ? String(d.visitDate) : undefined,
               notes: d.notes ? String(d.notes) : undefined,
             },
           };
@@ -236,6 +284,7 @@ export async function saveParishToFirestore(
       },
       boundary: sanitizeBoundary(record.boundary),
       config: sanitizeConfig(record.config),
+      seasonConfig: sanitizeSeasonConfig(record.seasonConfig),
       updatedAt: serverTimestamp(),
     };
 
@@ -288,6 +337,22 @@ export async function updateParishConfigInFirestore(
   try {
     await updateDoc(doc(db, 'parishes', safeId), {
       config: sanitizeConfig(config),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateParishSeasonConfigInFirestore(
+  parishId: string,
+  seasonConfig: SeasonPlanConfig
+): Promise<void> {
+  const safeId = sanitizeDocId(parishId);
+  const path = `parishes/${safeId}`;
+  try {
+    await updateDoc(doc(db, 'parishes', safeId), {
+      seasonConfig: sanitizeSeasonConfig(seasonConfig),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -380,6 +445,7 @@ export async function updateStopInFirestore(
       priestId: clampInt(stop.priestId, 1, 4, 1),
       inBoundary: stop.inBoundary ?? true,
       included: stop.included !== false,
+      visitDate: cleanVisitDate(stop.visitDate),
       notes: cleanStr(stop.notes || '', 500),
       updatedAt: serverTimestamp(),
     });
@@ -391,7 +457,7 @@ export async function updateStopInFirestore(
 export async function batchUpdateStopFieldInFirestore(
   parishId: string,
   stops: VisitStop[],
-  mode: 'priestId' | 'inBoundary' | 'included'
+  mode: 'priestId' | 'inBoundary' | 'included' | 'visitDate' | 'schedule'
 ): Promise<void> {
   if (stops.length === 0) return;
   const safeParishId = sanitizeDocId(parishId);
@@ -409,6 +475,18 @@ export async function batchUpdateStopFieldInFirestore(
           });
         } else if (mode === 'included') {
           batch.update(ref, {
+            included: stop.included !== false,
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'visitDate') {
+          batch.update(ref, {
+            visitDate: cleanVisitDate(stop.visitDate),
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'schedule') {
+          batch.update(ref, {
+            visitDate: cleanVisitDate(stop.visitDate),
+            priestId: clampInt(stop.priestId, 1, 4, 1),
             included: stop.included !== false,
             updatedAt: serverTimestamp(),
           });

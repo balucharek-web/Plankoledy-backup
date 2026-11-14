@@ -278,6 +278,10 @@ export function useParishRouteOptimizer() {
       setRoutes(nextRoutes);
       setRouteObjects(nextRouteObjects);
       setIsComputing(false);
+      return {
+        routes: nextRoutes,
+        routeObjects: nextRouteObjects,
+      };
     },
     [routesLib, clearRoutes]
   );

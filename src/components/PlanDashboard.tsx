@@ -24,6 +24,7 @@ import {
   fetchNearbyParishesOsm,
 } from '../services/overpassStreets';
 import {
+  DayPlanSummary,
   LatLng,
   PRIEST_PALETTE,
   ParishCenter,
@@ -32,6 +33,7 @@ import {
   SavedParishRecord,
   VisitStop,
 } from '../types/parish';
+import { formatPolishDateChip } from '../utils/seasonScheduler';
 import {
   extractStreetName,
   formatDistance,
@@ -55,6 +57,8 @@ interface PlanDashboardProps {
   stops: VisitStop[];
   config: PlanConfig;
   routes: PriestRouteResult[];
+  plannedDays: DayPlanSummary[];
+  selectedDate: string | null;
   isSignedIn: boolean;
   userEmail: string | null;
   isComputing: boolean;
@@ -63,6 +67,7 @@ interface PlanDashboardProps {
   onSelectSavedParish: (parishId: string) => void;
   onNavigateSection: (section: WorkspaceSection) => void;
   onOpenMapWithMode: (mode: 'pan' | 'draw_boundary' | 'pick_street') => void;
+  onViewDayOnMap: (date: string) => void;
   onComputeRoutes: () => void;
 }
 
@@ -78,6 +83,8 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
   stops,
   config,
   routes,
+  plannedDays,
+  selectedDate,
   isSignedIn,
   userEmail,
   isComputing,
@@ -86,6 +93,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
   onSelectSavedParish,
   onNavigateSection,
   onOpenMapWithMode,
+  onViewDayOnMap,
   onComputeRoutes,
 }) => {
   const [gpsLoading, setGpsLoading] = useState(false);
@@ -419,16 +427,29 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             className="p-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-left transition-colors"
           >
             <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>W planie dziś</span>
+              <span>Okres kolędy</span>
               <MapPin className="w-3.5 h-3.5 text-amber-700" />
             </div>
             <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">
-              {activeStops.length}
+              {plannedDays.length > 0 ? (
+                <>
+                  {plannedDays.length}{' '}
+                  <span className="text-xs font-normal text-slate-500">
+                    {plannedDays.length === 1 ? 'dzień' : 'dni'}
+                  </span>
+                </>
+              ) : (
+                activeStops.length
+              )}
             </div>
             <div className="mt-0.5 text-[11px] text-slate-500 truncate tabular-nums">
-              {hasSavedStops
-                ? `z ${stops.length} zapisanych`
-                : 'Skonfiguruj ulice'}
+              {plannedDays.length > 0
+                ? `${formatPolishDateChip(plannedDays[0].date)} – ${formatPolishDateChip(
+                    plannedDays[plannedDays.length - 1].date
+                  )}`
+                : hasSavedStops
+                  ? `z ${stops.length} zapisanych`
+                  : 'Skonfiguruj ulice'}
             </div>
           </button>
 
@@ -537,10 +558,10 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             <Route className="w-4 h-4 text-amber-800 shrink-0" />
             <div className="min-w-0">
               <div className="text-xs font-semibold text-slate-900 truncate">
-                2. Układaj plan kolędy na zapamiętanych ulicach
+                2. Rozpisz okres kolędowy na dni i księży
               </div>
               <div className="text-[11px] text-slate-500 truncate">
-                Wybieraj ulice lub numery na dany dzień i dziel na księży
+                Automatyczny grafik całego okresu albo ręczne przypisanie ulic do dat
               </div>
             </div>
           </div>
@@ -577,18 +598,66 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             <CalendarCheck className="w-4 h-4 text-slate-500 shrink-0" />
             <div className="min-w-0">
               <div className="text-xs font-medium text-slate-900 truncate">
-                Harmonogram wizyt, druk i eksport CSV
+                Harmonogram całego okresu, druk i eksport CSV
               </div>
               <div className="text-[11px] text-slate-500 truncate">
-                {hasRoutes
-                  ? 'Gotowy plan godzinowy dla księży i parafian'
-                  : 'Dostępne po wyznaczeniu tras'}
+                {plannedDays.length > 0
+                  ? `${plannedDays.length} zaplanowanych dni · podgląd całości i każdego dnia`
+                  : hasRoutes
+                    ? 'Gotowy plan godzinowy dla księży i parafian'
+                    : 'Dostępne po rozpisaniu dni lub wyznaczeniu tras'}
               </div>
             </div>
           </div>
           <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
         </button>
       </section>
+
+      {/* Multi-day Season Schedule Preview */}
+      {plannedDays.length > 0 && (
+        <section className="p-4 sm:p-5 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-slate-700">
+              Harmonogram okresu ({plannedDays.length}{' '}
+              {plannedDays.length === 1 ? 'dzień' : 'dni'})
+            </h3>
+            <button
+              type="button"
+              onClick={() => onNavigateSection('schedule')}
+              className="text-xs font-medium text-amber-800 hover:underline"
+            >
+              Pełny podgląd →
+            </button>
+          </div>
+          <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl bg-white overflow-hidden">
+            {plannedDays.slice(0, 5).map((day) => (
+              <div
+                key={day.date}
+                className={`px-3 py-2.5 flex items-center justify-between gap-2 text-xs ${
+                  selectedDate === day.date ? 'bg-amber-50/70' : ''
+                }`}
+              >
+                <div className="min-w-0">
+                  <div className="font-semibold text-slate-900 tabular-nums">
+                    {formatPolishDateChip(day.date)} · {day.startTime}–
+                    {day.estimatedEndTime}
+                  </div>
+                  <div className="text-[11px] text-slate-500 truncate">
+                    {day.stops.length} domów · {day.streetNames.slice(0, 2).join(', ')}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onViewDayOnMap(day.date)}
+                  className="px-2.5 py-1.5 text-[11px] font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+                >
+                  Mapa
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Active plan summary */}
       {activeStops.length > 0 && (

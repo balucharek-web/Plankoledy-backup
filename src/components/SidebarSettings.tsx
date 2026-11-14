@@ -1,18 +1,33 @@
 import React from 'react';
-import { Car, Footprints, HelpCircle } from 'lucide-react';
-import { PRIEST_PALETTE, PlanConfig } from '../types/parish';
+import { Calendar, Car, Footprints, HelpCircle } from 'lucide-react';
+import {
+  PRIEST_PALETTE,
+  PlanConfig,
+  SeasonPlanConfig,
+} from '../types/parish';
+import {
+  WEEKDAY_OPTIONS,
+  parseWeekdaysMask,
+  toggleWeekdayInMask,
+} from '../utils/seasonScheduler';
 
 interface SidebarSettingsProps {
   config: PlanConfig;
+  seasonConfig: SeasonPlanConfig;
   onChangeConfig: (next: PlanConfig) => void;
+  onChangeSeasonConfig: (next: SeasonPlanConfig) => void;
   onOpenGuide: () => void;
 }
 
 export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
   config,
+  seasonConfig,
   onChangeConfig,
+  onChangeSeasonConfig,
   onOpenGuide,
 }) => {
+  const activeWeekdays = parseWeekdaysMask(seasonConfig.weekdaysMask);
+
   return (
     <div className="divide-y divide-slate-200">
       <section className="p-4 sm:p-5 space-y-5">
@@ -108,7 +123,7 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
               htmlFor="koleda-start-time"
               className="block text-xs font-medium text-slate-700 mb-1.5"
             >
-              Godzina rozpoczęcia
+              Domyślna godzina startu
             </label>
             <input
               id="koleda-start-time"
@@ -158,6 +173,134 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
           />
           <span>Uwzględnij powrót pod kościół po ostatniej wizycie</span>
         </label>
+      </section>
+
+      {/* Multi-day Season Schedule Parameters */}
+      <section className="p-4 sm:p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-amber-700" />
+          <h3 className="text-sm font-semibold text-slate-900">
+            Ramy czasowe całego okresu kolędy
+          </h3>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label
+              htmlFor="settings-season-start-date"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Data rozpoczęcia
+            </label>
+            <input
+              id="settings-season-start-date"
+              type="date"
+              value={seasonConfig.startDate}
+              onChange={(e) =>
+                onChangeSeasonConfig({
+                  ...seasonConfig,
+                  startDate: e.target.value,
+                })
+              }
+              className="w-full min-h-[42px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="settings-season-end-time"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Koniec dnia najpóźniej
+            </label>
+            <input
+              id="settings-season-end-time"
+              type="time"
+              value={seasonConfig.dailyEndTime}
+              onChange={(e) =>
+                onChangeSeasonConfig({
+                  ...seasonConfig,
+                  dailyEndTime: e.target.value,
+                })
+              }
+              className="w-full min-h-[42px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="settings-weekday-start"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Start (dni robocze)
+            </label>
+            <input
+              id="settings-weekday-start"
+              type="time"
+              value={seasonConfig.weekdayStartTime}
+              onChange={(e) =>
+                onChangeSeasonConfig({
+                  ...seasonConfig,
+                  weekdayStartTime: e.target.value,
+                })
+              }
+              className="w-full min-h-[42px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="settings-weekend-start"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Start (sobota / niedziela)
+            </label>
+            <input
+              id="settings-weekend-start"
+              type="time"
+              value={seasonConfig.weekendStartTime}
+              onChange={(e) =>
+                onChangeSeasonConfig({
+                  ...seasonConfig,
+                  weekendStartTime: e.target.value,
+                })
+              }
+              className="w-full min-h-[42px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+            />
+          </div>
+        </div>
+
+        <div>
+          <span className="block text-xs font-medium text-slate-700 mb-1.5">
+            Aktywne dni tygodnia
+          </span>
+          <div className="grid grid-cols-7 gap-1">
+            {WEEKDAY_OPTIONS.map((opt) => {
+              const checked = activeWeekdays.has(opt.dayIndex);
+              return (
+                <button
+                  key={opt.dayIndex}
+                  type="button"
+                  onClick={() =>
+                    onChangeSeasonConfig({
+                      ...seasonConfig,
+                      weekdaysMask: toggleWeekdayInMask(
+                        seasonConfig.weekdaysMask,
+                        opt.dayIndex
+                      ),
+                    })
+                  }
+                  aria-pressed={checked}
+                  title={opt.full}
+                  className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
+                    checked
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  {opt.short}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </section>
 
       <section className="p-4 sm:p-5">

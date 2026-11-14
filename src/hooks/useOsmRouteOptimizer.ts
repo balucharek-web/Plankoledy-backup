@@ -26,12 +26,17 @@ export function useOsmRouteOptimizer() {
       try {
         const nextRoutes = await computeOsmParishRoutes(parish, stops, config);
         setRoutes(nextRoutes);
+        return {
+          routes: nextRoutes,
+          routeObjects: [] as RoutePolylineEntry[],
+        };
       } catch (err) {
         setError(
           err instanceof Error
             ? err.message
             : 'Nie udało się wyznaczyć tras w trybie OpenStreetMap.'
         );
+        return undefined;
       } finally {
         setIsComputing(false);
       }

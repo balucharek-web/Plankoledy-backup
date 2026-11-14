@@ -31,6 +31,7 @@ export interface VisitStop {
   notes?: string;
   inBoundary?: boolean;
   included?: boolean;
+  visitDate?: string; // 'YYYY-MM-DD' or '' if unassigned
 }
 
 export interface ScheduledStopItem {
@@ -69,6 +70,28 @@ export interface PlanConfig {
   defaultVisitMinutes: number;
   travelMode: TravelModeOption;
   returnToParish: boolean;
+}
+
+export interface SeasonPlanConfig {
+  startDate: string; // YYYY-MM-DD
+  weekdayStartTime: string; // HH:MM
+  weekendStartTime: string; // HH:MM
+  dailyEndTime: string; // HH:MM
+  weekdaysMask: string; // comma-separated JS day indices 0..6 (e.g. '1,2,3,4,5,6')
+}
+
+export interface DayPlanSummary {
+  date: string; // YYYY-MM-DD
+  weekdayLabel: string;
+  shortDateLabel: string;
+  startTime: string;
+  estimatedEndTime: string;
+  stops: VisitStop[];
+  streetNames: string[];
+  estimatedRoutes: PriestRouteResult[];
+  totalDistanceMeters: number;
+  totalVisitMinutes: number;
+  totalTravelMillis: number;
 }
 
 export const PRIEST_PALETTE: PriestProfile[] = [
@@ -118,6 +141,8 @@ export interface SavedParishRecord {
   parish: ParishCenter;
   boundary: LatLng[];
   config: PlanConfig;
+  seasonConfig?: SeasonPlanConfig;
   updatedAtMs: number;
 }
+
 
