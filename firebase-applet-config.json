@@ -1,12 +1,12 @@
 {
-  "projectId": "gen-lang-client-0912555946",
-  "appId": "1:558255772316:web:dfaecaa9fa64460b8a1359",
-  "apiKey": "AIzaSyC5_Iuvx7pnEL9sy1QGcjbznFaCVCTg03E",
-  "authDomain": "gen-lang-client-0912555946.firebaseapp.com",
+  "projectId": "plankoledy",
+  "appId": "1:931794729117:web:04151203218a072becbc74",
+  "apiKey": "AIzaSyBUuPkNrp3FHJ_stJmGRMhbavymSQ8xiAY",
+  "authDomain": "plankoledy.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-planerkoldy-63016dc9-c6f7-49c0-b43d-147104a7ca62",
-  "storageBucket": "gen-lang-client-0912555946.firebasestorage.app",
-  "messagingSenderId": "558255772316",
+  "storageBucket": "plankoledy.firebasestorage.app",
+  "messagingSenderId": "931794729117",
   "measurementId": "",
-  "oAuthClientId": "558255772316-sve939f01ii4o96nunurnnsufi46mi16.apps.googleusercontent.com",
+  "oAuthClientId": "931794729117-i7gjm9u61ml7c2e20mem8kb7m9og6p41.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }
