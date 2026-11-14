@@ -17,7 +17,7 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="guide-title"
-      className="fixed inset-0 z-50 bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
+      className="fixed inset-0 z-[1200] bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
     >
       <div className="bg-white border border-slate-200 rounded-2xl shadow-xl max-w-2xl w-full max-h-[92dvh] sm:max-h-[85vh] flex flex-col overflow-hidden">
         <div className="px-4 py-3.5 sm:px-6 sm:py-4 border-b border-slate-200 flex items-center justify-between gap-2">

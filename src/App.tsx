@@ -3,18 +3,26 @@ import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
   CalendarCheck,
+  Church,
   HelpCircle,
+  LayoutDashboard,
   LogIn,
   LogOut,
   Map as MapIcon,
+  MapPin,
+  Menu,
+  Route,
   SlidersHorizontal,
+  X,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
 import { OsmParishMap } from './components/OsmParishMap';
 import { ParishMap, RoutePolylineEntry } from './components/ParishMap';
+import { PlanDashboard, WorkspaceSection } from './components/PlanDashboard';
 import { SelectedPlaceData } from './components/PlaceSearchInput';
 import { PrintScheduleSheet } from './components/PrintScheduleSheet';
 import { SidebarRoutes } from './components/SidebarRoutes';
+import { SidebarSettings } from './components/SidebarSettings';
 import { SidebarSetup } from './components/SidebarSetup';
 import { SidebarStops } from './components/SidebarStops';
 import { MapEngineProvider } from './contexts/MapEngineContext';
@@ -64,11 +72,18 @@ import {
   scaleBoundaryFromCenter,
 } from './utils/spatial';
 
-type SidebarTab = 'setup' | 'stops' | 'routes';
-type MainView = 'workspace' | 'schedule';
 type MobilePane = 'panel' | 'map';
 
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+
+const SECTION_TITLES: Record<WorkspaceSection, string> = {
+  overview: 'Plan kolędy',
+  parish: 'Parafie i teren',
+  stops: 'Domy i ulice',
+  routes: 'Trasy księży',
+  schedule: 'Harmonogram',
+  settings: 'Ustawienia kolędy',
+};
 
 interface RouteOptimizerHandle {
   routes: PriestRouteResult[];
@@ -113,9 +128,10 @@ function ParishPlannerWorkspace({
   const [config, setConfig] = useState<PlanConfig>(DEFAULT_PLAN_CONFIG);
   const [stops, setStops] = useState<VisitStop[]>([]);
 
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('setup');
-  const [mainView, setMainView] = useState<MainView>('workspace');
+  const [activeSection, setActiveSection] =
+    useState<WorkspaceSection>('overview');
   const [mobilePane, setMobilePane] = useState<MobilePane>('panel');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [interactionMode, setInteractionMode] =
     useState<MapInteractionMode>('pan');
   const [highlightedStopId, setHighlightedStopId] = useState<string | null>(
@@ -131,6 +147,12 @@ function ParishPlannerWorkspace({
   activeParishIdRef.current = activeParishId;
   const stopsRef = useRef<VisitStop[]>(stops);
   stopsRef.current = stops;
+
+  const navigateToSection = useCallback((section: WorkspaceSection) => {
+    setActiveSection(section);
+    setMobilePane('panel');
+    setMobileMenuOpen(false);
+  }, []);
 
   const showStreetFeedback = useCallback(
     (feedback: StreetPickFeedback, autoHideMs = 6000) => {
@@ -179,7 +201,6 @@ function ParishPlannerWorkspace({
     let unsubscribeParishes: (() => void) | undefined;
 
     void (async () => {
-      // If user already picked a parish right before signing in, save it to their account
       if (parish && !activeParishIdRef.current) {
         const newId = makeParishDocId(parish, authUser.uid);
         const rec: SavedParishRecord = {
@@ -262,7 +283,6 @@ function ParishPlannerWorkspace({
       clearRoutes();
 
       if (!authUser) {
-        // Ephemeral session only when signed out (not saved/remembered)
         setActiveParishId(null);
         setParish(nextParish);
         setBoundary([]);
@@ -566,7 +586,6 @@ function ParishPlannerWorkspace({
     ]
   );
 
-  // Clicking a house on the map resolves & saves it as its real street/house address
   const handleMapAddStop = useCallback(
     (location: LatLng) => {
       const currentId = activeParishIdRef.current;
@@ -630,7 +649,6 @@ function ParishPlannerWorkspace({
     ]
   );
 
-  // Clicking any street on the map detects the street name & imports all its addressed houses
   const handleMapPickStreet = useCallback(
     async (location: LatLng) => {
       showStreetFeedback(
@@ -796,106 +814,80 @@ function ParishPlannerWorkspace({
   const handleComputeRoutes = useCallback(async () => {
     if (!parish || stops.length === 0) return;
     setInteractionMode('pan');
-    setMainView('workspace');
-    setSidebarTab('routes');
+    setActiveSection('routes');
     setMobilePane('panel');
     await computeAllRoutes(parish, stops, config);
   }, [parish, stops, config, computeAllRoutes]);
 
+  const navItems: Array<{
+    id: WorkspaceSection;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    count?: number;
+  }> = [
+    { id: 'overview', label: 'Plan kolędy', icon: LayoutDashboard },
+    { id: 'parish', label: 'Parafie i teren', icon: Church },
+    {
+      id: 'stops',
+      label: 'Domy i ulice',
+      icon: MapPin,
+      count: stops.length > 0 ? stops.length : undefined,
+    },
+    {
+      id: 'routes',
+      label: 'Trasy księży',
+      icon: Route,
+      count: routes.length > 0 ? routes.length : undefined,
+    },
+    { id: 'schedule', label: 'Harmonogram', icon: CalendarCheck },
+    { id: 'settings', label: 'Ustawienia planu', icon: SlidersHorizontal },
+  ];
+
+  const isScheduleView =
+    activeSection === 'schedule' && mobilePane === 'panel';
+
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0 bg-slate-50">
       {/* Three-Zone Top Bar */}
-      <header className="no-print h-14 px-3 sm:px-6 bg-white border-b border-slate-200 flex items-center justify-between gap-2 sm:gap-6 shrink-0">
-        <button
-          type="button"
-          onClick={() => setMainView('workspace')}
-          className="text-sm sm:text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 text-left"
-        >
-          Planer Kolędy
-        </button>
-
-        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-600">
+      <header className="no-print h-14 px-3 sm:px-5 bg-white border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
-            onClick={() => {
-              setMainView('workspace');
-              setSidebarTab('setup');
-            }}
-            className={`whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 ${
-              mainView === 'workspace' && sidebarTab === 'setup'
-                ? 'text-slate-900 underline underline-offset-8 decoration-amber-700 decoration-2'
-                : ''
-            }`}
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="Otwórz menu"
+            className="lg:hidden min-w-[40px] min-h-[40px] -ml-1 inline-flex items-center justify-center rounded-xl text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
           >
-            Parafia i teren
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMainView('workspace');
-              setSidebarTab('stops');
-            }}
-            className={`whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 ${
-              mainView === 'workspace' && sidebarTab === 'stops'
-                ? 'text-slate-900 underline underline-offset-8 decoration-amber-700 decoration-2'
-                : ''
-            }`}
-          >
-            Adresy domów
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMainView('workspace');
-              setSidebarTab('routes');
-            }}
-            className={`whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 ${
-              mainView === 'workspace' && sidebarTab === 'routes'
-                ? 'text-slate-900 underline underline-offset-8 decoration-amber-700 decoration-2'
-                : ''
-            }`}
-          >
-            Trasy księży
-          </button>
-          <button
-            type="button"
-            onClick={() => setMainView('schedule')}
-            className={`whitespace-nowrap shrink-0 transition-colors hover:text-slate-900 ${
-              mainView === 'schedule'
-                ? 'text-slate-900 underline underline-offset-8 decoration-amber-700 decoration-2'
-                : ''
-            }`}
-          >
-            Harmonogram
-          </button>
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            className="whitespace-nowrap shrink-0 transition-colors hover:text-slate-900"
-          >
-            Jak to działa
-          </button>
-        </nav>
-
-        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            aria-label="Jak to działa"
-            className="lg:hidden p-2 text-slate-500 hover:text-slate-900 rounded-lg"
-          >
-            <HelpCircle className="w-4 h-4" />
+            <Menu className="w-5 h-5" />
           </button>
 
+          <button
+            type="button"
+            onClick={() => navigateToSection('overview')}
+            className="text-sm sm:text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 text-left"
+          >
+            Planer Kolędy
+          </button>
+
+          {parish && (
+            <span className="hidden md:inline-flex items-center gap-2 text-xs text-slate-500 min-w-0">
+              <span aria-hidden="true">/</span>
+              <span className="truncate max-w-[260px] text-slate-700 font-medium">
+                {parish.name}
+              </span>
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
           {authUser ? (
             <button
               type="button"
               onClick={onSignOutGoogle}
               title={`Zalogowano: ${authUser.email ?? ''}`}
-              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="min-h-[38px] px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
             >
               <LogOut className="w-3.5 h-3.5 text-slate-500" />
-              <span className="hidden sm:inline max-w-[110px] truncate">
+              <span className="hidden sm:inline max-w-[120px] truncate">
                 {authUser.displayName?.split(' ')[0] || 'Konto'}
               </span>
               <span className="hidden sm:inline text-slate-400">·</span>
@@ -905,7 +897,7 @@ function ParishPlannerWorkspace({
             <button
               type="button"
               onClick={onSignInGoogle}
-              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="min-h-[38px] px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
             >
               <LogIn className="w-3.5 h-3.5 text-amber-700" />
               <span>Zaloguj</span>
@@ -917,268 +909,509 @@ function ParishPlannerWorkspace({
             type="button"
             disabled={!parish || stops.length === 0 || isComputing}
             onClick={handleComputeRoutes}
-            className="px-3 sm:px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition-colors whitespace-nowrap shrink-0"
+            className="min-h-[38px] px-3 sm:px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition-colors whitespace-nowrap shrink-0"
           >
             {isComputing ? 'Liczenie...' : 'Wyznacz trasy'}
           </button>
         </div>
       </header>
 
-      {/* Mobile View Switcher (< lg): Panel / Mapa / Harmonogram */}
-      <div className="no-print lg:hidden bg-white border-b border-slate-200 px-3 py-1.5 grid grid-cols-3 gap-1 shrink-0">
-        <button
-          type="button"
-          onClick={() => {
-            setMainView('workspace');
-            setMobilePane('panel');
-          }}
-          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
-            mainView === 'workspace' && mobilePane === 'panel'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
+      {/* Main App Body: Desktop Left Menu Rail + Panel + Map */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {/* Desktop App Sidebar Menu */}
+        <nav
+          aria-label="Menu główne"
+          className="no-print hidden lg:flex w-[224px] bg-slate-950 text-slate-300 flex-col justify-between shrink-0 border-r border-slate-800"
         >
-          <SlidersHorizontal className="w-3.5 h-3.5" />
-          Panel
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMainView('workspace');
-            setMobilePane('map');
-          }}
-          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
-            mainView === 'workspace' && mobilePane === 'map'
-              ? 'bg-amber-700 text-white'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <MapIcon className="w-3.5 h-3.5" />
-          Mapa
-        </button>
-        <button
-          type="button"
-          onClick={() => setMainView('schedule')}
-          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
-            mainView === 'schedule'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <CalendarCheck className="w-3.5 h-3.5" />
-          Harmonogram
-        </button>
-      </div>
+          <div className="p-3 space-y-1">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeSection === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => navigateToSection(item.id)}
+                  className={`w-full min-h-[42px] px-3 py-2 rounded-xl text-xs font-medium flex items-center justify-between gap-2 transition-colors whitespace-nowrap ${
+                    isActive
+                      ? 'bg-amber-700 text-white'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2.5 min-w-0">
+                    <Icon
+                      className={`w-4 h-4 shrink-0 ${
+                        isActive ? 'text-white' : 'text-slate-400'
+                      }`}
+                    />
+                    <span className="truncate">{item.label}</span>
+                  </span>
+                  {item.count !== undefined && (
+                    <span
+                      className={`font-mono tabular-nums text-[11px] ${
+                        isActive ? 'text-amber-100' : 'text-slate-400'
+                      }`}
+                    >
+                      {item.count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
 
-      {mainView === 'schedule' ? (
-        <main className="flex-1 overflow-y-auto bg-slate-50">
-          <PrintScheduleSheet
-            parish={parish}
-            config={config}
-            routes={routes}
-            onBackToMap={() => {
-              setMainView('workspace');
-              setMobilePane('map');
-            }}
-          />
-        </main>
-      ) : (
-        <main className="relative flex-1 min-h-0 flex flex-col lg:flex-row">
-          <aside
-            className={`no-print w-full lg:w-[400px] xl:w-[420px] bg-white lg:border-r border-slate-200 flex-col min-h-0 shrink-0 ${
-              mobilePane === 'panel'
-                ? 'flex absolute inset-0 z-20 lg:static'
-                : 'hidden lg:flex'
-            }`}
-          >
-            <div className="p-2 border-b border-slate-200 bg-slate-50/70 grid grid-cols-3 gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={() => setSidebarTab('setup')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                  sidebarTab === 'setup'
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                1. Parafia
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidebarTab('stops')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap tabular-nums ${
-                  sidebarTab === 'stops'
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                2. Domy ({stops.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidebarTab('routes')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap tabular-nums ${
-                  sidebarTab === 'routes'
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                3. Trasy ({routes.length})
-              </button>
+          <div className="p-3 border-t border-slate-800/80 space-y-2">
+            <button
+              type="button"
+              onClick={() => setGuideOpen(true)}
+              className="w-full min-h-[38px] px-3 py-2 rounded-xl text-xs font-medium text-slate-300 hover:bg-white/10 hover:text-white flex items-center gap-2.5 transition-colors"
+            >
+              <HelpCircle className="w-4 h-4 text-slate-400 shrink-0" />
+              <span>Jak to działa</span>
+            </button>
+            <div className="px-3 py-1.5 text-[11px] text-slate-400 truncate">
+              {authUser
+                ? authUser.email || 'Konto Google'
+                : 'Tryb bez logowania'}
             </div>
+          </div>
+        </nav>
 
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              {sidebarTab === 'setup' && (
-                <SidebarSetup
-                  parish={parish}
-                  activeParishId={activeParishId}
-                  savedParishes={savedParishes}
-                  boundary={boundary}
-                  config={config}
-                  interactionMode={interactionMode}
-                  isSignedIn={Boolean(authUser)}
-                  userEmail={authUser?.email ?? null}
-                  onSignInGoogle={onSignInGoogle}
-                  onSelectParish={handleSelectParish}
-                  onSelectSavedParish={handleSelectSavedParish}
-                  onDeleteSavedParish={handleDeleteSavedParish}
-                  onCreatePresetBoundary={handleCreatePresetBoundary}
-                  onScaleBoundary={handleScaleBoundary}
-                  onToggleDrawBoundary={() => {
-                    setInteractionMode((m) => {
-                      const next = m === 'draw_boundary' ? 'pan' : 'draw_boundary';
-                      if (next === 'draw_boundary') setMobilePane('map');
-                      return next;
-                    });
-                  }}
-                  onClearBoundary={handleClearBoundary}
-                  onChangeConfig={handleChangeConfig}
-                  onNextStep={() => setSidebarTab('stops')}
-                />
-              )}
+        {/* Active Workspace or Schedule */}
+        {isScheduleView ? (
+          <main className="flex-1 min-h-0 overflow-y-auto bg-slate-50">
+            <PrintScheduleSheet
+              parish={parish}
+              config={config}
+              routes={routes}
+              onBackToMap={() => {
+                setActiveSection('overview');
+                setMobilePane('map');
+              }}
+            />
+          </main>
+        ) : (
+          <main className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+            {/* Left Detail Panel (hidden on mobile when Map pane is active) */}
+            <aside
+              className={`no-print w-full lg:w-[400px] xl:w-[430px] bg-white lg:border-r border-slate-200 flex-col min-h-0 shrink-0 ${
+                mobilePane === 'panel' ? 'flex flex-1 lg:flex-none' : 'hidden lg:flex'
+              }`}
+            >
+              {/* Mobile section sub-header */}
+              <div className="lg:hidden px-4 py-2.5 border-b border-slate-200 bg-slate-50/80 flex items-center justify-between gap-2 shrink-0">
+                <span className="text-xs font-semibold text-slate-800 truncate">
+                  {SECTION_TITLES[activeSection]}
+                </span>
+                {parish && (
+                  <button
+                    type="button"
+                    onClick={() => setMobilePane('map')}
+                    className="text-xs font-medium text-amber-800 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                  >
+                    <MapIcon className="w-3.5 h-3.5" />
+                    Mapa
+                  </button>
+                )}
+              </div>
 
-              {sidebarTab === 'stops' && (
-                <SidebarStops
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                {activeSection === 'overview' && (
+                  <PlanDashboard
+                    parish={parish}
+                    activeParishId={activeParishId}
+                    savedParishes={savedParishes}
+                    boundary={boundary}
+                    stops={stops}
+                    config={config}
+                    routes={routes}
+                    isSignedIn={Boolean(authUser)}
+                    userEmail={authUser?.email ?? null}
+                    isComputing={isComputing}
+                    onSignInGoogle={onSignInGoogle}
+                    onSelectParish={handleSelectParish}
+                    onSelectSavedParish={handleSelectSavedParish}
+                    onNavigateSection={navigateToSection}
+                    onOpenMapWithMode={(mode) => {
+                      setInteractionMode(mode);
+                      setMobilePane('map');
+                    }}
+                    onComputeRoutes={handleComputeRoutes}
+                  />
+                )}
+
+                {activeSection === 'parish' && (
+                  <SidebarSetup
+                    parish={parish}
+                    activeParishId={activeParishId}
+                    savedParishes={savedParishes}
+                    boundary={boundary}
+                    interactionMode={interactionMode}
+                    isSignedIn={Boolean(authUser)}
+                    userEmail={authUser?.email ?? null}
+                    onSignInGoogle={onSignInGoogle}
+                    onSelectParish={handleSelectParish}
+                    onSelectSavedParish={handleSelectSavedParish}
+                    onDeleteSavedParish={handleDeleteSavedParish}
+                    onCreatePresetBoundary={handleCreatePresetBoundary}
+                    onScaleBoundary={handleScaleBoundary}
+                    onToggleDrawBoundary={() => {
+                      setInteractionMode((m) => {
+                        const next =
+                          m === 'draw_boundary' ? 'pan' : 'draw_boundary';
+                        if (next === 'draw_boundary') setMobilePane('map');
+                        return next;
+                      });
+                    }}
+                    onClearBoundary={handleClearBoundary}
+                    onViewMap={() => setMobilePane('map')}
+                    onNextStep={() => navigateToSection('stops')}
+                  />
+                )}
+
+                {activeSection === 'stops' && (
+                  <SidebarStops
+                    parish={parish}
+                    boundary={boundary}
+                    stops={stops}
+                    config={config}
+                    interactionMode={interactionMode}
+                    streetPickFeedback={streetPickFeedback}
+                    onDismissStreetFeedback={() => setStreetPickFeedback(null)}
+                    onAddPlaceStop={handleAddPlaceStop}
+                    onBatchAddStops={handleBatchAddStops}
+                    onTogglePickStreetMode={() => {
+                      setInteractionMode((m) => {
+                        const next =
+                          m === 'pick_street' ? 'pan' : 'pick_street';
+                        if (next === 'pick_street') setMobilePane('map');
+                        return next;
+                      });
+                    }}
+                    onToggleMapAddMode={() => {
+                      setInteractionMode((m) => {
+                        const next = m === 'add_stop' ? 'pan' : 'add_stop';
+                        if (next === 'add_stop') setMobilePane('map');
+                        return next;
+                      });
+                    }}
+                    onUpdateStop={handleUpdateStop}
+                    onDeleteStop={handleDeleteStop}
+                    onClearStops={handleClearStops}
+                    onAutoPartition={handleAutoPartition}
+                    onSelectStop={(id) => {
+                      setHighlightedStopId(id);
+                      setMobilePane('map');
+                    }}
+                    onComputeRoutes={handleComputeRoutes}
+                    isComputing={isComputing}
+                  />
+                )}
+
+                {activeSection === 'routes' && (
+                  <SidebarRoutes
+                    parish={parish}
+                    config={config}
+                    routes={routes}
+                    isComputing={isComputing}
+                    globalError={routeError}
+                    onRecompute={handleComputeRoutes}
+                    onSelectStop={(id) => {
+                      setHighlightedStopId(id);
+                      setMobilePane('map');
+                    }}
+                  />
+                )}
+
+                {activeSection === 'settings' && (
+                  <SidebarSettings
+                    config={config}
+                    onChangeConfig={handleChangeConfig}
+                    onOpenGuide={() => setGuideOpen(true)}
+                  />
+                )}
+              </div>
+            </aside>
+
+            {/* Right Interactive Map (completely hidden on mobile when viewing panel so nothing overlaps) */}
+            <section
+              className={`flex-1 min-h-0 relative h-full w-full ${
+                mobilePane === 'map' ? 'block' : 'hidden lg:block'
+              }`}
+            >
+              {useGoogleMaps ? (
+                <ParishMap
                   parish={parish}
                   boundary={boundary}
                   stops={stops}
-                  config={config}
+                  routes={routes}
+                  routeObjects={routeObjects}
                   interactionMode={interactionMode}
+                  highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
                   onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                  onAddPlaceStop={handleAddPlaceStop}
-                  onBatchAddStops={handleBatchAddStops}
-                  onTogglePickStreetMode={() => {
-                    setInteractionMode((m) => {
-                      const next = m === 'pick_street' ? 'pan' : 'pick_street';
-                      if (next === 'pick_street') setMobilePane('map');
-                      return next;
-                    });
-                  }}
-                  onToggleMapAddMode={() => {
-                    setInteractionMode((m) => {
-                      const next = m === 'add_stop' ? 'pan' : 'add_stop';
-                      if (next === 'add_stop') setMobilePane('map');
-                      return next;
-                    });
-                  }}
-                  onUpdateStop={handleUpdateStop}
+                  onSetInteractionMode={setInteractionMode}
+                  onCreatePresetBoundary={handleCreatePresetBoundary}
+                  onScaleBoundary={handleScaleBoundary}
+                  onClearBoundary={handleClearBoundary}
+                  onBoundaryComplete={handleBoundaryComplete}
+                  onBoundaryUpdate={(pts) =>
+                    updateBoundaryAndRecheckStops(pts, true)
+                  }
+                  onCancelInteraction={() => setInteractionMode('pan')}
+                  onMapAddStop={handleMapAddStop}
+                  onMapPickStreet={handleMapPickStreet}
+                  onSelectStop={setHighlightedStopId}
                   onDeleteStop={handleDeleteStop}
-                  onClearStops={handleClearStops}
-                  onAutoPartition={handleAutoPartition}
-                  onSelectStop={(id) => {
-                    setHighlightedStopId(id);
-                    setMobilePane('map');
-                  }}
-                  onComputeRoutes={handleComputeRoutes}
-                  isComputing={isComputing}
                 />
-              )}
-
-              {sidebarTab === 'routes' && (
-                <SidebarRoutes
+              ) : (
+                <OsmParishMap
                   parish={parish}
-                  config={config}
+                  boundary={boundary}
+                  stops={stops}
                   routes={routes}
-                  isComputing={isComputing}
-                  globalError={routeError}
-                  onRecompute={handleComputeRoutes}
-                  onSelectStop={(id) => {
-                    setHighlightedStopId(id);
-                    setMobilePane('map');
-                  }}
+                  interactionMode={interactionMode}
+                  highlightedStopId={highlightedStopId}
+                  streetPickFeedback={streetPickFeedback}
+                  onDismissStreetFeedback={() => setStreetPickFeedback(null)}
+                  onSetInteractionMode={setInteractionMode}
+                  onCreatePresetBoundary={handleCreatePresetBoundary}
+                  onScaleBoundary={handleScaleBoundary}
+                  onClearBoundary={handleClearBoundary}
+                  onBoundaryComplete={handleBoundaryComplete}
+                  onBoundaryUpdate={(pts) =>
+                    updateBoundaryAndRecheckStops(pts, true)
+                  }
+                  onCancelInteraction={() => setInteractionMode('pan')}
+                  onMapAddStop={handleMapAddStop}
+                  onMapPickStreet={handleMapPickStreet}
+                  onSelectStop={setHighlightedStopId}
+                  onDeleteStop={handleDeleteStop}
                 />
               )}
+
+              {stops.length > 0 && (
+                <div className="no-print absolute top-3 right-3 sm:top-auto sm:right-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
+                  {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
+                    <span key={p.id} className="inline-flex items-center gap-1.5">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full"
+                        style={{ backgroundColor: p.color }}
+                      />
+                      Ks. {p.id}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </section>
+          </main>
+        )}
+      </div>
+
+      {/* Mobile Thumb-Zone Bottom Tab Bar (< lg) */}
+      <nav
+        aria-label="Nawigacja mobilna"
+        className="no-print lg:hidden shrink-0 bg-white border-t border-slate-200 grid grid-cols-5 h-16 px-1"
+      >
+        <button
+          type="button"
+          onClick={() => navigateToSection('overview')}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'panel' && activeSection === 'overview'
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <LayoutDashboard className="w-5 h-5" />
+          <span>Plan</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            if (activeSection === 'schedule') setActiveSection('overview');
+            setMobilePane('map');
+          }}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'map'
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <MapIcon className="w-5 h-5" />
+          <span>Mapa</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigateToSection('stops')}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'panel' && activeSection === 'stops'
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <MapPin className="w-5 h-5" />
+          <span className="tabular-nums">
+            Domy{stops.length > 0 ? ` (${stops.length})` : ''}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigateToSection('routes')}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'panel' && activeSection === 'routes'
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <Route className="w-5 h-5" />
+          <span className="tabular-nums">
+            Trasy{routes.length > 0 ? ` (${routes.length})` : ''}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMobileMenuOpen(true)}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'panel' &&
+            (activeSection === 'parish' ||
+              activeSection === 'settings' ||
+              activeSection === 'schedule')
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <Menu className="w-5 h-5" />
+          <span>Menu</span>
+        </button>
+      </nav>
+
+      {/* Mobile Slide-Over Menu Drawer */}
+      {mobileMenuOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Menu nawigacji"
+          className="no-print lg:hidden fixed inset-0 z-[1200] flex"
+        >
+          <div
+            className="fixed inset-0 bg-slate-950/50 backdrop-blur-xs"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+          <div className="relative z-10 w-[290px] max-w-[85vw] bg-white h-full shadow-2xl flex flex-col">
+            <div className="h-14 px-4 border-b border-slate-200 flex items-center justify-between shrink-0">
+              <span className="text-base font-bold text-slate-900">
+                Planer Kolędy
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(false)}
+                aria-label="Zamknij menu"
+                className="min-w-[40px] min-h-[40px] inline-flex items-center justify-center rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-          </aside>
 
-          <section className="flex-1 min-h-0 relative h-full w-full">
-            {useGoogleMaps ? (
-              <ParishMap
-                parish={parish}
-                boundary={boundary}
-                stops={stops}
-                routes={routes}
-                routeObjects={routeObjects}
-                interactionMode={interactionMode}
-                highlightedStopId={highlightedStopId}
-                streetPickFeedback={streetPickFeedback}
-                onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                onSetInteractionMode={setInteractionMode}
-                onCreatePresetBoundary={handleCreatePresetBoundary}
-                onScaleBoundary={handleScaleBoundary}
-                onClearBoundary={handleClearBoundary}
-                onBoundaryComplete={handleBoundaryComplete}
-                onBoundaryUpdate={(pts) =>
-                  updateBoundaryAndRecheckStops(pts, true)
-                }
-                onCancelInteraction={() => setInteractionMode('pan')}
-                onMapAddStop={handleMapAddStop}
-                onMapPickStreet={handleMapPickStreet}
-                onSelectStop={setHighlightedStopId}
-                onDeleteStop={handleDeleteStop}
-              />
-            ) : (
-              <OsmParishMap
-                parish={parish}
-                boundary={boundary}
-                stops={stops}
-                routes={routes}
-                interactionMode={interactionMode}
-                highlightedStopId={highlightedStopId}
-                streetPickFeedback={streetPickFeedback}
-                onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                onSetInteractionMode={setInteractionMode}
-                onCreatePresetBoundary={handleCreatePresetBoundary}
-                onScaleBoundary={handleScaleBoundary}
-                onClearBoundary={handleClearBoundary}
-                onBoundaryComplete={handleBoundaryComplete}
-                onBoundaryUpdate={(pts) =>
-                  updateBoundaryAndRecheckStops(pts, true)
-                }
-                onCancelInteraction={() => setInteractionMode('pan')}
-                onMapAddStop={handleMapAddStop}
-                onMapPickStreet={handleMapPickStreet}
-                onSelectStop={setHighlightedStopId}
-                onDeleteStop={handleDeleteStop}
-              />
-            )}
-
-            {stops.length > 0 && (
-              <div className="no-print absolute top-3 left-3 sm:top-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
-                {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
-                  <span key={p.id} className="inline-flex items-center gap-1.5">
-                    <span
-                      className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: p.color }}
-                    />
-                    Ks. {p.id}
-                  </span>
-                ))}
+            {parish && (
+              <div className="px-4 py-3 bg-slate-50 border-b border-slate-200">
+                <div className="text-[11px] font-medium text-amber-800">
+                  Aktywna parafia
+                </div>
+                <div className="text-xs font-semibold text-slate-900 truncate mt-0.5">
+                  {parish.name}
+                </div>
+                <div className="text-[11px] text-slate-500 truncate">
+                  {parish.address}
+                </div>
               </div>
             )}
-          </section>
-        </main>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-1">
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const isActive =
+                  mobilePane === 'panel' && activeSection === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => navigateToSection(item.id)}
+                    className={`w-full min-h-[46px] px-3.5 py-2.5 rounded-xl text-sm font-medium flex items-center justify-between gap-2 transition-colors ${
+                      isActive
+                        ? 'bg-amber-50 text-amber-900 border border-amber-200'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-3 min-w-0">
+                      <Icon
+                        className={`w-4 h-4 shrink-0 ${
+                          isActive ? 'text-amber-700' : 'text-slate-500'
+                        }`}
+                      />
+                      <span className="truncate">{item.label}</span>
+                    </span>
+                    {item.count !== undefined && (
+                      <span className="font-mono tabular-nums text-xs text-slate-500">
+                        {item.count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+
+              <div className="pt-2 mt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setGuideOpen(true);
+                  }}
+                  className="w-full min-h-[46px] px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-100 flex items-center gap-3 transition-colors"
+                >
+                  <HelpCircle className="w-4 h-4 text-slate-500 shrink-0" />
+                  <span>Jak to działa</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-slate-200 bg-slate-50 space-y-2 shrink-0">
+              {authUser ? (
+                <>
+                  <div className="text-xs text-slate-600 truncate">
+                    Konto: <strong className="text-slate-900">{authUser.email}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      onSignOutGoogle();
+                    }}
+                    className="w-full min-h-[42px] px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl inline-flex items-center justify-center gap-2"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Wyloguj się
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onSignInGoogle();
+                  }}
+                  className="w-full min-h-[42px] px-3 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl inline-flex items-center justify-center gap-2"
+                >
+                  <LogIn className="w-3.5 h-3.5 text-amber-400" />
+                  Zaloguj Google, aby zapisywać parafie
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       <ArchitectureGuideModal

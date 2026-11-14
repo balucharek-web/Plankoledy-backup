@@ -165,7 +165,7 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="osm-modal-title"
-      className="fixed inset-0 z-50 bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
+      className="fixed inset-0 z-[1200] bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
     >
       <div className="bg-white border border-slate-200 rounded-xl shadow-xl max-w-2xl w-full max-h-[92dvh] sm:max-h-[88vh] flex flex-col overflow-hidden">
         {/* Header */}
