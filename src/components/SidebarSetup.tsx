@@ -1,16 +1,21 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  ArrowRight,
   CheckCircle2,
   Church,
   Cloud,
+  Layers,
   Loader2,
   LocateFixed,
   LogIn,
   Map as MapIcon,
   MapPin,
+  MapPinPlus,
   Maximize2,
   Minimize2,
   Pentagon,
+  Route,
+  ScanSearch,
   Trash2,
   X,
 } from 'lucide-react';
@@ -23,7 +28,11 @@ import {
   MapInteractionMode,
   ParishCenter,
   SavedParishRecord,
+  StreetPickFeedback,
+  VisitStop,
 } from '../types/parish';
+import { extractStreetName } from '../utils/spatial';
+import { OsmStreetFetcherModal } from './OsmStreetFetcherModal';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
 
 interface SidebarSetupProps {
@@ -31,9 +40,12 @@ interface SidebarSetupProps {
   activeParishId: string | null;
   savedParishes: SavedParishRecord[];
   boundary: LatLng[];
+  stops: VisitStop[];
   interactionMode: MapInteractionMode;
+  streetPickFeedback: StreetPickFeedback | null;
   isSignedIn: boolean;
   userEmail: string | null;
+  onDismissStreetFeedback: () => void;
   onSignInGoogle: () => void;
   onSelectParish: (place: SelectedPlaceData) => void;
   onSelectSavedParish: (parishId: string) => void;
@@ -42,9 +54,16 @@ interface SidebarSetupProps {
   onScaleBoundary: (factor: number) => void;
   onToggleDrawBoundary: () => void;
   onClearBoundary: () => void;
+  onTogglePickStreetMode: () => void;
+  onToggleMapAddMode: () => void;
+  onAddPlaceStop: (place: SelectedPlaceData) => void;
+  onBatchAddStops: (places: SelectedPlaceData[]) => void;
+  onDeleteStreetStops: (stopIds: string[]) => void;
   onViewMap: () => void;
   onNextStep: () => void;
 }
+
+type TerritoryTab = 'area' | 'streets';
 
 function formatShortDistance(meters: number): string {
   if (meters < 1000) return `${meters} m`;
@@ -56,9 +75,12 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   activeParishId,
   savedParishes,
   boundary,
+  stops,
   interactionMode,
+  streetPickFeedback,
   isSignedIn,
   userEmail,
+  onDismissStreetFeedback,
   onSignInGoogle,
   onSelectParish,
   onSelectSavedParish,
@@ -67,15 +89,39 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onScaleBoundary,
   onToggleDrawBoundary,
   onClearBoundary,
+  onTogglePickStreetMode,
+  onToggleMapAddMode,
+  onAddPlaceStop,
+  onBatchAddStops,
+  onDeleteStreetStops,
   onViewMap,
   onNextStep,
 }) => {
-  const isDrawing = interactionMode === 'draw_boundary';
+  const [territoryTab, setTerritoryTab] = useState<TerritoryTab>(
+    boundary.length >= 3 ? 'area' : 'area'
+  );
+  const [areaScannerOpen, setAreaScannerOpen] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyError, setNearbyError] = useState<string | null>(null);
   const [nearbyChurches, setNearbyChurches] = useState<
     NearbyParishCandidate[] | null
   >(null);
+
+  const isDrawing = interactionMode === 'draw_boundary';
+  const isPickingStreet = interactionMode === 'pick_street';
+  const isAddingHouse = interactionMode === 'add_stop';
+
+  const savedStreets = useMemo(() => {
+    const groups: Record<string, VisitStop[]> = {};
+    for (const stop of stops) {
+      const street = extractStreetName(stop);
+      if (!groups[street]) groups[street] = [];
+      groups[street].push(stop);
+    }
+    return Object.entries(groups).sort((a, b) =>
+      a[0].localeCompare(b[0], 'pl')
+    );
+  }, [stops]);
 
   const loadChurchesAround = async (center: LatLng) => {
     setNearbyLoading(true);
@@ -123,26 +169,26 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
 
   return (
     <div className="divide-y divide-slate-200">
-      {/* Section 1: Parish Search & Saved Parishes */}
+      {/* Krok 1: Parafia */}
       <section className="p-4 sm:p-5">
         <div className="flex items-center justify-between mb-1.5">
           <h2 className="text-sm font-semibold text-slate-900">
-            Parafia i punkt startowy
+            1. Parafia i punkt startowy
           </h2>
           {parish && (
             <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              Aktywna
+              Wybrana
             </span>
           )}
         </div>
         <p className="text-xs text-slate-500 mb-3">
-          Wpisz dowolną frazę — nazwę parafii, patrona z miastem albo samo
-          miasto.
+          Wpisz nazwę parafii, patrona lub miejscowość — wybór automatycznie
+          zapisuje się w Twojej bazie.
         </p>
 
         <PlaceSearchInput
-          placeholder="np. św Antoni Mikołów, Bazylika Mariacka lub Mikołów"
+          placeholder="np. św Antoni Mikołów, Bazylika lub Mikołów"
           searchScope="parish"
           onSelect={(place) => {
             setNearbyChurches(null);
@@ -248,7 +294,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         )}
 
         {isSignedIn ? (
-          <div className="mt-4 pt-3 border-t border-slate-100 space-y-2.5">
+          <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-slate-700">
                 Zapamiętane parafie ({savedParishes.length})
@@ -261,11 +307,11 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
 
             {savedParishes.length === 0 ? (
               <p className="text-xs text-slate-500">
-                Wybierz pierwszą parafię powyżej — zostanie automatycznie
-                zapamiętana na Twoim koncie.
+                Wyszukaj pierwszą parafię powyżej — zostanie zapisana na Twoim
+                koncie.
               </p>
             ) : (
-              <ul className="space-y-1.5 max-h-48 overflow-y-auto">
+              <ul className="space-y-1.5 max-h-40 overflow-y-auto">
                 {savedParishes.map((rec) => {
                   const isActive = rec.id === activeParishId;
                   return (
@@ -314,9 +360,8 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         ) : (
           <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
             <p className="text-xs text-slate-600">
-              Zapamiętywanie parafii działa tylko dla zalogowanego użytkownika.
-              Zaloguj się przez Google, aby zapisywać swoje parafie, granice i
-              domy.
+              Zaloguj się przez Google, aby zapamiętywać parafie, granice i
+              pobrane ulice na stałe.
             </p>
             <button
               type="button"
@@ -324,133 +369,317 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
               className="w-full min-h-[42px] py-2 px-3 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
             >
               <LogIn className="w-3.5 h-3.5 text-amber-700" />
-              Zaloguj Google, aby zapamiętywać parafie
+              Zaloguj Google, aby zapisywać parafie
             </button>
           </div>
         )}
       </section>
 
-      {/* Section 2: Parish Territory Boundary */}
-      <section className="p-4 sm:p-5">
-        <div className="flex items-center justify-between mb-1.5">
+      {/* Krok 2: Konfiguracja terenu — Obszar LUB Wybór ulic z wykrywaniem adresów */}
+      <section className="p-4 sm:p-5 space-y-3.5">
+        <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-900">
-            Granice terenu parafii
+            2. Teren i adresy parafii
           </h2>
           {boundary.length >= 3 && (
-            <span className="text-xs text-slate-500 tabular-nums">
-              {boundary.length} wierzchołków
+            <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
+              Obszar: {boundary.length} pkt
             </span>
           )}
         </div>
-        <p className="text-xs text-slate-500 mb-3">
-          Wybierz gotowy promień wokół kościoła (300 m, 500 m, 1 km) albo
-          narysuj granice na mapie. Gotowy obrys powiększysz przyciskami lub
-          przeciągając białe punkty.
-        </p>
 
-        <div className="space-y-2">
-          {boundary.length < 3 ? (
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { label: '300 m', radius: 300 },
-                { label: '500 m', radius: 500 },
-                { label: '1 km', radius: 1000 },
-              ].map((opt) => (
+        {/* Clean 2-method selector */}
+        <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-xl gap-1">
+          <button
+            type="button"
+            onClick={() => setTerritoryTab('area')}
+            className={`min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+              territoryTab === 'area'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Pentagon className="w-3.5 h-3.5 text-amber-700" />
+            <span>Obszar na mapie</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTerritoryTab('streets')}
+            className={`min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+              territoryTab === 'streets'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Route className="w-3.5 h-3.5 text-amber-700" />
+            <span>Wybierz ulice</span>
+          </button>
+        </div>
+
+        {territoryTab === 'area' ? (
+          <div className="space-y-2.5">
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Wyznacz granice parafii na mapie (możesz je później dowolnie
+              edytować przyciskami lub przesuwając punkty), a następnie wykryj
+              wszystkie ulice i numery domów w tym obszarze.
+            </p>
+
+            {boundary.length < 3 ? (
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { label: '300 m', radius: 300 },
+                  { label: '500 m', radius: 500 },
+                  { label: '1 km', radius: 1000 },
+                ].map((opt) => (
+                  <button
+                    key={opt.radius}
+                    type="button"
+                    disabled={!parish || isDrawing}
+                    onClick={() => onCreatePresetBoundary(opt.radius)}
+                    className="min-h-[40px] py-2 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
+                  >
+                    Promień {opt.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="text-[11px] font-medium text-slate-700">
+                  Edycja wyznaczonego obszaru (przesuwaj białe punkty na mapie):
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isDrawing}
+                    onClick={() => onScaleBoundary(0.84)}
+                    className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Minimize2 className="w-3.5 h-3.5 text-amber-700" />
+                    Zmniejsz
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isDrawing}
+                    onClick={() => onScaleBoundary(1.2)}
+                    className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 text-amber-700" />
+                    Powiększ
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={!parish}
+                onClick={onToggleDrawBoundary}
+                className={`flex-1 min-h-[42px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                  isDrawing
+                    ? 'bg-amber-700 border-amber-700 text-white'
+                    : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50'
+                }`}
+              >
+                <Pentagon className="w-3.5 h-3.5" />
+                {isDrawing
+                  ? 'Rysujesz obszar na mapie...'
+                  : boundary.length >= 3
+                    ? 'Przerysuj granice ręcznie'
+                    : 'Narysuj obszar ręcznie na mapie'}
+              </button>
+
+              {boundary.length >= 3 && (
                 <button
-                  key={opt.radius}
                   type="button"
-                  disabled={!parish || isDrawing}
-                  onClick={() => onCreatePresetBoundary(opt.radius)}
-                  className="min-h-[40px] py-2 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
+                  onClick={onClearBoundary}
+                  title="Usuń obszar"
+                  aria-label="Usuń obszar"
+                  className="min-w-[42px] min-h-[42px] inline-flex items-center justify-center text-slate-500 hover:text-red-600 bg-white border border-slate-200 rounded-xl hover:bg-red-50 transition-colors"
                 >
-                  Obrys {opt.label}
+                  <Trash2 className="w-4 h-4" />
                 </button>
-              ))}
+              )}
             </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                disabled={isDrawing}
-                onClick={() => onScaleBoundary(0.82)}
-                className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 inline-flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <Minimize2 className="w-3.5 h-3.5" />
-                Zmniejsz teren
-              </button>
-              <button
-                type="button"
-                disabled={isDrawing}
-                onClick={() => onScaleBoundary(1.22)}
-                className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 inline-flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                Powiększ teren
-              </button>
-            </div>
-          )}
 
-          <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={!parish}
-              onClick={onToggleDrawBoundary}
-              className={`flex-1 min-h-[42px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                isDrawing
-                  ? 'bg-amber-700 border-amber-700 text-white'
-                  : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed'
-              }`}
+              onClick={() => setAreaScannerOpen(true)}
+              className="w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
             >
-              <Pentagon className="w-3.5 h-3.5" />
-              {isDrawing
-                ? 'Trwa rysowanie na mapie...'
-                : boundary.length >= 3
-                  ? 'Przerysuj granice ręcznie'
-                  : 'Rysuj własny obrys na mapie'}
+              <ScanSearch className="w-4 h-4 shrink-0" />
+              <span>
+                {boundary.length >= 3
+                  ? 'Wykryj ulice i adresy z obszaru'
+                  : 'Wykryj ulice i adresy w okolicy kościoła'}
+              </span>
             </button>
 
-            {boundary.length >= 3 && (
+            {parish && (
               <button
                 type="button"
-                onClick={onClearBoundary}
-                title="Usuń obrys terenu"
-                aria-label="Usuń obrys terenu"
-                className="min-w-[42px] min-h-[42px] inline-flex items-center justify-center text-slate-500 hover:text-red-600 bg-white border border-slate-200 rounded-xl hover:bg-red-50 transition-colors"
+                onClick={onViewMap}
+                className="lg:hidden w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
               >
-                <Trash2 className="w-4 h-4" />
+                <MapIcon className="w-3.5 h-3.5 text-amber-700" />
+                Podgląd obszaru na mapie
               </button>
             )}
           </div>
+        ) : (
+          <div className="space-y-2.5">
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Wskaż wybrane ulice bezpośrednio na mapie — aplikacja automatycznie
+              rozpozna ulicę i pobierze wszystkie oficjalne numery domów.
+            </p>
 
-          {parish && (
             <button
               type="button"
-              onClick={onViewMap}
-              className="lg:hidden w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+              disabled={!parish}
+              onClick={onTogglePickStreetMode}
+              className={`w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
+                isPickingStreet
+                  ? 'bg-amber-700 border-amber-700 text-white shadow-sm'
+                  : 'bg-amber-700 border-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 disabled:bg-slate-300 disabled:border-slate-300'
+              }`}
             >
-              <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-              Zobacz granice na mapie
+              <Route className="w-4 h-4 shrink-0" />
+              <span>
+                {isPickingStreet
+                  ? 'Tryb aktywny — dotknij ulicę na mapie'
+                  : 'Kliknij ulicę na mapie (wykryj adresy)'}
+              </span>
             </button>
-          )}
-        </div>
 
-        {!parish && (
-          <p className="mt-2 text-xs text-slate-400">
-            Najpierw wyszukaj i wybierz parafię powyżej, aby wyśrodkować mapę.
-          </p>
+            <button
+              type="button"
+              disabled={!parish}
+              onClick={onToggleMapAddMode}
+              className={`w-full min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
+                isAddingHouse
+                  ? 'bg-slate-900 border-slate-900 text-white'
+                  : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50'
+              }`}
+            >
+              <MapPinPlus className="w-3.5 h-3.5 text-amber-700" />
+              <span>
+                {isAddingHouse
+                  ? 'Tryb aktywny — kliknij budynek na mapie'
+                  : 'Dodaj pojedynczy dom z mapy'}
+              </span>
+            </button>
+
+            <div className="pt-1">
+              <div className="text-[11px] font-medium text-slate-500 mb-1">
+                Lub dopisz konkretny adres ręcznie:
+              </div>
+              <PlaceSearchInput
+                placeholder={
+                  parish
+                    ? 'np. Mieczysława Dzieńdziela 12, Mikołów'
+                    : 'Najpierw wybierz parafię'
+                }
+                biasLocation={parish?.location}
+                onSelect={onAddPlaceStop}
+                clearOnSelect={true}
+              />
+            </div>
+          </div>
+        )}
+
+        {streetPickFeedback && (
+          <div
+            className={`p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+              streetPickFeedback.status === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : streetPickFeedback.status === 'error'
+                  ? 'bg-red-50 border-red-200 text-red-900'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+            }`}
+          >
+            <span>{streetPickFeedback.message}</span>
+            {streetPickFeedback.status !== 'loading' && (
+              <button
+                type="button"
+                onClick={onDismissStreetFeedback}
+                aria-label="Zamknij"
+                className="p-0.5 text-current/70 hover:text-current shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         )}
       </section>
 
-      <div className="p-4 sm:p-5 bg-slate-50/60">
+      {/* Krok 3: Zapamiętane ulice i adresy tej parafii */}
+      <section className="p-4 sm:p-5 space-y-3 bg-slate-50/50">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-semibold text-slate-800 inline-flex items-center gap-1.5">
+            <Layers className="w-3.5 h-3.5 text-amber-700" />
+            <span>Zapamiętane ulice parafii ({savedStreets.length})</span>
+          </h3>
+          <span className="text-xs font-mono tabular-nums text-slate-500">
+            {stops.length} domów
+          </span>
+        </div>
+
+        {savedStreets.length === 0 ? (
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Brak zapisanych ulic dla tej parafii. Wyznacz obszar i wykryj ulice
+            powyżej lub przełącz na zakładkę <strong>„Wybierz ulice”</strong>.
+          </p>
+        ) : (
+          <ul className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 max-h-52 overflow-y-auto">
+            {savedStreets.map(([streetName, streetStops]) => (
+              <li
+                key={streetName}
+                className="px-3 py-2 flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-slate-900 truncate">
+                    {streetName}
+                  </div>
+                  <div className="text-[11px] text-slate-500 tabular-nums">
+                    {streetStops.length}{' '}
+                    {streetStops.length === 1 ? 'adres' : 'adresów'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onDeleteStreetStops(streetStops.map((s) => s.id))
+                  }
+                  title={`Usuń ulicę ${streetName} z bazy parafii`}
+                  aria-label={`Usuń ulicę ${streetName}`}
+                  className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
         <button
           type="button"
           onClick={onNextStep}
-          disabled={!parish}
-          className="w-full min-h-[44px] py-2.5 px-4 text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition-colors"
+          disabled={!parish || stops.length === 0}
+          className="w-full min-h-[44px] py-2.5 px-4 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
         >
-          Przejdź do dodawania domów
+          <span>Układaj plan kolędy na tych ulicach</span>
+          <ArrowRight className="w-4 h-4" />
         </button>
-      </div>
+      </section>
+
+      <OsmStreetFetcherModal
+        open={areaScannerOpen}
+        parish={parish}
+        boundary={boundary}
+        onClose={() => setAreaScannerOpen(false)}
+        onAddPlaces={onBatchAddStops}
+      />
     </div>
   );
 };

@@ -78,8 +78,8 @@ const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
 const SECTION_TITLES: Record<WorkspaceSection, string> = {
   overview: 'Plan kolędy',
-  parish: 'Parafie i teren',
-  stops: 'Domy i ulice',
+  parish: 'Parafia i teren',
+  stops: 'Układanie planu',
   routes: 'Trasy księży',
   schedule: 'Harmonogram',
   settings: 'Ustawienia kolędy',
@@ -670,7 +670,7 @@ function ParishPlannerWorkspace({
           showStreetFeedback(
             {
               status: 'info',
-              message: `Rozpoznano „${result.streetName}”, ale w bazie OpenStreetMap brak numerów budynków przy tej ulicy.`,
+              message: `Rozpoznano „${result.streetName}”, ale brak przypisanych numerów domów przy tej ulicy.`,
             },
             7000
           );
@@ -787,36 +787,141 @@ function ParishPlannerWorkspace({
     }
   }, [authUser, clearRoutes, stops]);
 
+  const handleDeleteStreetStops = useCallback(
+    (stopIds: string[]) => {
+      if (stopIds.length === 0) return;
+      const idSet = new Set(stopIds);
+      const currentId = activeParishIdRef.current;
+      setStops((prev) => prev.filter((s) => !idSet.has(s.id)));
+      clearRoutes();
+
+      if (authUser && currentId) {
+        void clearParishStopsInFirestore(currentId, stopIds).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes]
+  );
+
+  const handleToggleStreetIncluded = useCallback(
+    (stopIds: string[], included: boolean) => {
+      if (stopIds.length === 0) return;
+      const idSet = new Set(stopIds);
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          if (!idSet.has(s.id)) return s;
+          if ((s.included !== false) === included) return s;
+          const next = { ...s, included };
+          changed.push(next);
+          return next;
+        })
+      );
+      clearRoutes();
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'included'
+        ).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes]
+  );
+
+  const handleAssignStreetPriest = useCallback(
+    (stopIds: string[], priestId: number) => {
+      if (stopIds.length === 0) return;
+      const idSet = new Set(stopIds);
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          if (!idSet.has(s.id)) return s;
+          if (s.priestId === priestId) return s;
+          const next = { ...s, priestId };
+          changed.push(next);
+          return next;
+        })
+      );
+      clearRoutes();
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'priestId'
+        ).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes]
+  );
+
+  const handleSetAllIncluded = useCallback(
+    (included: boolean) => {
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          if ((s.included !== false) === included) return s;
+          const next = { ...s, included };
+          changed.push(next);
+          return next;
+        })
+      );
+      clearRoutes();
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'included'
+        ).catch(() => {});
+      }
+    },
+    [authUser, clearRoutes]
+  );
+
   const handleAutoPartition = useCallback(() => {
     if (!parish) return;
     const currentId = activeParishIdRef.current;
-    let partitioned: VisitStop[] = [];
+    let changedActive: VisitStop[] = [];
 
     setStops((prev) => {
-      partitioned = partitionStopsBySector(
+      const activeOnly = prev.filter((s) => s.included !== false);
+      const partitionedActive = partitionStopsBySector(
         parish.location,
-        prev,
+        activeOnly,
         config.priestCount
       );
-      return partitioned;
+      const byId = new Map(partitionedActive.map((s) => [s.id, s]));
+      changedActive = partitionedActive;
+      return prev.map((s) => byId.get(s.id) ?? s);
     });
     clearRoutes();
 
-    if (authUser && currentId && partitioned.length > 0) {
+    if (authUser && currentId && changedActive.length > 0) {
       void batchUpdateStopFieldInFirestore(
         currentId,
-        partitioned,
+        changedActive,
         'priestId'
       ).catch(() => {});
     }
   }, [authUser, parish, config.priestCount, clearRoutes]);
 
+  const activeStopsCount = stops.filter((s) => s.included !== false).length;
+
   const handleComputeRoutes = useCallback(async () => {
-    if (!parish || stops.length === 0) return;
+    const activeStops = stops.filter((s) => s.included !== false);
+    if (!parish || activeStops.length === 0) return;
     setInteractionMode('pan');
     setActiveSection('routes');
     setMobilePane('panel');
-    await computeAllRoutes(parish, stops, config);
+    await computeAllRoutes(parish, activeStops, config);
   }, [parish, stops, config, computeAllRoutes]);
 
   const navItems: Array<{
@@ -826,12 +931,12 @@ function ParishPlannerWorkspace({
     count?: number;
   }> = [
     { id: 'overview', label: 'Plan kolędy', icon: LayoutDashboard },
-    { id: 'parish', label: 'Parafie i teren', icon: Church },
+    { id: 'parish', label: 'Parafia i teren', icon: Church },
     {
       id: 'stops',
-      label: 'Domy i ulice',
+      label: 'Układanie planu',
       icon: MapPin,
-      count: stops.length > 0 ? stops.length : undefined,
+      count: activeStopsCount > 0 ? activeStopsCount : undefined,
     },
     {
       id: 'routes',
@@ -907,7 +1012,7 @@ function ParishPlannerWorkspace({
 
           <button
             type="button"
-            disabled={!parish || stops.length === 0 || isComputing}
+            disabled={!parish || activeStopsCount === 0 || isComputing}
             onClick={handleComputeRoutes}
             className="min-h-[38px] px-3 sm:px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition-colors whitespace-nowrap shrink-0"
           >
@@ -1046,9 +1151,12 @@ function ParishPlannerWorkspace({
                     activeParishId={activeParishId}
                     savedParishes={savedParishes}
                     boundary={boundary}
+                    stops={stops}
                     interactionMode={interactionMode}
+                    streetPickFeedback={streetPickFeedback}
                     isSignedIn={Boolean(authUser)}
                     userEmail={authUser?.email ?? null}
+                    onDismissStreetFeedback={() => setStreetPickFeedback(null)}
                     onSignInGoogle={onSignInGoogle}
                     onSelectParish={handleSelectParish}
                     onSelectSavedParish={handleSelectSavedParish}
@@ -1064,22 +1172,6 @@ function ParishPlannerWorkspace({
                       });
                     }}
                     onClearBoundary={handleClearBoundary}
-                    onViewMap={() => setMobilePane('map')}
-                    onNextStep={() => navigateToSection('stops')}
-                  />
-                )}
-
-                {activeSection === 'stops' && (
-                  <SidebarStops
-                    parish={parish}
-                    boundary={boundary}
-                    stops={stops}
-                    config={config}
-                    interactionMode={interactionMode}
-                    streetPickFeedback={streetPickFeedback}
-                    onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                    onAddPlaceStop={handleAddPlaceStop}
-                    onBatchAddStops={handleBatchAddStops}
                     onTogglePickStreetMode={() => {
                       setInteractionMode((m) => {
                         const next =
@@ -1095,6 +1187,23 @@ function ParishPlannerWorkspace({
                         return next;
                       });
                     }}
+                    onAddPlaceStop={handleAddPlaceStop}
+                    onBatchAddStops={handleBatchAddStops}
+                    onDeleteStreetStops={handleDeleteStreetStops}
+                    onViewMap={() => setMobilePane('map')}
+                    onNextStep={() => navigateToSection('stops')}
+                  />
+                )}
+
+                {activeSection === 'stops' && (
+                  <SidebarStops
+                    parish={parish}
+                    boundary={boundary}
+                    stops={stops}
+                    config={config}
+                    onToggleStreetIncluded={handleToggleStreetIncluded}
+                    onAssignStreetPriest={handleAssignStreetPriest}
+                    onSetAllIncluded={handleSetAllIncluded}
                     onUpdateStop={handleUpdateStop}
                     onDeleteStop={handleDeleteStop}
                     onClearStops={handleClearStops}
@@ -1103,6 +1212,7 @@ function ParishPlannerWorkspace({
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
+                    onGoToSetup={() => navigateToSection('parish')}
                     onComputeRoutes={handleComputeRoutes}
                     isComputing={isComputing}
                   />
@@ -1150,10 +1260,6 @@ function ParishPlannerWorkspace({
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
                   onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                  onSetInteractionMode={setInteractionMode}
-                  onCreatePresetBoundary={handleCreatePresetBoundary}
-                  onScaleBoundary={handleScaleBoundary}
-                  onClearBoundary={handleClearBoundary}
                   onBoundaryComplete={handleBoundaryComplete}
                   onBoundaryUpdate={(pts) =>
                     updateBoundaryAndRecheckStops(pts, true)
@@ -1174,10 +1280,6 @@ function ParishPlannerWorkspace({
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
                   onDismissStreetFeedback={() => setStreetPickFeedback(null)}
-                  onSetInteractionMode={setInteractionMode}
-                  onCreatePresetBoundary={handleCreatePresetBoundary}
-                  onScaleBoundary={handleScaleBoundary}
-                  onClearBoundary={handleClearBoundary}
                   onBoundaryComplete={handleBoundaryComplete}
                   onBoundaryUpdate={(pts) =>
                     updateBoundaryAndRecheckStops(pts, true)
@@ -1190,7 +1292,7 @@ function ParishPlannerWorkspace({
                 />
               )}
 
-              {stops.length > 0 && (
+              {activeStopsCount > 0 && (
                 <div className="no-print absolute top-3 right-3 sm:top-auto sm:right-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
                   {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                     <span key={p.id} className="inline-flex items-center gap-1.5">
@@ -1253,7 +1355,7 @@ function ParishPlannerWorkspace({
         >
           <MapPin className="w-5 h-5" />
           <span className="tabular-nums">
-            Domy{stops.length > 0 ? ` (${stops.length})` : ''}
+            Plan{activeStopsCount > 0 ? ` (${activeStopsCount})` : ''}
           </span>
         </button>
 

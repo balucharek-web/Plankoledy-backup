@@ -7,6 +7,7 @@ import {
   Clock,
   Cloud,
   Compass,
+  Layers,
   Loader2,
   LocateFixed,
   LogIn,
@@ -31,7 +32,11 @@ import {
   SavedParishRecord,
   VisitStop,
 } from '../types/parish';
-import { formatDistance, formatDurationMillis } from '../utils/spatial';
+import {
+  extractStreetName,
+  formatDistance,
+  formatDurationMillis,
+} from '../utils/spatial';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
 
 export type WorkspaceSection =
@@ -89,22 +94,36 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
     null
   );
 
-  const streetSummary = useMemo(() => {
-    const counts: Record<string, number> = {};
+  const activeStops = useMemo(
+    () => stops.filter((s) => s.included !== false),
+    [stops]
+  );
+
+  const savedStreetCount = useMemo(() => {
+    const names = new Set<string>();
     for (const s of stops) {
-      const firstPart = s.address.split(',')[0]?.trim() || s.label;
-      // Extract street name without trailing house number (e.g. "Zielona 14a" -> "Zielona")
-      const streetName = firstPart.replace(/\s+\d+[a-zA-Z]?(\/\d+[a-zA-Z]?)?$/, '').trim() || firstPart;
+      names.add(extractStreetName(s));
+    }
+    return names.size;
+  }, [stops]);
+
+  const activeStreetSummary = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const s of activeStops) {
+      const streetName = extractStreetName(s);
       counts[streetName] = (counts[streetName] ?? 0) + 1;
     }
     return Object.entries(counts)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 6);
-  }, [stops]);
+  }, [activeStops]);
 
   const routeMetrics = useMemo(() => {
     if (routes.length === 0) return null;
-    const totalMeters = routes.reduce((acc, r) => acc + r.totalDistanceMeters, 0);
+    const totalMeters = routes.reduce(
+      (acc, r) => acc + r.totalDistanceMeters,
+      0
+    );
     const totalMs = routes.reduce(
       (acc, r) => acc + r.totalTravelDurationMillis,
       0
@@ -140,7 +159,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             setGpsError('Nie znaleziono kościołów w promieniu 6 km.');
           }
         } catch {
-          setGpsError('Nie udało się pobrać kościołów z OpenStreetMap.');
+          setGpsError('Nie udało się pobrać kościołów w okolicy.');
         } finally {
           setGpsLoading(false);
         }
@@ -153,7 +172,6 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
     );
   };
 
-  // Empty / onboarding state when no parish is selected yet
   if (!parish) {
     return (
       <div className="p-4 sm:p-5 space-y-5">
@@ -162,8 +180,8 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             Rozpocznij plan kolędy
           </h2>
           <p className="text-xs text-slate-500 leading-relaxed">
-            Wybierz parafię lub miasto, aby wyznaczyć teren, pobrać domy z ulic
-            i ułożyć harmonogram odwiedzin.
+            Wyszukaj parafię, wyznacz jej teren (obszarem lub przez kliknięcie
+            ulic), a następnie układaj codzienne trasy na zapamiętanych ulicach.
           </p>
         </div>
 
@@ -173,9 +191,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             searchScope="parish"
             onSelect={(place) => {
               onSelectParish(place);
-              if (place.placeType === 'place') {
-                onNavigateSection('parish');
-              }
+              onNavigateSection('parish');
             }}
           />
 
@@ -269,8 +285,8 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
               Zapisuj swoje parafie i plany kolędy w chmurze
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Po zalogowaniu przez Google wszystkie wyznaczone granice, domy i
-              trasy będą przypisane wyłącznie do Twojego konta.
+              Po zalogowaniu przez Google wszystkie wyznaczone tereny, ulice i
+              plany będą przypisane wyłącznie do Twojego konta.
             </p>
             <button
               type="button"
@@ -287,7 +303,8 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
   }
 
   const hasBoundary = boundary.length >= 3;
-  const hasStops = stops.length > 0;
+  const hasSavedStops = stops.length > 0;
+  const hasActiveStops = activeStops.length > 0;
   const hasRoutes = routes.length > 0;
 
   return (
@@ -323,7 +340,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             className="flex-1 min-w-[130px] min-h-[40px] px-3 py-2 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <Plus className="w-3.5 h-3.5 text-amber-700" />
-            <span>Zmień / dodaj parafię</span>
+            <span>Parafia i teren</span>
           </button>
 
           <button
@@ -364,7 +381,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
       <section className="p-4 sm:p-5 space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-semibold text-slate-700">
-            Dane planu kolędy
+            Stan parafii i planu kolędy
           </h3>
           <span className="text-[11px] text-slate-500 tabular-nums">
             Start {config.startTime} · {config.defaultVisitMinutes} min/dom
@@ -374,45 +391,44 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
         <div className="grid grid-cols-2 gap-2.5">
           <button
             type="button"
-            onClick={() => onNavigateSection('stops')}
+            onClick={() => onNavigateSection('parish')}
             className="p-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-left transition-colors"
           >
             <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>Domy</span>
-              <MapPin className="w-3.5 h-3.5 text-amber-700" />
+              <span>Baza parafii</span>
+              <Layers
+                className={`w-3.5 h-3.5 ${
+                  hasSavedStops ? 'text-emerald-700' : 'text-amber-700'
+                }`}
+              />
             </div>
             <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">
-              {stops.length}
+              {savedStreetCount}{' '}
+              <span className="text-xs font-normal text-slate-500">
+                {savedStreetCount === 1 ? 'ulica' : 'ulic'}
+              </span>
             </div>
-            <div className="mt-0.5 text-[11px] text-slate-500 truncate">
-              {streetSummary.length > 0
-                ? `${streetSummary.length} ${
-                    streetSummary.length === 1 ? 'ulica' : 'ulice/ulic'
-                  }`
-                : 'Kliknij ulicę na mapie'}
+            <div className="mt-0.5 text-[11px] text-slate-500 truncate tabular-nums">
+              {stops.length} zapamiętanych domów
             </div>
           </button>
 
           <button
             type="button"
-            onClick={() => onNavigateSection('parish')}
+            onClick={() => onNavigateSection('stops')}
             className="p-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-left transition-colors"
           >
             <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>Teren parafii</span>
-              <Pentagon
-                className={`w-3.5 h-3.5 ${
-                  hasBoundary ? 'text-emerald-700' : 'text-amber-700'
-                }`}
-              />
+              <span>W planie dziś</span>
+              <MapPin className="w-3.5 h-3.5 text-amber-700" />
             </div>
-            <div className="mt-1 text-sm font-semibold text-slate-900">
-              {hasBoundary ? 'Wyznaczony' : 'Brak obrysu'}
+            <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">
+              {activeStops.length}
             </div>
-            <div className="mt-0.5 text-[11px] text-slate-500 tabular-nums">
-              {hasBoundary
-                ? `${boundary.length} wierzchołków`
-                : 'Ustaw promień lub obrys'}
+            <div className="mt-0.5 text-[11px] text-slate-500 truncate tabular-nums">
+              {hasSavedStops
+                ? `z ${stops.length} zapisanych`
+                : 'Skonfiguruj ulice'}
             </div>
           </button>
 
@@ -441,7 +457,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             onClick={() =>
               hasRoutes
                 ? onNavigateSection('routes')
-                : hasStops
+                : hasActiveStops
                   ? onComputeRoutes()
                   : onNavigateSection('stops')
             }
@@ -458,69 +474,77 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             <div className="mt-1 text-sm font-semibold text-slate-900 tabular-nums">
               {routeMetrics
                 ? formatDistance(routeMetrics.totalMeters)
-                : hasStops
+                : hasActiveStops
                   ? 'Do wyznaczenia'
                   : 'Oczekuje'}
             </div>
             <div className="mt-0.5 text-[11px] text-slate-500 tabular-nums truncate">
               {routeMetrics
-                ? `Koniec ok. ${routeMetrics.latestEnd} · ${formatDurationMillis(routeMetrics.totalMs)} drogi`
-                : hasStops
+                ? `Koniec ok. ${routeMetrics.latestEnd} · ${formatDurationMillis(
+                    routeMetrics.totalMs
+                  )}`
+                : hasActiveStops
                   ? 'Kliknij, aby policzyć'
-                  : 'Dodaj najpierw domy'}
+                  : 'Wybierz ulice'}
             </div>
           </button>
         </div>
       </section>
 
-      {/* Quick Plan Workflow Actions */}
+      {/* Two-Stage Guided Actions */}
       <section className="p-4 sm:p-5 space-y-2">
         <h3 className="text-xs font-semibold text-slate-700 mb-2">
-          Szybkie akcje planu
+          Dwa kroki pracy z parafią
         </h3>
 
         <button
           type="button"
-          onClick={() => onOpenMapWithMode('pick_street')}
-          className="w-full min-h-[48px] px-3.5 py-2.5 rounded-xl border border-amber-200 bg-amber-50/70 hover:bg-amber-100/70 text-left flex items-center justify-between gap-3 transition-colors"
+          onClick={() => onNavigateSection('parish')}
+          className={`w-full min-h-[50px] px-3.5 py-2.5 rounded-xl border text-left flex items-center justify-between gap-3 transition-colors ${
+            !hasSavedStops
+              ? 'border-amber-200 bg-amber-50/70 hover:bg-amber-100/70'
+              : 'border-slate-200 bg-white hover:bg-slate-50'
+          }`}
         >
           <div className="flex items-center gap-3 min-w-0">
-            <Route className="w-4 h-4 text-amber-800 shrink-0" />
+            {hasBoundary || hasSavedStops ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            ) : (
+              <Pentagon className="w-4 h-4 text-amber-800 shrink-0" />
+            )}
             <div className="min-w-0">
-              <div className="text-xs font-semibold text-amber-950 truncate">
-                Kliknij ulicę na mapie i pobierz wszystkie domy
+              <div className="text-xs font-semibold text-slate-900 truncate">
+                1. Konfiguruj teren i pobierz ulice parafii
               </div>
-              <div className="text-[11px] text-amber-800/80 truncate">
-                Automatyczny import numerów domów z OpenStreetMap
+              <div className="text-[11px] text-slate-500 truncate">
+                Wyznacz obszar na mapie (z edycją) lub zaznacz ulice z adresami
               </div>
             </div>
           </div>
-          <ArrowRight className="w-4 h-4 text-amber-800 shrink-0" />
+          <ArrowRight className="w-4 h-4 text-slate-500 shrink-0" />
         </button>
 
         <button
           type="button"
-          onClick={() => onNavigateSection('parish')}
-          className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-left flex items-center justify-between gap-3 transition-colors"
+          onClick={() => onNavigateSection('stops')}
+          className={`w-full min-h-[50px] px-3.5 py-2.5 rounded-xl border text-left flex items-center justify-between gap-3 transition-colors ${
+            hasSavedStops
+              ? 'border-amber-200 bg-amber-50/70 hover:bg-amber-100/70'
+              : 'border-slate-200 bg-white hover:bg-slate-50'
+          }`}
         >
           <div className="flex items-center gap-3 min-w-0">
-            {hasBoundary ? (
-              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-            ) : (
-              <Pentagon className="w-4 h-4 text-slate-500 shrink-0" />
-            )}
+            <Route className="w-4 h-4 text-amber-800 shrink-0" />
             <div className="min-w-0">
-              <div className="text-xs font-medium text-slate-900 truncate">
-                {hasBoundary
-                  ? 'Edytuj teren parafii lub przełącz parafię'
-                  : 'Wyznacz granice terenu parafii'}
+              <div className="text-xs font-semibold text-slate-900 truncate">
+                2. Układaj plan kolędy na zapamiętanych ulicach
               </div>
               <div className="text-[11px] text-slate-500 truncate">
-                Gotowy promień 300 m / 500 m / 1 km lub rysowanie ręczne
+                Wybieraj ulice lub numery na dany dzień i dziel na księży
               </div>
             </div>
           </div>
-          <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+          <ArrowRight className="w-4 h-4 text-slate-500 shrink-0" />
         </button>
 
         <button
@@ -566,25 +590,28 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
         </button>
       </section>
 
-      {/* Street & Priest Breakdown when stops exist */}
-      {stops.length > 0 && (
+      {/* Active plan summary */}
+      {activeStops.length > 0 && (
         <section className="p-4 sm:p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-slate-700">
-              Podział domów na księży i ulice
+              Bieżący plan ({activeStops.length}{' '}
+              {activeStops.length === 1 ? 'dom' : 'domów'})
             </h3>
             <button
               type="button"
               onClick={() => onNavigateSection('stops')}
               className="text-xs font-medium text-amber-800 hover:underline"
             >
-              Edytuj domy
+              Zmień wybór
             </button>
           </div>
 
           <div className="space-y-1.5">
             {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => {
-              const count = stops.filter((s) => s.priestId === p.id).length;
+              const count = activeStops.filter(
+                (s) => s.priestId === p.id
+              ).length;
               const priestRoute = routes.find((r) => r.priestId === p.id);
               return (
                 <div
@@ -607,13 +634,13 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
             })}
           </div>
 
-          {streetSummary.length > 0 && (
+          {activeStreetSummary.length > 0 && (
             <div className="pt-1 space-y-1">
               <div className="text-[11px] text-slate-500">
-                Ulice na liście:
+                Ulice w dzisiejszym planie:
               </div>
               <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl bg-white">
-                {streetSummary.map(([street, count]) => (
+                {activeStreetSummary.map(([street, count]) => (
                   <div
                     key={street}
                     className="px-3 py-2 flex items-center justify-between text-xs"

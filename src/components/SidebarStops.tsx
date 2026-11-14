@@ -1,581 +1,353 @@
 import React, { useMemo, useState } from 'react';
-import { useMapsLibrary } from '@vis.gl/react-google-maps';
 import {
   AlertTriangle,
-  ListPlus,
+  CheckSquare,
+  ChevronDown,
+  ChevronRight,
   Loader2,
-  MapPinPlus,
-  Route,
+  MapPin,
+  Plus,
   Search,
   Split,
+  Square,
   Trash2,
   X,
 } from 'lucide-react';
-import { useMapEngine } from '../contexts/MapEngineContext';
-import { searchPlacesNominatim } from '../services/osmSearchAndRouting';
 import {
   LatLng,
-  MapInteractionMode,
   PRIEST_PALETTE,
   ParishCenter,
   PlanConfig,
-  StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
-import { notifyIfQuotaExceeded } from '../utils/quota';
-import { OsmStreetFetcherModal } from './OsmStreetFetcherModal';
-import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
+import {
+  extractHouseNumberLabel,
+  extractStreetName,
+  isEvenHouseNumberStr,
+} from '../utils/spatial';
 
 interface SidebarStopsProps {
   parish: ParishCenter | null;
   boundary: LatLng[];
   stops: VisitStop[];
   config: PlanConfig;
-  interactionMode: MapInteractionMode;
-  streetPickFeedback: StreetPickFeedback | null;
-  onDismissStreetFeedback: () => void;
-  onAddPlaceStop: (place: SelectedPlaceData) => void;
-  onBatchAddStops: (places: SelectedPlaceData[]) => void;
-  onTogglePickStreetMode: () => void;
-  onToggleMapAddMode: () => void;
+  onToggleStreetIncluded: (stopIds: string[], included: boolean) => void;
+  onAssignStreetPriest: (stopIds: string[], priestId: number) => void;
+  onSetAllIncluded: (included: boolean) => void;
   onUpdateStop: (id: string, patch: Partial<VisitStop>) => void;
   onDeleteStop: (id: string) => void;
   onClearStops: () => void;
   onAutoPartition: () => void;
   onSelectStop: (id: string) => void;
+  onGoToSetup: () => void;
   onComputeRoutes: () => void;
   isComputing: boolean;
 }
-
-interface BatchImportFormProps {
-  parish: ParishCenter;
-  onBatchAddStops: (places: SelectedPlaceData[]) => void;
-  onClose: () => void;
-  onDoneMessage: (msg: string) => void;
-}
-
-const GoogleBatchImportForm: React.FC<BatchImportFormProps> = ({
-  parish,
-  onBatchAddStops,
-  onClose,
-  onDoneMessage,
-}) => {
-  const placesLib = useMapsLibrary('places');
-  const [batchText, setBatchText] = useState('');
-  const [batchLoading, setBatchLoading] = useState(false);
-
-  const handleImport = async () => {
-    if (!placesLib) return;
-    const lines = batchText
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length >= 3);
-
-    if (lines.length === 0) return;
-
-    setBatchLoading(true);
-    const found: SelectedPlaceData[] = [];
-    let failedCount = 0;
-
-    for (const line of lines.slice(0, 25)) {
-      try {
-        const res = await placesLib.Place.searchByText({
-          textQuery: line,
-          fields: ['displayName', 'formattedAddress', 'location', 'id'],
-          locationBias: parish.location,
-          language: 'pl',
-          region: 'pl',
-          maxResultCount: 1,
-        });
-        const first = res?.places?.[0];
-        if (first && first.location) {
-          found.push({
-            name: first.displayName || line,
-            address: first.formattedAddress || line,
-            location: {
-              lat: first.location.lat(),
-              lng: first.location.lng(),
-            },
-            placeId: first.id || '',
-          });
-        } else {
-          failedCount += 1;
-        }
-      } catch (err) {
-        failedCount += 1;
-        if (notifyIfQuotaExceeded(err)) break;
-      }
-    }
-
-    if (found.length > 0) onBatchAddStops(found);
-    setBatchLoading(false);
-    setBatchText('');
-    onClose();
-    onDoneMessage(
-      `Dodano ${found.length} adresów${
-        failedCount > 0 ? `, nie znaleziono ${failedCount}` : ''
-      }.`
-    );
-  };
-
-  return (
-    <div className="pt-2 border-t border-slate-100 space-y-2">
-      <label htmlFor="batch-addresses" className="block text-xs text-slate-600">
-        Wpisz lub wklej po jednym adresie w linii (maks. 25 naraz):
-      </label>
-      <textarea
-        id="batch-addresses"
-        rows={4}
-        value={batchText}
-        onChange={(e) => setBatchText(e.target.value)}
-        placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
-        className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
-      />
-      <div className="flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900"
-        >
-          Anuluj
-        </button>
-        <button
-          type="button"
-          disabled={batchLoading || batchText.trim().length < 3}
-          onClick={handleImport}
-          className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-lg inline-flex items-center gap-1.5"
-        >
-          {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          Wyszukaj i dodaj
-        </button>
-      </div>
-    </div>
-  );
-};
-
-const OsmBatchImportForm: React.FC<BatchImportFormProps> = ({
-  parish,
-  onBatchAddStops,
-  onClose,
-  onDoneMessage,
-}) => {
-  const [batchText, setBatchText] = useState('');
-  const [batchLoading, setBatchLoading] = useState(false);
-
-  const handleImport = async () => {
-    const lines = batchText
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length >= 3);
-
-    if (lines.length === 0) return;
-
-    setBatchLoading(true);
-    const found: SelectedPlaceData[] = [];
-    let failedCount = 0;
-
-    for (const line of lines.slice(0, 20)) {
-      try {
-        const res = await searchPlacesNominatim(line, parish.location, 1);
-        if (res[0]) {
-          found.push(res[0]);
-        } else {
-          failedCount += 1;
-        }
-      } catch {
-        failedCount += 1;
-      }
-      await new Promise((r) => setTimeout(r, 350));
-    }
-
-    if (found.length > 0) onBatchAddStops(found);
-    setBatchLoading(false);
-    setBatchText('');
-    onClose();
-    onDoneMessage(
-      `Dodano ${found.length} adresów${
-        failedCount > 0 ? `, nie znaleziono ${failedCount}` : ''
-      }.`
-    );
-  };
-
-  return (
-    <div className="pt-2 border-t border-slate-100 space-y-2">
-      <label htmlFor="batch-addresses" className="block text-xs text-slate-600">
-        Wpisz lub wklej po jednym adresie w linii (maks. 20 naraz):
-      </label>
-      <textarea
-        id="batch-addresses"
-        rows={4}
-        value={batchText}
-        onChange={(e) => setBatchText(e.target.value)}
-        placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
-        className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
-      />
-      <div className="flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900"
-        >
-          Anuluj
-        </button>
-        <button
-          type="button"
-          disabled={batchLoading || batchText.trim().length < 3}
-          onClick={handleImport}
-          className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-lg inline-flex items-center gap-1.5"
-        >
-          {batchLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-          Wyszukaj i dodaj
-        </button>
-      </div>
-    </div>
-  );
-};
 
 export const SidebarStops: React.FC<SidebarStopsProps> = ({
   parish,
   boundary,
   stops,
   config,
-  interactionMode,
-  streetPickFeedback,
-  onDismissStreetFeedback,
-  onAddPlaceStop,
-  onBatchAddStops,
-  onTogglePickStreetMode,
-  onToggleMapAddMode,
+  onToggleStreetIncluded,
+  onAssignStreetPriest,
+  onSetAllIncluded,
   onUpdateStop,
   onDeleteStop,
   onClearStops,
   onAutoPartition,
   onSelectStop,
+  onGoToSetup,
   onComputeRoutes,
   isComputing,
 }) => {
-  const engine = useMapEngine();
-  const [showBatch, setShowBatch] = useState(false);
-  const [osmModalOpen, setOsmModalOpen] = useState(false);
-  const [batchStatus, setBatchStatus] = useState<string | null>(null);
-  const [stopFilter, setStopFilter] = useState('');
+  const [filterText, setFilterText] = useState('');
+  const [expandedStreets, setExpandedStreets] = useState<
+    Record<string, boolean>
+  >({});
 
-  const outsideCount =
-    boundary.length >= 3
-      ? stops.filter((s) => s.inBoundary === false).length
-      : 0;
+  const activeStops = useMemo(
+    () => stops.filter((s) => s.included !== false),
+    [stops]
+  );
 
-  const filteredStops = useMemo(() => {
-    const q = stopFilter.trim().toLowerCase();
-    if (!q) return stops;
-    return stops.filter(
-      (s) =>
-        s.address.toLowerCase().includes(q) ||
-        (s.notes && s.notes.toLowerCase().includes(q))
+  const outsideActiveCount = useMemo(
+    () =>
+      boundary.length >= 3
+        ? activeStops.filter((s) => s.inBoundary === false).length
+        : 0,
+    [activeStops, boundary.length]
+  );
+
+  const streetGroups = useMemo(() => {
+    const map: Record<string, VisitStop[]> = {};
+    for (const stop of stops) {
+      const street = extractStreetName(stop);
+      if (!map[street]) map[street] = [];
+      map[street].push(stop);
+    }
+
+    const q = filterText.trim().toLowerCase();
+    return Object.entries(map)
+      .map(([streetName, groupStops]) => {
+        const matchingStops = q
+          ? groupStops.filter(
+              (s) =>
+                streetName.toLowerCase().includes(q) ||
+                s.address.toLowerCase().includes(q) ||
+                (s.notes && s.notes.toLowerCase().includes(q))
+            )
+          : groupStops;
+        return {
+          streetName,
+          allStops: groupStops,
+          visibleStops: matchingStops,
+        };
+      })
+      .filter((g) => g.visibleStops.length > 0)
+      .sort((a, b) => a.streetName.localeCompare(b.streetName, 'pl'));
+  }, [stops, filterText]);
+
+  const toggleExpand = (streetName: string) => {
+    setExpandedStreets((prev) => ({
+      ...prev,
+      [streetName]: !prev[streetName],
+    }));
+  };
+
+  const selectStreetParity = (
+    groupStops: VisitStop[],
+    mode: 'all' | 'even' | 'odd' | 'none'
+  ) => {
+    if (mode === 'all') {
+      onToggleStreetIncluded(
+        groupStops.map((s) => s.id),
+        true
+      );
+      return;
+    }
+    if (mode === 'none') {
+      onToggleStreetIncluded(
+        groupStops.map((s) => s.id),
+        false
+      );
+      return;
+    }
+
+    const toInclude: string[] = [];
+    const toExclude: string[] = [];
+    for (const s of groupStops) {
+      const numStr = extractHouseNumberLabel(s);
+      const isEven = isEvenHouseNumberStr(numStr);
+      const want =
+        (mode === 'even' && isEven === true) ||
+        (mode === 'odd' && isEven === false);
+      if (want) toInclude.push(s.id);
+      else toExclude.push(s.id);
+    }
+    if (toInclude.length > 0) onToggleStreetIncluded(toInclude, true);
+    if (toExclude.length > 0) onToggleStreetIncluded(toExclude, false);
+  };
+
+  if (stops.length === 0) {
+    return (
+      <div className="p-6 sm:p-8 text-center space-y-4">
+        <div className="w-11 h-11 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
+          <MapPin className="w-5 h-5" />
+        </div>
+        <div className="space-y-1.5">
+          <h2 className="text-sm font-semibold text-slate-900">
+            Brak zapamiętanych ulic dla tej parafii
+          </h2>
+          <p className="text-xs text-slate-500 max-w-xs mx-auto leading-relaxed">
+            Najpierw skonfiguruj teren parafii — zaznacz obszar lub kliknij
+            wybrane ulice na mapie, aby pobrać z nich numery domów.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onGoToSetup}
+          className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          <span>Skonfiguruj teren i ulice parafii</span>
+        </button>
+      </div>
     );
-  }, [stops, stopFilter]);
+  }
 
   return (
     <div className="flex flex-col h-full">
-      {/* Add controls */}
+      {/* Stage 2 Header: Planning on saved parish territories */}
       <div className="p-4 sm:p-5 border-b border-slate-200 space-y-3 bg-white">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">
-            Punkty odwiedzin ({stops.length})
-          </h2>
-          {stops.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearStops}
-              className="text-xs text-slate-500 hover:text-red-600 transition-colors"
-            >
-              Wyczyść listę
-            </button>
-          )}
-        </div>
-
-        <PlaceSearchInput
-          placeholder={
-            parish
-              ? 'Dodaj adres (np. ul. Floriańska 12)...'
-              : 'Najpierw ustaw parafię w kroku 1'
-          }
-          biasLocation={parish?.location}
-          onSelect={onAddPlaceStop}
-          clearOnSelect={true}
-        />
-
-        {/* Primary interactive map street & house pickers */}
-        <button
-          type="button"
-          disabled={!parish}
-          onClick={onTogglePickStreetMode}
-          className={`w-full min-h-[42px] py-2 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
-            interactionMode === 'pick_street'
-              ? 'bg-amber-700 border-amber-700 text-white shadow-sm'
-              : 'bg-amber-50/80 border-amber-200 text-amber-950 hover:bg-amber-100/80 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400'
-          }`}
-        >
-          <Route className="w-4 h-4 shrink-0" />
-          <span>
-            {interactionMode === 'pick_street'
-              ? 'Tryb aktywny — kliknij ulicę na mapie'
-              : 'Kliknij ulicę na mapie (pobierz wszystkie domy)'}
-          </span>
-        </button>
-
-        <div className="grid grid-cols-2 gap-2">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">
+              Układanie planu kolędy
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+              W dzisiejszym planie:{' '}
+              <strong className="text-slate-900">{activeStops.length}</strong> z{' '}
+              {stops.length} zapamiętanych domów ({streetGroups.length}{' '}
+              {streetGroups.length === 1 ? 'ulica' : 'ulic'})
+            </p>
+          </div>
           <button
             type="button"
-            disabled={!parish}
-            onClick={onToggleMapAddMode}
-            className={`min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-              interactionMode === 'add_stop'
-                ? 'bg-amber-700 border-amber-700 text-white'
-                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50'
-            }`}
+            onClick={onGoToSetup}
+            className="text-xs font-medium text-amber-800 hover:underline whitespace-nowrap shrink-0"
           >
-            <MapPinPlus className="w-3.5 h-3.5" />
-            {interactionMode === 'add_stop'
-              ? 'Kliknij budynek'
-              : 'Pojedynczy dom'}
-          </button>
-
-          <button
-            type="button"
-            disabled={!parish}
-            onClick={() => setShowBatch((v) => !v)}
-            className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
-          >
-            <ListPlus className="w-3.5 h-3.5" />
-            Wklej listę
+            + Dodaj ulice
           </button>
         </div>
 
-        <button
-          type="button"
-          disabled={!parish}
-          onClick={() => setOsmModalOpen(true)}
-          className="w-full min-h-[38px] py-2 px-3 text-xs font-medium rounded-xl border bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors"
-        >
-          <Search className="w-3.5 h-3.5 shrink-0 text-slate-500" />
-          <span className="truncate">
-            Lista wszystkich ulic z obszaru parafii (OSM)
-          </span>
-        </button>
-
-        {streetPickFeedback && (
-          <div
-            className={`p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
-              streetPickFeedback.status === 'success'
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                : streetPickFeedback.status === 'error'
-                  ? 'bg-red-50 border-red-200 text-red-900'
-                  : 'bg-amber-50 border-amber-200 text-amber-900'
-            }`}
+        {/* Batch selection bar */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onSetAllIncluded(true)}
+            className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
           >
-            <span>{streetPickFeedback.message}</span>
-            {streetPickFeedback.status !== 'loading' && (
-              <button
-                type="button"
-                onClick={onDismissStreetFeedback}
-                aria-label="Zamknij"
-                className="p-0.5 text-current/70 hover:text-current shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
+            <CheckSquare className="w-3.5 h-3.5 text-amber-700" />
+            Zaznacz wszystkie
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetAllIncluded(false)}
+            className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1"
+          >
+            <Square className="w-3.5 h-3.5" />
+            Odznacz
+          </button>
+          <button
+            type="button"
+            onClick={onClearStops}
+            className="min-h-[34px] px-2.5 py-1 text-xs text-slate-500 hover:text-red-600 ml-auto"
+          >
+            Usuń bazę domów
+          </button>
+        </div>
 
-        {showBatch &&
-          parish &&
-          (engine === 'google' ? (
-            <GoogleBatchImportForm
-              parish={parish}
-              onBatchAddStops={onBatchAddStops}
-              onClose={() => setShowBatch(false)}
-              onDoneMessage={setBatchStatus}
-            />
-          ) : (
-            <OsmBatchImportForm
-              parish={parish}
-              onBatchAddStops={onBatchAddStops}
-              onClose={() => setShowBatch(false)}
-              onDoneMessage={setBatchStatus}
-            />
-          ))}
-
-        {batchStatus && (
-          <p className="text-xs text-slate-600">{batchStatus}</p>
-        )}
-
-        {outsideCount > 0 && (
-          <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
-            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <span>
-              {outsideCount}{' '}
-              {outsideCount === 1
-                ? 'adres znajduje się'
-                : 'adresy znajdują się'}{' '}
-              poza zaznaczonym terenem parafii.
-            </span>
-          </div>
-        )}
-
-        {stops.length > 1 && config.priestCount > 1 && (
+        {activeStops.length > 1 && config.priestCount > 1 && (
           <button
             type="button"
             onClick={onAutoPartition}
             className="w-full min-h-[38px] py-2 px-3 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
           >
             <Split className="w-3.5 h-3.5" />
-            Podziel automatycznie na {config.priestCount} księży według rejonów
+            Podziel wybrane na {config.priestCount} księży według rejonów
           </button>
         )}
 
-        {stops.length > 4 && (
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={stopFilter}
-              onChange={(e) => setStopFilter(e.target.value)}
-              placeholder="Filtruj dodane domy po ulicy lub uwagach..."
-              className="w-full pl-8 pr-8 py-2 text-base sm:text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
-            />
-            {stopFilter && (
-              <button
-                type="button"
-                onClick={() => setStopFilter('')}
-                aria-label="Wyczyść filtr"
-                className="p-1 text-slate-400 hover:text-slate-700 absolute right-2 top-1/2 -translate-y-1/2"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
+        {outsideActiveCount > 0 && (
+          <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <span>
+              {outsideActiveCount}{' '}
+              {outsideActiveCount === 1
+                ? 'wybrany adres leży'
+                : 'wybrane adresy leżą'}{' '}
+              poza narysowanym terenem parafii.
+            </span>
           </div>
         )}
+
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="Filtruj po ulicy, numerze domu lub rodzinie..."
+            className="w-full pl-8 pr-8 py-2 text-base sm:text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
+          />
+          {filterText && (
+            <button
+              type="button"
+              onClick={() => setFilterText('')}
+              aria-label="Wyczyść filtr"
+              className="p-1 text-slate-400 hover:text-slate-700 absolute right-2 top-1/2 -translate-y-1/2"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Stops list */}
-      <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
-        {stops.length === 0 ? (
-          <div className="p-8 text-center">
-            <p className="text-sm font-medium text-slate-700">
-              Brak dodanych domów do odwiedzenia
-            </p>
-            <p className="text-xs text-slate-500 mt-1.5 max-w-xs mx-auto leading-relaxed">
-              Kliknij <strong>„Kliknij ulicę na mapie”</strong>, aby jednym
-              dotknięciem pobrać wszystkie domy z wybranej ulicy, albo wpisz
-              adres ręcznie powyżej.
-            </p>
-          </div>
-        ) : filteredStops.length === 0 ? (
+      {/* Saved Street Accordions */}
+      <div className="flex-1 overflow-y-auto divide-y divide-slate-200">
+        {streetGroups.length === 0 ? (
           <div className="p-8 text-center text-xs text-slate-500">
-            Brak adresów pasujących do frazy „{stopFilter}”.
+            Brak zapisanych ulic lub domów pasujących do „{filterText}”.
           </div>
         ) : (
-          filteredStops.map((stop, index) => {
-            const palette =
-              PRIEST_PALETTE.find((p) => p.id === stop.priestId) ??
-              PRIEST_PALETTE[0];
+          streetGroups.map(({ streetName, allStops, visibleStops }) => {
+            const includedCount = allStops.filter(
+              (s) => s.included !== false
+            ).length;
+            const allChecked = includedCount === allStops.length;
+            const someChecked = includedCount > 0 && includedCount < allStops.length;
+            const isExpanded = !!expandedStreets[streetName];
+
+            const activePriestIds = new Set(
+              allStops.filter((s) => s.included !== false).map((s) => s.priestId)
+            );
+            const commonPriestId =
+              activePriestIds.size === 1
+                ? Array.from(activePriestIds)[0]
+                : allStops[0]?.priestId ?? 1;
+
             return (
-              <div
-                key={stop.id}
-                className="p-4 hover:bg-slate-50/80 transition-colors"
-              >
-                <div className="flex items-start justify-between gap-2">
+              <div key={streetName} className="bg-white">
+                {/* Street summary row */}
+                <div className="px-4 py-3 flex items-center gap-2.5 hover:bg-slate-50/70">
+                  <input
+                    type="checkbox"
+                    checked={allChecked}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someChecked;
+                    }}
+                    onChange={() =>
+                      onToggleStreetIncluded(
+                        allStops.map((s) => s.id),
+                        !allChecked
+                      )
+                    }
+                    aria-label={`Włącz ulicę ${streetName} do planu kolędy`}
+                    className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 cursor-pointer shrink-0"
+                  />
+
                   <button
                     type="button"
-                    onClick={() => onSelectStop(stop.id)}
-                    className="text-left min-w-0 flex-1 group"
+                    onClick={() => toggleExpand(streetName)}
+                    className="flex-1 min-w-0 text-left flex items-center justify-between gap-2"
                   >
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="w-2.5 h-2.5 rounded-full shrink-0"
-                        style={{ backgroundColor: palette.color }}
-                      />
-                      <span className="text-xs font-mono text-slate-400 tabular-nums">
-                        #{index + 1}
-                      </span>
-                      <span className="text-sm font-medium text-slate-900 group-hover:text-amber-800 truncate">
-                        {stop.address}
-                      </span>
-                    </div>
-                    {stop.notes && (
-                      <div className="text-xs text-slate-500 truncate mt-0.5 pl-4">
-                        {stop.notes}
+                    <div className="min-w-0">
+                      <div
+                        className={`text-xs sm:text-sm font-semibold truncate ${
+                          includedCount > 0 ? 'text-slate-900' : 'text-slate-400'
+                        }`}
+                      >
+                        {streetName}
                       </div>
-                    )}
+                      <div className="text-[11px] text-slate-500 tabular-nums">
+                        W planie: <strong>{includedCount}</strong>/{allStops.length}{' '}
+                        {allStops.length === 1 ? 'dom' : 'domów'}
+                      </div>
+                    </div>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => onDeleteStop(stop.id)}
-                    aria-label="Usuń dom"
-                    className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors shrink-0"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                <div className="mt-2.5 pl-4 flex flex-wrap items-center gap-2">
-                  <input
-                    type="text"
-                    value={stop.address}
-                    onChange={(e) =>
-                      onUpdateStop(stop.id, {
-                        address: e.target.value,
-                        label: e.target.value,
-                      })
-                    }
-                    aria-label="Adres domu"
-                    placeholder="Adres domu (np. ul. Lipowa 12)"
-                    className="flex-1 min-w-[140px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
-                  />
-
-                  <input
-                    type="text"
-                    value={stop.notes ?? ''}
-                    onChange={(e) =>
-                      onUpdateStop(stop.id, { notes: e.target.value })
-                    }
-                    aria-label="Rodzina lub uwagi"
-                    placeholder="Rodzina / uwagi"
-                    className="w-32 sm:w-28 px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-amber-600"
-                  />
-
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number"
-                      min={3}
-                      max={120}
-                      value={stop.durationMinutes}
-                      onChange={(e) =>
-                        onUpdateStop(stop.id, {
-                          durationMinutes: Math.max(
-                            3,
-                            Number.parseInt(e.target.value || '15', 10)
-                          ),
-                        })
-                      }
-                      aria-label="Czas wizyty w minutach"
-                      className="w-14 px-2 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-800 text-right focus:outline-none focus:border-amber-600"
-                    />
-                    <span className="text-xs text-slate-500">min</span>
-                  </div>
-
-                  {config.priestCount > 1 && (
+                  {config.priestCount > 1 && includedCount > 0 && (
                     <select
-                      value={stop.priestId}
+                      value={commonPriestId}
                       onChange={(e) =>
-                        onUpdateStop(stop.id, {
-                          priestId: Number.parseInt(e.target.value, 10),
-                        })
+                        onAssignStreetPriest(
+                          allStops.map((s) => s.id),
+                          Number.parseInt(e.target.value, 10)
+                        )
                       }
-                      aria-label="Przypisany ksiądz"
-                      className="px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
+                      aria-label={`Przypisz księdza do ulicy ${streetName}`}
+                      className="px-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600 shrink-0"
                     >
                       {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                         <option key={p.id} value={p.id}>
@@ -584,12 +356,176 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                       ))}
                     </select>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => toggleExpand(streetName)}
+                    aria-label={
+                      isExpanded ? 'Zwiń listę domów' : 'Rozwiń listę domów'
+                    }
+                    className="min-w-[34px] min-h-[34px] inline-flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 shrink-0"
+                  >
+                    {isExpanded ? (
+                      <ChevronDown className="w-4 h-4" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4" />
+                    )}
+                  </button>
                 </div>
 
-                {stop.inBoundary === false && (
-                  <p className="mt-1.5 pl-4 text-xs text-amber-700">
-                    Punkt leży poza narysowanym obrysem parafii
-                  </p>
+                {/* Expanded houses on this street */}
+                {isExpanded && (
+                  <div className="bg-slate-50/70 border-t border-slate-100 divide-y divide-slate-100">
+                    {allStops.length > 2 && (
+                      <div className="px-4 py-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="text-slate-500 mr-1">Wybierz:</span>
+                        <button
+                          type="button"
+                          onClick={() => selectStreetParity(allStops, 'all')}
+                          className="px-2 py-1 bg-white border border-slate-200 hover:bg-slate-100 rounded text-slate-700"
+                        >
+                          Wszystkie
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => selectStreetParity(allStops, 'even')}
+                          className="px-2 py-1 bg-white border border-slate-200 hover:bg-slate-100 rounded text-slate-700"
+                        >
+                          Parzyste
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => selectStreetParity(allStops, 'odd')}
+                          className="px-2 py-1 bg-white border border-slate-200 hover:bg-slate-100 rounded text-slate-700"
+                        >
+                          Nieparzyste
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => selectStreetParity(allStops, 'none')}
+                          className="px-2 py-1 text-slate-500 hover:text-slate-800"
+                        >
+                          Żaden
+                        </button>
+                      </div>
+                    )}
+
+                    {visibleStops.map((stop) => {
+                      const isIncluded = stop.included !== false;
+                      const palette =
+                        PRIEST_PALETTE.find((p) => p.id === stop.priestId) ??
+                        PRIEST_PALETTE[0];
+                      return (
+                        <div
+                          key={stop.id}
+                          className={`px-4 py-2.5 transition-colors ${
+                            isIncluded ? 'bg-white/80' : 'opacity-60'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isIncluded}
+                              onChange={() =>
+                                onUpdateStop(stop.id, { included: !isIncluded })
+                              }
+                              aria-label={`Uwzględnij ${stop.address}`}
+                              className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 shrink-0"
+                            />
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{
+                                backgroundColor: isIncluded
+                                  ? palette.color
+                                  : '#CBD5E1',
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => onSelectStop(stop.id)}
+                              className="flex-1 min-w-0 text-left text-xs font-medium text-slate-900 hover:text-amber-800 truncate"
+                            >
+                              {stop.address}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteStop(stop.id)}
+                              aria-label="Usuń adres z bazy parafii"
+                              title="Usuń na stałe z bazy parafii"
+                              className="p-1 text-slate-400 hover:text-red-600 rounded shrink-0"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {isIncluded && (
+                            <div className="mt-2 pl-6 flex flex-wrap items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={stop.notes ?? ''}
+                                onChange={(e) =>
+                                  onUpdateStop(stop.id, {
+                                    notes: e.target.value,
+                                  })
+                                }
+                                aria-label="Rodzina lub uwagi"
+                                placeholder="Rodzina / uwagi"
+                                className="flex-1 min-w-[110px] px-2 py-1 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-amber-600"
+                              />
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min={3}
+                                  max={120}
+                                  value={stop.durationMinutes}
+                                  onChange={(e) =>
+                                    onUpdateStop(stop.id, {
+                                      durationMinutes: Math.max(
+                                        3,
+                                        Number.parseInt(
+                                          e.target.value || '15',
+                                          10
+                                        )
+                                      ),
+                                    })
+                                  }
+                                  aria-label="Czas wizyty w minutach"
+                                  className="w-12 px-1.5 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-800 text-right focus:outline-none focus:border-amber-600"
+                                />
+                                <span className="text-[11px] text-slate-500">
+                                  min
+                                </span>
+                              </div>
+                              {config.priestCount > 1 && (
+                                <select
+                                  value={stop.priestId}
+                                  onChange={(e) =>
+                                    onUpdateStop(stop.id, {
+                                      priestId: Number.parseInt(
+                                        e.target.value,
+                                        10
+                                      ),
+                                    })
+                                  }
+                                  aria-label="Przypisany ksiądz"
+                                  className="px-1.5 py-1 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
+                                >
+                                  {PRIEST_PALETTE.slice(
+                                    0,
+                                    config.priestCount
+                                  ).map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      Ks. {p.id}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             );
@@ -601,24 +537,18 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
       <div className="p-4 border-t border-slate-200 bg-white">
         <button
           type="button"
-          disabled={!parish || stops.length === 0 || isComputing}
+          disabled={!parish || activeStops.length === 0 || isComputing}
           onClick={onComputeRoutes}
-          className="w-full min-h-[42px] py-2.5 px-4 text-sm font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
+          className="w-full min-h-[44px] py-2.5 px-4 text-sm font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center justify-center gap-2 transition-colors tabular-nums"
         >
           {isComputing && <Loader2 className="w-4 h-4 animate-spin" />}
           {isComputing
             ? 'Wyznaczanie optymalnych tras...'
-            : 'Wyznacz optymalne trasy'}
+            : `Wyznacz trasy (${activeStops.length} ${
+                activeStops.length === 1 ? 'dom' : 'domów'
+              })`}
         </button>
       </div>
-
-      <OsmStreetFetcherModal
-        open={osmModalOpen}
-        parish={parish}
-        boundary={boundary}
-        onClose={() => setOsmModalOpen(false)}
-        onAddPlaces={onBatchAddStops}
-      />
     </div>
   );
 };

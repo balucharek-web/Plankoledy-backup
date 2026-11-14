@@ -14,15 +14,9 @@ import {
   Check,
   CheckCircle2,
   Church,
-  CircleDashed,
-  Hand,
   Loader2,
   MapPinPlus,
-  Maximize2,
-  Minimize2,
-  Pentagon,
   Route,
-  Trash2,
   Undo2,
   X,
 } from 'lucide-react';
@@ -53,10 +47,6 @@ interface ParishMapProps {
   highlightedStopId: string | null;
   streetPickFeedback: StreetPickFeedback | null;
   onDismissStreetFeedback: () => void;
-  onSetInteractionMode: (mode: MapInteractionMode) => void;
-  onCreatePresetBoundary: (radiusMeters?: number) => void;
-  onScaleBoundary: (factor: number) => void;
-  onClearBoundary: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
@@ -90,6 +80,8 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   onDelete,
 }) => {
   const [markerRef, marker] = useAdvancedMarkerRef();
+  const isIncluded = stop.included !== false;
+  const size = !isIncluded ? 14 : orderNumber ? 28 : 22;
 
   return (
     <>
@@ -97,20 +89,25 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         ref={markerRef}
         position={stop.location}
         title={stop.address || stop.label}
-        zIndex={isSelected ? 400 : orderNumber ? 200 - orderNumber : 100}
+        zIndex={
+          isSelected ? 400 : !isIncluded ? 40 : orderNumber ? 200 - orderNumber : 100
+        }
         onClick={onSelect}
       >
         <div
           className="flex items-center justify-center rounded-full text-xs font-mono font-semibold shadow-md transition-transform hover:scale-110 cursor-pointer select-none"
           style={{
-            width: orderNumber ? 28 : 22,
-            height: orderNumber ? 28 : 22,
-            backgroundColor: color,
-            border: `2.5px solid ${isSelected ? '#0F172A' : borderColor}`,
+            width: size,
+            height: size,
+            backgroundColor: isIncluded ? color : '#CBD5E1',
+            border: `2.5px solid ${
+              isSelected ? '#0F172A' : isIncluded ? borderColor : '#64748B'
+            }`,
             color: '#FFFFFF',
+            opacity: isIncluded ? 1 : 0.65,
           }}
         >
-          {orderNumber ?? ''}
+          {isIncluded ? (orderNumber ?? '') : ''}
         </div>
       </AdvancedMarker>
 
@@ -118,9 +115,12 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         <InfoWindow anchor={marker} onCloseClick={onClose} maxWidth={260}>
           <div className="p-1 text-slate-900">
             <div className="text-xs font-medium text-slate-500">
-              {PRIEST_PALETTE.find((p) => p.id === stop.priestId)?.name ??
-                `Ksiądz ${stop.priestId}`}
-              {orderNumber ? ` · Przystanek #${orderNumber}` : ''}
+              {isIncluded
+                ? `${
+                    PRIEST_PALETTE.find((p) => p.id === stop.priestId)?.name ??
+                    `Ksiądz ${stop.priestId}`
+                  }${orderNumber ? ` · Przystanek #${orderNumber}` : ''}`
+                : 'Zapamiętany adres (poza bieżącym planem)'}
             </div>
             <div className="text-sm font-semibold mt-0.5">{stop.address}</div>
             {stop.label && stop.label !== stop.address && (
@@ -145,7 +145,7 @@ const StopMarker: React.FC<StopMarkerProps> = ({
               onClick={onDelete}
               className="mt-2 text-xs font-medium text-red-600 hover:text-red-700"
             >
-              Usuń dom z planu
+              Usuń adres z parafii
             </button>
           </div>
         </InfoWindow>
@@ -193,10 +193,6 @@ const ParishChurchMarker: React.FC<{ parish: ParishCenter }> = ({ parish }) => {
   );
 };
 
-/**
- * Renders native Google Maps Polylines via primaryRoute.createPolylines()
- * and auto-fits viewport bounds when routes change.
- */
 const RoutePolylinesLayer: React.FC<{
   routeObjects: RoutePolylineEntry[];
 }> = ({ routeObjects }) => {
@@ -250,18 +246,10 @@ const RoutePolylinesLayer: React.FC<{
   return null;
 };
 
-/**
- * Handles camera panning, editable parish polygon drawing, click-street-to-import,
- * and click-to-add-house modes.
- */
 const MapControllerLayer: React.FC<{
   parish: ParishCenter | null;
   boundary: LatLng[];
   interactionMode: MapInteractionMode;
-  onSetInteractionMode: (mode: MapInteractionMode) => void;
-  onCreatePresetBoundary: (radiusMeters?: number) => void;
-  onScaleBoundary: (factor: number) => void;
-  onClearBoundary: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
@@ -271,10 +259,6 @@ const MapControllerLayer: React.FC<{
   parish,
   boundary,
   interactionMode,
-  onSetInteractionMode,
-  onCreatePresetBoundary,
-  onScaleBoundary,
-  onClearBoundary,
   onBoundaryComplete,
   onBoundaryUpdate,
   onCancelInteraction,
@@ -330,127 +314,24 @@ const MapControllerLayer: React.FC<{
     };
   }, [map, interactionMode, onMapAddStop, onMapPickStreet]);
 
-  if (!parish) return null;
+  if (!parish || interactionMode === 'pan') return null;
 
   return (
-    <MapControl position={ControlPosition.BOTTOM_CENTER}>
-      {interactionMode === 'pan' && (
-        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200/90 rounded-2xl shadow-lg p-1.5 flex flex-wrap items-center justify-center gap-1 text-xs text-slate-800">
-          <button
-            type="button"
-            onClick={() => onSetInteractionMode('pan')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-900 text-white font-medium inline-flex items-center gap-1.5 whitespace-nowrap"
-          >
-            <Hand className="w-3.5 h-3.5" />
-            Przesuwaj
-          </button>
-
-          {boundary.length < 3 ? (
-            <>
-              <button
-                type="button"
-                onClick={() => onCreatePresetBoundary(300)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <CircleDashed className="w-3.5 h-3.5" />
-                300 m
-              </button>
-              <button
-                type="button"
-                onClick={() => onCreatePresetBoundary(500)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <CircleDashed className="w-3.5 h-3.5" />
-                500 m
-              </button>
-              <button
-                type="button"
-                onClick={() => onCreatePresetBoundary(1000)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <CircleDashed className="w-3.5 h-3.5" />
-                1 km
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={() => onScaleBoundary(0.82)}
-                title="Zmniejsz zaznaczony teren"
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <Minimize2 className="w-3.5 h-3.5" />
-                Mniejszy
-              </button>
-              <button
-                type="button"
-                onClick={() => onScaleBoundary(1.22)}
-                title="Powiększ zaznaczony teren"
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                Większy
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            onClick={() => onSetInteractionMode('draw_boundary')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-          >
-            <Pentagon className="w-3.5 h-3.5" />
-            {boundary.length >= 3 ? 'Przerysuj' : 'Rysuj teren'}
-          </button>
-
-          {boundary.length >= 3 && (
-            <button
-              type="button"
-              onClick={onClearBoundary}
-              title="Usuń granice terenu"
-              className="min-h-[36px] px-2 py-1.5 rounded-xl hover:bg-red-50 text-slate-500 hover:text-red-600 inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          <span className="h-4 w-px bg-slate-200 mx-0.5 hidden sm:inline-block" />
-
-          <button
-            type="button"
-            onClick={() => onSetInteractionMode('pick_street')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-          >
-            <Route className="w-3.5 h-3.5 text-amber-700" />
-            Kliknij ulicę
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onSetInteractionMode('add_stop')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-          >
-            <MapPinPlus className="w-3.5 h-3.5" />
-            Dodaj dom
-          </button>
-        </div>
-      )}
-
+    <MapControl position={ControlPosition.TOP_CENTER}>
       {interactionMode === 'draw_boundary' && (
-        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2.5 text-sm text-slate-900">
-          <span className="font-medium text-xs sm:text-sm text-center">
-            Dotknij kolejne narożniki terenu · Punkty:{' '}
+        <div className="no-print mt-3 mx-2 max-w-[calc(100vw-24px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-900">
+          <span className="font-medium">
+            Dotknij kolejne narożniki obszaru · Punkty:{' '}
             <span className="font-mono tabular-nums font-bold text-amber-800">
               {draftVertexCount}
             </span>
           </span>
-          <div className="flex flex-wrap items-center justify-center gap-1.5">
+          <div className="flex items-center gap-1.5">
             {draftVertexCount > 0 && (
               <button
                 type="button"
                 onClick={undoLastVertex}
-                className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
+                className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
               >
                 <Undo2 className="w-3.5 h-3.5" />
                 Cofnij
@@ -460,10 +341,10 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={finishDraft}
-                className="min-h-[38px] px-3.5 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
+                className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1"
               >
                 <Check className="w-3.5 h-3.5" />
-                Zakończ obrys
+                Zapisz obszar
               </button>
             )}
             <button
@@ -472,7 +353,7 @@ const MapControllerLayer: React.FC<{
                 cancelDraft();
                 onCancelInteraction();
               }}
-              className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
             >
               <X className="w-3.5 h-3.5" />
               Anuluj
@@ -482,34 +363,33 @@ const MapControllerLayer: React.FC<{
       )}
 
       {interactionMode === 'pick_street' && (
-        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
+        <div className="no-print mt-3 mx-2 max-w-[calc(100vw-24px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-xl shadow-lg px-3.5 py-2 flex items-center gap-2.5 text-xs text-slate-900">
           <Route className="w-4 h-4 text-amber-700 shrink-0" />
-          <span className="font-medium text-xs sm:text-sm">
-            Kliknij dowolną ulicę na mapie — pobierzemy wszystkie domy z tej
-            ulicy
+          <span className="font-medium leading-snug">
+            Kliknij ulicę na mapie, aby pobrać z niej adresy domów
           </span>
           <button
             type="button"
             onClick={onCancelInteraction}
-            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-xl whitespace-nowrap shrink-0"
+            className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg whitespace-nowrap shrink-0"
           >
-            Zakończ
+            Gotowe
           </button>
         </div>
       )}
 
       {interactionMode === 'add_stop' && (
-        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
+        <div className="no-print mt-3 mx-2 max-w-[calc(100vw-24px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3.5 py-2 flex items-center gap-2.5 text-xs text-slate-900">
           <MapPinPlus className="w-4 h-4 text-amber-700 shrink-0" />
-          <span className="font-medium text-xs sm:text-sm">
-            Dotknij budynek na mapie — zapiszemy jego adres domu
+          <span className="font-medium leading-snug">
+            Dotknij budynek na mapie — rozpoznamy i zapiszemy adres
           </span>
           <button
             type="button"
             onClick={onCancelInteraction}
-            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl whitespace-nowrap shrink-0"
+            className="min-h-[34px] px-3 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
           >
-            Zakończ
+            Gotowe
           </button>
         </div>
       )}
@@ -527,10 +407,6 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   highlightedStopId,
   streetPickFeedback,
   onDismissStreetFeedback,
-  onSetInteractionMode,
-  onCreatePresetBoundary,
-  onScaleBoundary,
-  onClearBoundary,
   onBoundaryComplete,
   onBoundaryUpdate,
   onCancelInteraction,
@@ -571,10 +447,6 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           parish={parish}
           boundary={boundary}
           interactionMode={interactionMode}
-          onSetInteractionMode={onSetInteractionMode}
-          onCreatePresetBoundary={onCreatePresetBoundary}
-          onScaleBoundary={onScaleBoundary}
-          onClearBoundary={onClearBoundary}
           onBoundaryComplete={onBoundaryComplete}
           onBoundaryUpdate={onBoundaryUpdate}
           onCancelInteraction={onCancelInteraction}
@@ -611,7 +483,9 @@ export const ParishMap: React.FC<ParishMapProps> = ({
 
       {streetPickFeedback && (
         <div
-          className={`no-print absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[calc(100%-24px)] sm:max-w-md px-3.5 py-2.5 rounded-xl border shadow-lg backdrop-blur-md flex items-center gap-2.5 text-xs font-medium ${
+          className={`no-print absolute ${
+            interactionMode === 'pan' ? 'top-3' : 'top-16 sm:top-16'
+          } left-1/2 -translate-x-1/2 z-20 max-w-[calc(100%-24px)] sm:max-w-md px-3.5 py-2.5 rounded-xl border shadow-lg backdrop-blur-md flex items-center gap-2.5 text-xs font-medium ${
             streetPickFeedback.status === 'loading'
               ? 'bg-white/95 border-slate-200 text-slate-800'
               : streetPickFeedback.status === 'success'

@@ -264,3 +264,28 @@ export function exportScheduleToCsv(
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export function extractStreetName(stop: Pick<VisitStop, 'address' | 'label'>): string {
+  const raw = (stop.label || stop.address).split(',')[0]?.trim() || stop.address;
+  const cleaned = raw
+    .replace(/\s+\d+[a-zA-Z]?(\s*\/\s*\d+[a-zA-Z]?)?(\s*[a-zA-Z])?$/, '')
+    .replace(/\s*\(środek ulicy\)\s*$/i, '')
+    .trim();
+  return cleaned || raw;
+}
+
+export function extractHouseNumberLabel(
+  stop: Pick<VisitStop, 'address' | 'label'>
+): string {
+  const firstPart = (stop.label || stop.address).split(',')[0]?.trim() || '';
+  const match = firstPart.match(/\b(\d+[a-zA-Z]?(?:\s*\/\s*\d+[a-zA-Z]?)?)$/);
+  return match ? match[1].replace(/\s+/g, '') : '';
+}
+
+export function isEvenHouseNumberStr(houseNumber: string): boolean | null {
+  const match = houseNumber.match(/^\d+/);
+  if (!match) return null;
+  const num = Number.parseInt(match[0], 10);
+  return num % 2 === 0;
+}
+

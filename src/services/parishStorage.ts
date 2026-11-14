@@ -110,6 +110,7 @@ function sanitizeStopPayload(
     durationMinutes: clampInt(stop.durationMinutes, 1, 240, 15),
     priestId: clampInt(stop.priestId, 1, 4, 1),
     inBoundary: stop.inBoundary ?? true,
+    included: stop.included !== false,
     notes: cleanStr(stop.notes || '', 500),
   };
 }
@@ -195,6 +196,7 @@ export function subscribeParishStops(
               durationMinutes: Number(d.durationMinutes ?? 15),
               priestId: Number(d.priestId ?? 1),
               inBoundary: d.inBoundary !== false,
+              included: d.included !== false,
               notes: d.notes ? String(d.notes) : undefined,
             },
           };
@@ -377,6 +379,7 @@ export async function updateStopInFirestore(
       durationMinutes: clampInt(stop.durationMinutes, 1, 240, 15),
       priestId: clampInt(stop.priestId, 1, 4, 1),
       inBoundary: stop.inBoundary ?? true,
+      included: stop.included !== false,
       notes: cleanStr(stop.notes || '', 500),
       updatedAt: serverTimestamp(),
     });
@@ -388,7 +391,7 @@ export async function updateStopInFirestore(
 export async function batchUpdateStopFieldInFirestore(
   parishId: string,
   stops: VisitStop[],
-  mode: 'priestId' | 'inBoundary'
+  mode: 'priestId' | 'inBoundary' | 'included'
 ): Promise<void> {
   if (stops.length === 0) return;
   const safeParishId = sanitizeDocId(parishId);
@@ -402,6 +405,11 @@ export async function batchUpdateStopFieldInFirestore(
         if (mode === 'priestId') {
           batch.update(ref, {
             priestId: clampInt(stop.priestId, 1, 4, 1),
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'included') {
+          batch.update(ref, {
+            included: stop.included !== false,
             updatedAt: serverTimestamp(),
           });
         } else {

@@ -117,6 +117,10 @@
           "type": "boolean",
           "description": "Whether the house lies inside the parish boundary."
         },
+        "included": {
+          "type": "boolean",
+          "description": "Whether the house is included in the active koleda route plan while remaining saved in the parish repository."
+        },
         "notes": {
           "type": "string",
           "description": "Optional family name or visit notes.",

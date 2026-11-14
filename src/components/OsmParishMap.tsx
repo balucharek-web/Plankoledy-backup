@@ -5,15 +5,9 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
-  CircleDashed,
-  Hand,
   Loader2,
   MapPinPlus,
-  Maximize2,
-  Minimize2,
-  Pentagon,
   Route,
-  Trash2,
   Undo2,
   X,
 } from 'lucide-react';
@@ -36,10 +30,6 @@ interface OsmParishMapProps {
   highlightedStopId: string | null;
   streetPickFeedback: StreetPickFeedback | null;
   onDismissStreetFeedback: () => void;
-  onSetInteractionMode: (mode: MapInteractionMode) => void;
-  onCreatePresetBoundary: (radiusMeters?: number) => void;
-  onScaleBoundary: (factor: number) => void;
-  onClearBoundary: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
@@ -68,10 +58,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   highlightedStopId,
   streetPickFeedback,
   onDismissStreetFeedback,
-  onSetInteractionMode,
-  onCreatePresetBoundary,
-  onScaleBoundary,
-  onClearBoundary,
   onBoundaryComplete,
   onBoundaryUpdate,
   onCancelInteraction,
@@ -120,7 +106,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     return dict;
   }, [routes]);
 
-  // Initialize Leaflet map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
@@ -189,7 +174,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Cursor & doubleClickZoom toggle per mode
   useEffect(() => {
     const map = mapRef.current;
     const container = containerRef.current;
@@ -212,7 +196,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     }
   }, [interactionMode]);
 
-  // Pan to newly selected parish
   useEffect(() => {
     const map = mapRef.current;
     const layer = parishLayerRef.current;
@@ -233,7 +216,11 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       zIndexOffset: 500,
     });
     marker.bindPopup(
-      `<div style="font-size:12px;"><div style="color:#92400E;font-weight:600;">Punkt startowy parafii</div><div style="font-weight:700;margin-top:2px;">${escapeHtml(parish.name)}</div><div style="color:#475569;margin-top:2px;">${escapeHtml(parish.address)}</div></div>`
+      `<div style="font-size:12px;"><div style="color:#92400E;font-weight:600;">Punkt startowy parafii</div><div style="font-weight:700;margin-top:2px;">${escapeHtml(
+        parish.name
+      )}</div><div style="color:#475569;margin-top:2px;">${escapeHtml(
+        parish.address
+      )}</div></div>`
     );
     marker.addTo(layer);
 
@@ -244,7 +231,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     }
   }, [parish]);
 
-  // Render editable parish boundary polygon
   useEffect(() => {
     const layer = boundaryLayerRef.current;
     if (!layer) return;
@@ -262,7 +248,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       interactive: false,
     }).addTo(layer);
 
-    // Draggable vertex handles
     boundary.forEach((pt, idx) => {
       const handleIcon = L.divIcon({
         className: '',
@@ -296,7 +281,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     });
   }, [boundary, interactionMode]);
 
-  // Render drawing draft polygon
   useEffect(() => {
     const layer = draftLayerRef.current;
     if (!layer) return;
@@ -321,7 +305,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       const isFirst = idx === 0;
       const dotIcon = L.divIcon({
         className: '',
-        html: `<div style="width:${isFirst ? 24 : 15}px;height:${isFirst ? 24 : 15}px;border-radius:9999px;background:${isFirst ? '#B45309' : '#FFFFFF'};border:${isFirst ? '3px solid #FEF3C7' : '2.5px solid #B45309'};box-shadow:0 2px 6px rgba(0,0,0,0.3);"></div>`,
+        html: `<div style="width:${isFirst ? 24 : 15}px;height:${
+          isFirst ? 24 : 15
+        }px;border-radius:9999px;background:${
+          isFirst ? '#B45309' : '#FFFFFF'
+        };border:${
+          isFirst ? '3px solid #FEF3C7' : '2.5px solid #B45309'
+        };box-shadow:0 2px 6px rgba(0,0,0,0.3);"></div>`,
         iconSize: [isFirst ? 24 : 15, isFirst ? 24 : 15],
         iconAnchor: [isFirst ? 12 : 7.5, isFirst ? 12 : 7.5],
       });
@@ -344,7 +334,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     });
   }, [draftPoints, interactionMode]);
 
-  // Render stop markers
   useEffect(() => {
     const layer = stopsLayerRef.current;
     if (!layer) return;
@@ -356,32 +345,65 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         PRIEST_PALETTE.find((p) => p.id === stop.priestId) ?? PRIEST_PALETTE[0];
       const orderNum = orderByStopId[stop.id];
       const isSelected = highlightedStopId === stop.id;
-      const size = orderNum ? 28 : 22;
+      const isIncluded = stop.included !== false;
+      const size = !isIncluded ? 14 : orderNum ? 28 : 22;
 
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${palette.color};border:2.5px solid ${isSelected ? '#0F172A' : palette.borderColor};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${orderNum ?? ''}</div>`,
+        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${
+          isIncluded ? palette.color : '#CBD5E1'
+        };border:2.5px solid ${
+          isSelected ? '#0F172A' : isIncluded ? palette.borderColor : '#64748B'
+        };opacity:${isIncluded ? 1 : 0.65};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${
+          isIncluded ? (orderNum ?? '') : ''
+        }</div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       });
 
       const marker = L.marker([stop.location.lat, stop.location.lng], {
         icon,
-        zIndexOffset: isSelected ? 400 : orderNum ? 200 - orderNum : 100,
+        zIndexOffset: isSelected
+          ? 400
+          : !isIncluded
+            ? 40
+            : orderNum
+              ? 200 - orderNum
+              : 100,
       }).addTo(layer);
 
       const popupEl = document.createElement('div');
       popupEl.style.fontSize = '12px';
       popupEl.style.maxWidth = '240px';
       popupEl.innerHTML = `
-        <div style="color:#64748B;font-weight:500;">${escapeHtml(palette.name)}${orderNum ? ` · Przystanek #${orderNum}` : ''}</div>
-        <div style="font-weight:700;color:#0F172A;margin-top:2px;">${escapeHtml(stop.address)}</div>
-        <div style="color:#64748B;margin-top:4px;">Czas wizyty: ${stop.durationMinutes} min${stop.inBoundary === false ? ' · <span style="color:#B45309;font-weight:600;">Poza terenem parafii</span>' : ''}</div>
-        ${stop.notes ? `<div style="color:#475569;margin-top:4px;border-top:1px solid #F1F5F9;padding-top:4px;">${escapeHtml(stop.notes)}</div>` : ''}
+        <div style="color:#64748B;font-weight:500;">${
+          isIncluded
+            ? `${escapeHtml(palette.name)}${
+                orderNum ? ` · Przystanek #${orderNum}` : ''
+              }`
+            : 'Zapamiętany adres (poza bieżącym planem)'
+        }</div>
+        <div style="font-weight:700;color:#0F172A;margin-top:2px;">${escapeHtml(
+          stop.address
+        )}</div>
+        <div style="color:#64748B;margin-top:4px;">Czas wizyty: ${
+          stop.durationMinutes
+        } min${
+          stop.inBoundary === false
+            ? ' · <span style="color:#B45309;font-weight:600;">Poza terenem parafii</span>'
+            : ''
+        }</div>
+        ${
+          stop.notes
+            ? `<div style="color:#475569;margin-top:4px;border-top:1px solid #F1F5F9;padding-top:4px;">${escapeHtml(
+                stop.notes
+              )}</div>`
+            : ''
+        }
       `;
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.textContent = 'Usuń dom z planu';
+      deleteBtn.textContent = 'Usuń adres z parafii';
       deleteBtn.style.cssText =
         'margin-top:6px;font-size:12px;font-weight:600;color:#DC2626;background:none;border:none;padding:0;cursor:pointer;';
       deleteBtn.onclick = () => {
@@ -397,7 +419,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     });
   }, [stops, orderByStopId, highlightedStopId]);
 
-  // Open popup when stop selected from list
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !highlightedStopId) return;
@@ -408,7 +429,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     }
   }, [highlightedStopId]);
 
-  // Render route polylines & fit bounds
   useEffect(() => {
     const map = mapRef.current;
     const layer = routesLayerRef.current;
@@ -440,9 +460,101 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">
       <div ref={containerRef} className="w-full h-full z-0" />
 
+      {parish && interactionMode !== 'pan' && (
+        <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[500] w-max max-w-[calc(100%-24px)]">
+          {interactionMode === 'draw_boundary' && (
+            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-900">
+              <span className="font-medium">
+                Dotknij kolejne narożniki obszaru · Punkty:{' '}
+                <span className="font-mono tabular-nums font-bold text-amber-800">
+                  {draftPoints.length}
+                </span>
+              </span>
+              <div className="flex items-center gap-1.5">
+                {draftPoints.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = draftPointsRef.current.slice(0, -1);
+                      draftPointsRef.current = next;
+                      setDraftPoints(next);
+                    }}
+                    className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    Cofnij
+                  </button>
+                )}
+                {draftPoints.length >= 3 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pts = draftPointsRef.current;
+                      draftPointsRef.current = [];
+                      setDraftPoints([]);
+                      onBoundaryComplete(pts);
+                    }}
+                    className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Zapisz obszar
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    draftPointsRef.current = [];
+                    setDraftPoints([]);
+                    onCancelInteraction();
+                  }}
+                  className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Anuluj
+                </button>
+              </div>
+            </div>
+          )}
+
+          {interactionMode === 'pick_street' && (
+            <div className="bg-white/95 backdrop-blur-md border border-amber-300 rounded-xl shadow-lg px-3.5 py-2 flex items-center gap-2.5 text-xs text-slate-900">
+              <Route className="w-4 h-4 text-amber-700 shrink-0" />
+              <span className="font-medium leading-snug">
+                Kliknij ulicę na mapie, aby pobrać z niej adresy domów
+              </span>
+              <button
+                type="button"
+                onClick={onCancelInteraction}
+                className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg whitespace-nowrap shrink-0"
+              >
+                Gotowe
+              </button>
+            </div>
+          )}
+
+          {interactionMode === 'add_stop' && (
+            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3.5 py-2 flex items-center gap-2.5 text-xs text-slate-900">
+              <MapPinPlus className="w-4 h-4 text-amber-700 shrink-0" />
+              <span className="font-medium leading-snug">
+                Dotknij budynek na mapie — rozpoznamy i zapiszemy adres
+              </span>
+              <button
+                type="button"
+                onClick={onCancelInteraction}
+                className="min-h-[34px] px-3 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+              >
+                Gotowe
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {streetPickFeedback && (
         <div
-          className={`no-print absolute top-3 left-1/2 -translate-x-1/2 z-[500] max-w-[calc(100%-24px)] sm:max-w-md px-3.5 py-2.5 rounded-xl border shadow-lg backdrop-blur-md flex items-center gap-2.5 text-xs font-medium ${
+          className={`no-print absolute ${
+            interactionMode === 'pan' ? 'top-3' : 'top-16 sm:top-16'
+          } left-1/2 -translate-x-1/2 z-[510] max-w-[calc(100%-24px)] sm:max-w-md px-3.5 py-2.5 rounded-xl border shadow-lg backdrop-blur-md flex items-center gap-2.5 text-xs font-medium ${
             streetPickFeedback.status === 'loading'
               ? 'bg-white/95 border-slate-200 text-slate-800'
               : streetPickFeedback.status === 'success'
@@ -469,198 +581,6 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
             >
               <X className="w-3.5 h-3.5" />
             </button>
-          )}
-        </div>
-      )}
-
-      {parish && (
-        <div className="no-print absolute bottom-5 left-1/2 -translate-x-1/2 z-[500] w-max max-w-[calc(100%-16px)]">
-          {interactionMode === 'pan' && (
-            <div className="bg-white/95 backdrop-blur-md border border-slate-200/90 rounded-2xl shadow-lg p-1.5 flex flex-wrap items-center justify-center gap-1 text-xs text-slate-800">
-              <button
-                type="button"
-                onClick={() => onSetInteractionMode('pan')}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-900 text-white font-medium inline-flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <Hand className="w-3.5 h-3.5" />
-                Przesuwaj
-              </button>
-
-              {boundary.length < 3 ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onCreatePresetBoundary(300)}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                  >
-                    <CircleDashed className="w-3.5 h-3.5" />
-                    300 m
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onCreatePresetBoundary(500)}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                  >
-                    <CircleDashed className="w-3.5 h-3.5" />
-                    500 m
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onCreatePresetBoundary(1000)}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                  >
-                    <CircleDashed className="w-3.5 h-3.5" />
-                    1 km
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onScaleBoundary(0.82)}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                  >
-                    <Minimize2 className="w-3.5 h-3.5" />
-                    Mniejszy
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onScaleBoundary(1.22)}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5" />
-                    Większy
-                  </button>
-                </>
-              )}
-
-              <button
-                type="button"
-                onClick={() => onSetInteractionMode('draw_boundary')}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-              >
-                <Pentagon className="w-3.5 h-3.5" />
-                {boundary.length >= 3 ? 'Przerysuj' : 'Rysuj teren'}
-              </button>
-
-              {boundary.length >= 3 && (
-                <button
-                  type="button"
-                  onClick={onClearBoundary}
-                  title="Usuń granice terenu"
-                  className="min-h-[36px] px-2 py-1.5 rounded-xl hover:bg-red-50 text-slate-500 hover:text-red-600 inline-flex items-center gap-1 whitespace-nowrap transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-
-              <span className="h-4 w-px bg-slate-200 mx-0.5 hidden sm:inline-block" />
-
-              <button
-                type="button"
-                onClick={() => onSetInteractionMode('pick_street')}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-              >
-                <Route className="w-3.5 h-3.5 text-amber-700" />
-                Kliknij ulicę
-              </button>
-
-              <button
-                type="button"
-                onClick={() => onSetInteractionMode('add_stop')}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
-              >
-                <MapPinPlus className="w-3.5 h-3.5" />
-                Dodaj dom
-              </button>
-            </div>
-          )}
-
-          {interactionMode === 'draw_boundary' && (
-            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2.5 text-sm text-slate-900">
-              <span className="font-medium text-xs sm:text-sm text-center">
-                Dotknij kolejne narożniki terenu · Punkty:{' '}
-                <span className="font-mono tabular-nums font-bold text-amber-800">
-                  {draftPoints.length}
-                </span>
-              </span>
-              <div className="flex flex-wrap items-center justify-center gap-1.5">
-                {draftPoints.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = draftPointsRef.current.slice(0, -1);
-                      draftPointsRef.current = next;
-                      setDraftPoints(next);
-                    }}
-                    className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
-                  >
-                    <Undo2 className="w-3.5 h-3.5" />
-                    Cofnij
-                  </button>
-                )}
-                {draftPoints.length >= 3 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const pts = draftPointsRef.current;
-                      draftPointsRef.current = [];
-                      setDraftPoints([]);
-                      onBoundaryComplete(pts);
-                    }}
-                    className="min-h-[38px] px-3.5 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    Zakończ obrys
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    draftPointsRef.current = [];
-                    setDraftPoints([]);
-                    onCancelInteraction();
-                  }}
-                  className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
-                >
-                  <X className="w-3.5 h-3.5" />
-                  Anuluj
-                </button>
-              </div>
-            </div>
-          )}
-
-          {interactionMode === 'pick_street' && (
-            <div className="bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
-              <Route className="w-4 h-4 text-amber-700 shrink-0" />
-              <span className="font-medium text-xs sm:text-sm">
-                Kliknij dowolną ulicę na mapie — pobierzemy wszystkie domy z tej
-                ulicy
-              </span>
-              <button
-                type="button"
-                onClick={onCancelInteraction}
-                className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-xl whitespace-nowrap shrink-0"
-              >
-                Zakończ
-              </button>
-            </div>
-          )}
-
-          {interactionMode === 'add_stop' && (
-            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
-              <MapPinPlus className="w-4 h-4 text-amber-700 shrink-0" />
-              <span className="font-medium text-xs sm:text-sm">
-                Dotknij budynek na mapie — zapiszemy jego adres domu
-              </span>
-              <button
-                type="button"
-                onClick={onCancelInteraction}
-                className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl whitespace-nowrap shrink-0"
-              >
-                Zakończ
-              </button>
-            </div>
           )}
         </div>
       )}

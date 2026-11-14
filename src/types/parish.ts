@@ -30,6 +30,7 @@ export interface VisitStop {
   priestId: number;
   notes?: string;
   inBoundary?: boolean;
+  included?: boolean;
 }
 
 export interface ScheduledStopItem {
