@@ -9,6 +9,7 @@ import {
   VisitStop,
 } from '../types/parish';
 import { addMinutesToHHMM } from '../utils/spatial';
+import { fetchNearbyParishesOsm } from './overpassStreets';
 
 interface NominatimSearchItem {
   place_id: number;
@@ -16,7 +17,208 @@ interface NominatimSearchItem {
   lat: string;
   lon: string;
   name?: string;
+  class?: string;
+  type?: string;
   address?: Record<string, string>;
+}
+
+interface PhotonFeature {
+  geometry?: {
+    coordinates?: [number, number];
+  };
+  properties?: {
+    osm_id?: number;
+    osm_type?: string;
+    osm_key?: string;
+    osm_value?: string;
+    type?: string;
+    name?: string;
+    street?: string;
+    housenumber?: string;
+    locality?: string;
+    district?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+    county?: string;
+    state?: string;
+    country?: string;
+    countrycode?: string;
+    postcode?: string;
+  };
+}
+
+interface PhotonResponse {
+  features?: PhotonFeature[];
+}
+
+const POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
+
+function stripPolishDiacritics(text: string): string {
+  return text
+    .replace(/[łŁ]/g, (m) => (m === 'Ł' ? 'L' : 'l'))
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function normalizeParishQuery(raw: string): {
+  cleaned: string;
+  strippedCore: string;
+  tokens: string[];
+  wantsCemetery: boolean;
+} {
+  const cleaned = raw
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\bpw\.?\b/gi, ' ')
+    .replace(/\bks\.?\b/gi, ' ')
+    .replace(/\bNMP\b/g, 'Najświętszej Maryi Panny')
+    .replace(/\bMB\b/g, 'Matki Bożej')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Remove optional institutional prefixes that often differ from OSM names
+  // (e.g. user types "parafia Mikołów" while OSM calls it "Kościół pw. ...")
+  const strippedCore = cleaned
+    .replace(
+      /\b(parafia|rzymskokatolicka|kościół|kosciol|kośc\.|kosc\.|par\.|bazylika|sanktuarium|katedra|kaplica|pw|św\.?|sw\.?|świętego|swietego|świętej|swietej|święty|swiety|święta|swieta|bł\.?|bl\.?|błogosławionego|błogosławionej)\b/gi,
+      ' '
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const tokens = stripPolishDiacritics(strippedCore || cleaned)
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2);
+
+  const wantsCemetery = /cment|cmentar/i.test(raw);
+
+  return { cleaned, strippedCore, tokens, wantsCemetery };
+}
+
+function isParishPhotonFeature(props: NonNullable<PhotonFeature['properties']>): boolean {
+  if (props.osm_key === 'amenity' && props.osm_value === 'place_of_worship') {
+    return true;
+  }
+  if (
+    props.osm_key === 'building' &&
+    ['church', 'cathedral', 'chapel'].includes(props.osm_value || '')
+  ) {
+    return true;
+  }
+  const nameLower = (props.name || '').toLowerCase();
+  return /(parafi|kościół|kosciol|bazylika|sanktuarium|katedra|kaplica|plebania)/.test(
+    nameLower
+  );
+}
+
+function isCemeteryFeature(props: NonNullable<PhotonFeature['properties']>): boolean {
+  if (props.osm_value === 'cemetery' || props.osm_key === 'landuse' && props.osm_value === 'cemetery') {
+    return true;
+  }
+  return false;
+}
+
+function formatPhotonFeature(
+  feature: PhotonFeature,
+  forcedType?: SelectedPlaceData['placeType']
+): SelectedPlaceData | null {
+  const coords = feature.geometry?.coordinates;
+  const props = feature.properties;
+  if (!coords || coords.length < 2 || !props) return null;
+
+  const [lng, lat] = coords;
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+
+  const streetPart = [props.street, props.housenumber].filter(Boolean).join(' ');
+  const city = props.city || props.town || props.village || props.county || '';
+  const locality =
+    props.locality && props.locality !== city ? props.locality : '';
+  const cityPart = [props.postcode, city].filter(Boolean).join(' ');
+
+  const isChurch = isParishPhotonFeature(props);
+  const isCityPlace =
+    props.osm_key === 'place' ||
+    ['city', 'town', 'village', 'district', 'locality'].includes(
+      props.type || ''
+    );
+
+  const name =
+    props.name?.trim() ||
+    streetPart ||
+    city ||
+    props.district ||
+    'Wybrana lokalizacja';
+
+  const addressParts = [streetPart, locality, cityPart || props.state].filter(
+    Boolean
+  );
+  const address =
+    addressParts.join(', ') || props.country || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+  const placeType: SelectedPlaceData['placeType'] =
+    forcedType ?? (isChurch ? 'parish' : isCityPlace ? 'place' : 'address');
+
+  return {
+    name,
+    address,
+    location: { lat, lng },
+    placeId: `osm_${props.osm_type || 'N'}_${props.osm_id || `${lat}_${lng}`}`,
+    placeType,
+  };
+}
+
+async function queryPhotonRaw(
+  query: string,
+  options: {
+    biasLocation?: LatLng | null;
+    osmTag?: string;
+    limit?: number;
+    timeoutMs?: number;
+  } = {}
+): Promise<PhotonFeature[]> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return [];
+
+  const params = new URLSearchParams({
+    q: trimmed,
+    limit: String(options.limit ?? 10),
+  });
+
+  if (options.osmTag) {
+    params.set('osm_tag', options.osmTag);
+  }
+
+  const bias = options.biasLocation ?? POLAND_CENTER;
+  params.set('lat', bias.lat.toFixed(4));
+  params.set('lon', bias.lng.toFixed(4));
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? 6500
+  );
+
+  try {
+    const res = await fetch(
+      `https://photon.komoot.io/api/?${params.toString()}`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as PhotonResponse;
+    return (data.features ?? []).filter((f) => {
+      const cc = f.properties?.countrycode;
+      return !cc || cc.toUpperCase() === 'PL';
+    });
+  } catch {
+    return [];
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 function formatNominatimItem(item: NominatimSearchItem): SelectedPlaceData {
@@ -40,6 +242,10 @@ function formatNominatimItem(item: NominatimSearchItem): SelectedPlaceData {
       ? `${streetPart}, ${cityPart}`
       : streetPart || item.display_name;
 
+  const isParish =
+    item.type === 'place_of_worship' ||
+    /(parafi|kościół|kosciol|bazylika|sanktuarium|katedra|kaplica)/i.test(name);
+
   return {
     name,
     address: shortAddress,
@@ -48,16 +254,17 @@ function formatNominatimItem(item: NominatimSearchItem): SelectedPlaceData {
       lng: Number.parseFloat(item.lon),
     },
     placeId: `osm_${item.place_id}`,
+    placeType: isParish ? 'parish' : item.class === 'boundary' || item.class === 'place' ? 'place' : 'address',
   };
 }
 
-export async function searchPlacesNominatim(
+async function queryNominatimRaw(
   query: string,
   biasLocation?: LatLng | null,
   limit = 6
 ): Promise<SelectedPlaceData[]> {
   const trimmed = query.trim();
-  if (trimmed.length < 3) return [];
+  if (trimmed.length < 2) return [];
 
   const params = new URLSearchParams({
     format: 'jsonv2',
@@ -77,20 +284,242 @@ export async function searchPlacesNominatim(
     );
   }
 
-  const res = await fetch(
-    `https://nominatim.openstreetmap.org/search?${params.toString()}`,
-    {
-      headers: { Accept: 'application/json' },
-    }
-  );
-  if (!res.ok) {
-    throw new Error('Nie udało się wyszukać adresu w OpenStreetMap.');
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?${params.toString()}`,
+      {
+        headers: { Accept: 'application/json' },
+      }
+    );
+    if (!res.ok) return [];
+    const items = (await res.json()) as NominatimSearchItem[];
+    return items
+      .filter((i) => !Number.isNaN(Number.parseFloat(i.lat)))
+      .map(formatNominatimItem);
+  } catch {
+    return [];
   }
-  const items = (await res.json()) as NominatimSearchItem[];
-  return items
-    .filter((i) => !Number.isNaN(Number.parseFloat(i.lat)))
-    .map(formatNominatimItem);
 }
+
+function scorePlaceMatch(
+  item: SelectedPlaceData,
+  tokens: string[],
+  biasLocation?: LatLng | null
+): number {
+  let score = item.placeType === 'parish' ? 200 : item.placeType === 'place' ? 40 : 20;
+
+  const haystack = stripPolishDiacritics(`${item.name} ${item.address}`);
+  const nameHaystack = stripPolishDiacritics(item.name);
+
+  for (const token of tokens) {
+    const stem = token.length >= 5 ? token.slice(0, token.length - 1) : token;
+    if (nameHaystack.includes(token)) {
+      score += 45;
+    } else if (nameHaystack.includes(stem)) {
+      score += 32;
+    } else if (haystack.includes(token)) {
+      score += 25;
+    } else if (haystack.includes(stem)) {
+      score += 18;
+    }
+  }
+
+  if (biasLocation) {
+    const dist = haversineMeters(biasLocation, item.location);
+    if (dist < 5000) score += 25;
+    else if (dist < 25000) score += 12;
+  }
+
+  return score;
+}
+
+function deduplicatePlaces(items: SelectedPlaceData[]): SelectedPlaceData[] {
+  const result: SelectedPlaceData[] = [];
+  for (const item of items) {
+    const normName = stripPolishDiacritics(item.name).trim();
+    const existing = result.find((r) => {
+      if (r.placeId === item.placeId) return true;
+      const sameDist = haversineMeters(r.location, item.location) < 80;
+      if (!sameDist) return false;
+      const rName = stripPolishDiacritics(r.name).trim();
+      return (
+        rName === normName ||
+        rName.includes(normName) ||
+        normName.includes(rName)
+      );
+    });
+    if (!existing) {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+/**
+ * Intelligent parish/church search for OpenStreetMap:
+ * - Tolerates Polish abbreviations ("św", "par.", "pw."), missing diacritics, declensions ("Antoni" vs "Antoniego")
+ * - Combines Photon place_of_worship + Photon general + Overpass churches around detected city/town
+ * - Falls back to Nominatim if needed so users always get actionable results
+ */
+export async function searchParishesOsm(
+  query: string,
+  biasLocation?: LatLng | null,
+  limit = 8
+): Promise<SelectedPlaceData[]> {
+  const { cleaned, strippedCore, tokens, wantsCemetery } =
+    normalizeParishQuery(query);
+  if (cleaned.length < 2) return [];
+
+  const queriesToRun: Array<Promise<PhotonFeature[]>> = [
+    queryPhotonRaw(cleaned, {
+      biasLocation,
+      osmTag: 'amenity:place_of_worship',
+      limit: 10,
+    }),
+    queryPhotonRaw(cleaned, {
+      biasLocation,
+      limit: 8,
+    }),
+  ];
+
+  if (
+    strippedCore.length >= 2 &&
+    strippedCore.toLowerCase() !== cleaned.toLowerCase()
+  ) {
+    queriesToRun.push(
+      queryPhotonRaw(strippedCore, {
+        biasLocation,
+        osmTag: 'amenity:place_of_worship',
+        limit: 10,
+      })
+    );
+  }
+
+  const settled = await Promise.all(queriesToRun);
+  const worshipFeatures = [...settled[0], ...(settled[2] ?? [])];
+  const generalFeatures = settled[1];
+
+  const parishCandidates: SelectedPlaceData[] = [];
+  const otherCandidates: SelectedPlaceData[] = [];
+  let cityCenterCandidate: LatLng | null = null;
+
+  for (const feat of worshipFeatures) {
+    const props = feat.properties;
+    if (!props) continue;
+    if (!wantsCemetery && isCemeteryFeature(props)) continue;
+    const formatted = formatPhotonFeature(feat, 'parish');
+    if (formatted) parishCandidates.push(formatted);
+  }
+
+  for (const feat of generalFeatures) {
+    const props = feat.properties;
+    if (!props) continue;
+    if (!wantsCemetery && isCemeteryFeature(props)) continue;
+
+    if (
+      !cityCenterCandidate &&
+      feat.geometry?.coordinates &&
+      (props.osm_key === 'place' ||
+        props.osm_key === 'boundary' ||
+        ['city', 'town', 'village', 'district', 'locality'].includes(
+          props.type || ''
+        ))
+    ) {
+      cityCenterCandidate = {
+        lat: feat.geometry.coordinates[1],
+        lng: feat.geometry.coordinates[0],
+      };
+    }
+
+    const formatted = formatPhotonFeature(feat);
+    if (!formatted) continue;
+    if (formatted.placeType === 'parish') {
+      parishCandidates.push(formatted);
+    } else {
+      otherCandidates.push(formatted);
+    }
+  }
+
+  // If few parishes were found directly, check Overpass around the detected city/district or Nominatim
+  if (parishCandidates.length < 3) {
+    let fallbackCenter = cityCenterCandidate;
+
+    if (!fallbackCenter && otherCandidates.length === 0) {
+      const nomItems = await queryNominatimRaw(
+        strippedCore || cleaned,
+        biasLocation,
+        5
+      );
+      for (const item of nomItems) {
+        if (item.placeType === 'parish') parishCandidates.push(item);
+        else {
+          otherCandidates.push(item);
+          if (!fallbackCenter) fallbackCenter = item.location;
+        }
+      }
+    }
+
+    if (fallbackCenter) {
+      try {
+        const nearbyChurches = await fetchNearbyParishesOsm(fallbackCenter, 5500);
+        for (const church of nearbyChurches.slice(0, 12)) {
+          parishCandidates.push({
+            name: church.name,
+            address: church.address,
+            location: church.location,
+            placeId: church.id,
+            placeType: 'parish',
+          });
+        }
+      } catch {
+        // Ignore Overpass rate limit errors during interactive typing
+      }
+    }
+  }
+
+  const dedupedParishes = deduplicatePlaces(parishCandidates).sort(
+    (a, b) =>
+      scorePlaceMatch(b, tokens, biasLocation) -
+      scorePlaceMatch(a, tokens, biasLocation)
+  );
+
+  const dedupedOthers = deduplicatePlaces(otherCandidates).sort(
+    (a, b) =>
+      scorePlaceMatch(b, tokens, biasLocation) -
+      scorePlaceMatch(a, tokens, biasLocation)
+  );
+
+  const merged = deduplicatePlaces([...dedupedParishes, ...dedupedOthers]);
+  return merged.slice(0, limit);
+}
+
+/**
+ * Fast, accent-insensitive address/place search via Photon with Nominatim fallback.
+ */
+export async function searchPlacesNominatim(
+  query: string,
+  biasLocation?: LatLng | null,
+  limit = 6
+): Promise<SelectedPlaceData[]> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return [];
+
+  const photonFeatures = await queryPhotonRaw(trimmed, {
+    biasLocation,
+    limit: Math.max(limit, 8),
+  });
+
+  const photonResults = photonFeatures
+    .map((f) => formatPhotonFeature(f))
+    .filter((x): x is SelectedPlaceData => x !== null);
+
+  if (photonResults.length > 0) {
+    return deduplicatePlaces(photonResults).slice(0, limit);
+  }
+
+  return queryNominatimRaw(trimmed, biasLocation, limit);
+}
+
 
 function haversineMeters(a: LatLng, b: LatLng): number {
   const toRad = (d: number) => (d * Math.PI) / 180;

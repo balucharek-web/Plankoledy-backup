@@ -708,3 +708,100 @@ out center tags;
     resolved: false,
   };
 }
+
+export interface NearbyParishCandidate {
+  id: string;
+  name: string;
+  address: string;
+  location: LatLng;
+  distanceMeters: number;
+}
+
+/**
+ * Finds churches, chapels and parish locations around a given coordinate using Overpass API.
+ * Sorted by relevance (Catholic/Christian parishes with names first) and distance.
+ */
+export async function fetchNearbyParishesOsm(
+  center: LatLng,
+  radiusMeters = 5500
+): Promise<NearbyParishCandidate[]> {
+  const safeRadius = Math.min(Math.max(radiusMeters, 500), 12000);
+  const query = `
+[out:json][timeout:12];
+(
+  nwr["amenity"="place_of_worship"](around:${Math.round(safeRadius)},${center.lat.toFixed(5)},${center.lng.toFixed(5)});
+  nwr["building"~"^(church|cathedral|chapel)$"]["name"](around:${Math.round(safeRadius)},${center.lat.toFixed(5)},${center.lng.toFixed(5)});
+);
+out center tags qt;
+`.trim();
+
+  const elements = await runOverpassQuery(query, 13000);
+
+  const candidates: NearbyParishCandidate[] = [];
+  for (const el of elements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+
+    const tags = el.tags ?? {};
+    const rawName =
+      tags.name ||
+      tags['name:pl'] ||
+      tags.official_name ||
+      tags.alt_name ||
+      '';
+    const trimmedName = rawName.trim();
+    if (!trimmedName) continue;
+
+    // Exclude non-Christian shrines/cemetery chapels without parish name if needed, keep all named churches
+    const street = tags['addr:street']?.trim() || '';
+    const houseNum = tags['addr:housenumber']?.trim() || '';
+    const city = tags['addr:city']?.trim() || tags['addr:place']?.trim() || '';
+    const postcode = tags['addr:postcode']?.trim() || '';
+
+    const streetPart = [street, houseNum].filter(Boolean).join(' ');
+    const cityPart = [postcode, city].filter(Boolean).join(' ');
+    const address =
+      [streetPart, cityPart].filter(Boolean).join(', ') ||
+      city ||
+      `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+    const pt = { lat, lng };
+    const dist = Math.round(haversineMeters(center, pt));
+
+    // Deduplicate same church represented both as node and building way within 90m
+    const normTitle = trimmedName.toLowerCase();
+    const existingIdx = candidates.findIndex(
+      (c) =>
+        (c.name.toLowerCase() === normTitle ||
+          c.name.toLowerCase().includes(normTitle) ||
+          normTitle.includes(c.name.toLowerCase())) &&
+        haversineMeters(c.location, pt) < 90
+    );
+
+    if (existingIdx >= 0) {
+      // Prefer entries with fuller address metadata
+      if (address.length > candidates[existingIdx].address.length) {
+        candidates[existingIdx] = {
+          id: `osm_worship_${el.type}_${el.id}`,
+          name: trimmedName,
+          address,
+          location: pt,
+          distanceMeters: dist,
+        };
+      }
+      continue;
+    }
+
+    candidates.push({
+      id: `osm_worship_${el.type}_${el.id}`,
+      name: trimmedName,
+      address,
+      location: pt,
+      distanceMeters: dist,
+    });
+  }
+
+  return candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
+

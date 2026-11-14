@@ -1,9 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useMapsLibrary } from '@vis.gl/react-google-maps';
-import { Loader2, MapPin, Search, X } from 'lucide-react';
+import { Building2, Church, Loader2, MapPin, Search, X } from 'lucide-react';
 import { useMapEngine } from '../contexts/MapEngineContext';
 import { useAutocompleteSuggestions } from '../hooks/useAutocompleteSuggestions';
-import { searchPlacesNominatim } from '../services/osmSearchAndRouting';
+import {
+  searchParishesOsm,
+  searchPlacesNominatim,
+} from '../services/osmSearchAndRouting';
 import { LatLng } from '../types/parish';
 import { notifyIfQuotaExceeded } from '../utils/quota';
 
@@ -12,6 +15,7 @@ export interface SelectedPlaceData {
   address: string;
   location: LatLng;
   placeId: string;
+  placeType?: 'parish' | 'place' | 'address';
 }
 
 interface PlaceSearchInputProps {
@@ -20,6 +24,27 @@ interface PlaceSearchInputProps {
   onSelect: (place: SelectedPlaceData) => void;
   clearOnSelect?: boolean;
   initialValue?: string;
+  searchScope?: 'parish' | 'address';
+}
+
+function getTypeLabel(placeType?: SelectedPlaceData['placeType']): string {
+  if (placeType === 'parish') return 'Parafia / kościół';
+  if (placeType === 'place') return 'Miejscowość';
+  return 'Adres';
+}
+
+function ResultIcon({
+  placeType,
+}: {
+  placeType?: SelectedPlaceData['placeType'];
+}) {
+  if (placeType === 'parish') {
+    return <Church className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />;
+  }
+  if (placeType === 'place') {
+    return <Building2 className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />;
+  }
+  return <MapPin className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />;
 }
 
 const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
@@ -28,11 +53,17 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   onSelect,
   clearOnSelect = false,
   initialValue = '',
+  searchScope = 'address',
 }) => {
   const placesLib = useMapsLibrary('places');
   const [inputValue, setInputValue] = useState(initialValue);
   const [isOpen, setIsOpen] = useState(false);
   const [fetchingDetails, setFetchingDetails] = useState(false);
+  const [textFallbackResults, setTextFallbackResults] = useState<
+    SelectedPlaceData[]
+  >([]);
+  const [fallbackLoading, setFallbackLoading] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const [localError, setLocalError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -42,6 +73,10 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   useEffect(() => {
     setInputValue(initialValue);
   }, [initialValue]);
+
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [suggestions, textFallbackResults]);
 
   useEffect(() => {
     const handleOutsideClick = (ev: MouseEvent) => {
@@ -55,6 +90,85 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
     document.addEventListener('mousedown', handleOutsideClick);
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
+
+  // When searching for a parish and Google Autocomplete yields sparse results,
+  // automatically fall back to Text Search + OSM parish search.
+  useEffect(() => {
+    const trimmed = inputValue.trim();
+    if (
+      searchScope !== 'parish' ||
+      !isOpen ||
+      trimmed.length < 2 ||
+      trimmed === initialValue ||
+      isLoading ||
+      suggestions.length >= 2
+    ) {
+      if (suggestions.length >= 2 || trimmed.length < 2) {
+        setTextFallbackResults([]);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setFallbackLoading(true);
+      try {
+        let fallbackItems: SelectedPlaceData[] = [];
+        if (placesLib) {
+          const textRes = await placesLib.Place.searchByText({
+            textQuery: trimmed,
+            fields: ['displayName', 'formattedAddress', 'location', 'id'],
+            locationBias: biasLocation ?? undefined,
+            language: 'pl',
+            region: 'pl',
+            maxResultCount: 6,
+          });
+          fallbackItems = (textRes?.places ?? [])
+            .filter((p) => p.location)
+            .map((p) => ({
+              name: p.displayName || trimmed,
+              address: p.formattedAddress || p.displayName || trimmed,
+              location: { lat: p.location!.lat(), lng: p.location!.lng() },
+              placeId: p.id || `g_${p.location!.lat()}_${p.location!.lng()}`,
+              placeType: 'parish' as const,
+            }));
+        }
+
+        if (fallbackItems.length === 0) {
+          fallbackItems = await searchParishesOsm(trimmed, biasLocation, 6);
+        }
+
+        if (!cancelled) {
+          setTextFallbackResults(fallbackItems);
+        }
+      } catch {
+        if (!cancelled) {
+          try {
+            const osmItems = await searchParishesOsm(trimmed, biasLocation, 6);
+            if (!cancelled) setTextFallbackResults(osmItems);
+          } catch {
+            // Ignore secondary fallback errors
+          }
+        }
+      } finally {
+        if (!cancelled) setFallbackLoading(false);
+      }
+    }, 320);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    inputValue,
+    initialValue,
+    isOpen,
+    isLoading,
+    suggestions.length,
+    searchScope,
+    placesLib,
+    biasLocation,
+  ]);
 
   const handleSelectSuggestion = async (
     suggestion: google.maps.places.AutocompleteSuggestion
@@ -90,9 +204,11 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
         address,
         location: { lat: loc.lat(), lng: loc.lng() },
         placeId: place.id || '',
+        placeType: searchScope === 'parish' ? 'parish' : 'address',
       });
 
       resetSession();
+      setTextFallbackResults([]);
       setIsOpen(false);
       setFetchingDetails(false);
       setInputValue(clearOnSelect ? '' : name);
@@ -100,6 +216,51 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
       setFetchingDetails(false);
       notifyIfQuotaExceeded(err);
       setLocalError('Nie udało się pobrać szczegółów miejsca.');
+    }
+  };
+
+  const handleSelectFallbackItem = (item: SelectedPlaceData) => {
+    onSelect(item);
+    resetSession();
+    setTextFallbackResults([]);
+    setIsOpen(false);
+    setInputValue(clearOnSelect ? '' : item.name);
+  };
+
+  const usingFallback =
+    suggestions.length === 0 && textFallbackResults.length > 0;
+  const totalCount = usingFallback
+    ? textFallbackResults.length
+    : suggestions.length;
+  const trimmedQuery = inputValue.trim();
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setIsOpen(false);
+      return;
+    }
+    if (e.key === 'ArrowDown' && totalCount > 0) {
+      e.preventDefault();
+      setIsOpen(true);
+      setActiveIndex((prev) => (prev + 1) % totalCount);
+      return;
+    }
+    if (e.key === 'ArrowUp' && totalCount > 0) {
+      e.preventDefault();
+      setIsOpen(true);
+      setActiveIndex((prev) => (prev <= 0 ? totalCount - 1 : prev - 1));
+      return;
+    }
+    if (e.key === 'Enter' && totalCount > 0) {
+      e.preventDefault();
+      const targetIdx = activeIndex >= 0 ? activeIndex : 0;
+      if (usingFallback) {
+        const picked = textFallbackResults[targetIdx];
+        if (picked) handleSelectFallbackItem(picked);
+      } else {
+        const picked = suggestions[targetIdx];
+        if (picked) void handleSelectSuggestion(picked);
+      }
     }
   };
 
@@ -118,70 +279,126 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
             setIsOpen(true);
             setLocalError(null);
           }}
-          onFocus={() => {
-            if (suggestions.length > 0) setIsOpen(true);
+          onFocus={(e) => {
+            if (initialValue && e.currentTarget.value === initialValue) {
+              e.currentTarget.select();
+            }
+            if (totalCount > 0) setIsOpen(true);
           }}
+          onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          className="w-full pl-9 pr-9 py-2.5 text-base sm:text-sm bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
+          aria-expanded={isOpen}
+          aria-autocomplete="list"
+          className="w-full min-h-[44px] pl-9 pr-10 py-2.5 text-base sm:text-sm bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
         />
-        {(isLoading || fetchingDetails) && (
+        {(isLoading || fetchingDetails || fallbackLoading) && (
           <Loader2 className="w-4 h-4 text-amber-700 animate-spin absolute right-3" />
         )}
-        {!isLoading && !fetchingDetails && inputValue.length > 0 && (
-          <button
-            type="button"
-            onClick={() => {
-              setInputValue('');
-              resetSession();
-              setIsOpen(false);
-            }}
-            aria-label="Wyczyść wyszukiwanie"
-            className="absolute right-2.5 p-0.5 text-slate-400 hover:text-slate-600 rounded"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        )}
+        {!isLoading &&
+          !fetchingDetails &&
+          !fallbackLoading &&
+          inputValue.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setInputValue('');
+                resetSession();
+                setTextFallbackResults([]);
+                setIsOpen(false);
+              }}
+              aria-label="Wyczyść wyszukiwanie"
+              className="absolute right-1.5 min-w-[36px] min-h-[36px] inline-flex items-center justify-center text-slate-400 hover:text-slate-700 rounded-lg transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
       </div>
 
       {(error || localError) && (
         <p className="mt-1.5 text-xs text-red-600">{localError || error}</p>
       )}
 
-      {isOpen && suggestions.length > 0 && (
-        <ul
-          role="listbox"
-          className="absolute z-30 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto divide-y divide-slate-100"
-        >
-          {suggestions.map((suggestion, idx) => {
-            const pred = suggestion.placePrediction;
-            if (!pred) return null;
-            const mainText = pred.mainText?.text || pred.text?.text || '';
-            const secondaryText = pred.secondaryText?.text || '';
-
-            return (
-              <li key={pred.placeId || idx}>
-                <button
-                  type="button"
-                  onClick={() => handleSelectSuggestion(suggestion)}
-                  className="w-full text-left px-3 py-2.5 hover:bg-slate-50 focus:bg-slate-50 focus:outline-none flex items-start gap-2.5 transition-colors"
-                >
-                  <MapPin className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-slate-900 truncate">
-                      {mainText}
-                    </div>
-                    {secondaryText && (
-                      <div className="text-xs text-slate-500 truncate">
-                        {secondaryText}
+      {isOpen &&
+        (totalCount > 0 ||
+          (trimmedQuery.length >= 2 &&
+            trimmedQuery !== initialValue &&
+            (isLoading || fallbackLoading))) && (
+          <div className="absolute z-30 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-72 overflow-y-auto">
+            {totalCount === 0 ? (
+              <div className="px-3.5 py-3 text-xs text-slate-500 flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+                <span>Szukam pasujących miejsc...</span>
+              </div>
+            ) : usingFallback ? (
+              <ul role="listbox" className="divide-y divide-slate-100">
+                {textFallbackResults.map((item, idx) => (
+                  <li key={item.placeId}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectFallbackItem(item)}
+                      className={`w-full min-h-[46px] text-left px-3 py-2.5 flex items-start gap-2.5 transition-colors ${
+                        activeIndex === idx
+                          ? 'bg-amber-50/70'
+                          : 'hover:bg-slate-50 focus:bg-slate-50'
+                      } focus:outline-none`}
+                    >
+                      <ResultIcon placeType={item.placeType} />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-slate-900 truncate">
+                          {item.name}
+                        </div>
+                        <div className="text-xs text-slate-500 truncate mt-0.5">
+                          <span>{getTypeLabel(item.placeType)}</span>
+                          <span aria-hidden="true"> · </span>
+                          <span>{item.address}</span>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <ul role="listbox" className="divide-y divide-slate-100">
+                {suggestions.map((suggestion, idx) => {
+                  const pred = suggestion.placePrediction;
+                  if (!pred) return null;
+                  const mainText = pred.mainText?.text || pred.text?.text || '';
+                  const secondaryText = pred.secondaryText?.text || '';
+
+                  return (
+                    <li key={pred.placeId || idx}>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectSuggestion(suggestion)}
+                        className={`w-full min-h-[46px] text-left px-3 py-2.5 flex items-start gap-2.5 transition-colors ${
+                          activeIndex === idx
+                            ? 'bg-amber-50/70'
+                            : 'hover:bg-slate-50 focus:bg-slate-50'
+                        } focus:outline-none`}
+                      >
+                        <ResultIcon
+                          placeType={
+                            searchScope === 'parish' ? 'parish' : 'address'
+                          }
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-slate-900 truncate">
+                            {mainText}
+                          </div>
+                          {secondaryText && (
+                            <div className="text-xs text-slate-500 truncate mt-0.5">
+                              {secondaryText}
+                            </div>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
     </div>
   );
 };
@@ -192,11 +409,14 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   onSelect,
   clearOnSelect = false,
   initialValue = '',
+  searchScope = 'address',
 }) => {
   const [inputValue, setInputValue] = useState(initialValue);
   const [results, setResults] = useState<SelectedPlaceData[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const suppressSearchRef = useRef(false);
@@ -205,6 +425,10 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
     suppressSearchRef.current = true;
     setInputValue(initialValue);
   }, [initialValue]);
+
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [results]);
 
   useEffect(() => {
     const handleOutsideClick = (ev: MouseEvent) => {
@@ -226,9 +450,10 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
     }
 
     const q = inputValue.trim();
-    if (q.length < 3) {
+    if (q.length < 2) {
       setResults([]);
       setIsLoading(false);
+      setHasSearched(false);
       return;
     }
 
@@ -237,9 +462,13 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
       setIsLoading(true);
       setError(null);
       try {
-        const items = await searchPlacesNominatim(q, biasLocation, 6);
+        const items =
+          searchScope === 'parish'
+            ? await searchParishesOsm(q, biasLocation, 8)
+            : await searchPlacesNominatim(q, biasLocation, 6);
         if (!cancelled) {
           setResults(items);
+          setHasSearched(true);
           setIsOpen(true);
         }
       } catch (err) {
@@ -253,21 +482,52 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
       } finally {
         if (!cancelled) setIsLoading(false);
       }
-    }, 350);
+    }, 280);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [inputValue, biasLocation]);
+  }, [inputValue, biasLocation, searchScope]);
 
   const handleSelectItem = (item: SelectedPlaceData) => {
     suppressSearchRef.current = true;
     onSelect(item);
     setIsOpen(false);
     setResults([]);
+    setHasSearched(false);
     setInputValue(clearOnSelect ? '' : item.name);
   };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setIsOpen(false);
+      return;
+    }
+    if (e.key === 'ArrowDown' && results.length > 0) {
+      e.preventDefault();
+      setIsOpen(true);
+      setActiveIndex((prev) => (prev + 1) % results.length);
+      return;
+    }
+    if (e.key === 'ArrowUp' && results.length > 0) {
+      e.preventDefault();
+      setIsOpen(true);
+      setActiveIndex((prev) => (prev <= 0 ? results.length - 1 : prev - 1));
+      return;
+    }
+    if (e.key === 'Enter' && results.length > 0) {
+      e.preventDefault();
+      const picked = results[activeIndex >= 0 ? activeIndex : 0];
+      if (picked) handleSelectItem(picked);
+    }
+  };
+
+  const trimmed = inputValue.trim();
+  const showDropdown =
+    isOpen &&
+    (results.length > 0 ||
+      (trimmed.length >= 2 && (isLoading || hasSearched)));
 
   return (
     <div ref={containerRef} className="relative w-full">
@@ -285,11 +545,17 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
             setIsOpen(true);
             setError(null);
           }}
-          onFocus={() => {
+          onFocus={(e) => {
+            if (initialValue && e.currentTarget.value === initialValue) {
+              e.currentTarget.select();
+            }
             if (results.length > 0) setIsOpen(true);
           }}
+          onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          className="w-full pl-9 pr-9 py-2.5 text-base sm:text-sm bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
+          aria-expanded={isOpen}
+          aria-autocomplete="list"
+          className="w-full min-h-[44px] pl-9 pr-10 py-2.5 text-base sm:text-sm bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
         />
         {isLoading && (
           <Loader2 className="w-4 h-4 text-amber-700 animate-spin absolute right-3" />
@@ -301,43 +567,70 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
               suppressSearchRef.current = true;
               setInputValue('');
               setResults([]);
+              setHasSearched(false);
               setIsOpen(false);
             }}
             aria-label="Wyczyść wyszukiwanie"
-            className="absolute right-2.5 p-0.5 text-slate-400 hover:text-slate-600 rounded"
+            className="absolute right-1.5 min-w-[36px] min-h-[36px] inline-flex items-center justify-center text-slate-400 hover:text-slate-700 rounded-lg transition-colors"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-4 h-4" />
           </button>
         )}
       </div>
 
       {error && <p className="mt-1.5 text-xs text-red-600">{error}</p>}
 
-      {isOpen && results.length > 0 && (
-        <ul
-          role="listbox"
-          className="absolute z-30 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto divide-y divide-slate-100"
-        >
-          {results.map((item) => (
-            <li key={item.placeId}>
-              <button
-                type="button"
-                onClick={() => handleSelectItem(item)}
-                className="w-full text-left px-3 py-2.5 hover:bg-slate-50 focus:bg-slate-50 focus:outline-none flex items-start gap-2.5 transition-colors"
-              >
-                <MapPin className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-slate-900 truncate">
-                    {item.name}
-                  </div>
-                  <div className="text-xs text-slate-500 truncate">
-                    {item.address}
-                  </div>
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
+      {showDropdown && (
+        <div className="absolute z-30 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-72 overflow-y-auto">
+          {results.length > 0 ? (
+            <ul role="listbox" className="divide-y divide-slate-100">
+              {results.map((item, idx) => (
+                <li key={item.placeId}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectItem(item)}
+                    className={`w-full min-h-[46px] text-left px-3 py-2.5 flex items-start gap-2.5 transition-colors ${
+                      activeIndex === idx
+                        ? 'bg-amber-50/70'
+                        : 'hover:bg-slate-50 focus:bg-slate-50'
+                    } focus:outline-none`}
+                  >
+                    <ResultIcon placeType={item.placeType} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-slate-900 truncate">
+                        {item.name}
+                      </div>
+                      <div className="text-xs text-slate-500 truncate mt-0.5">
+                        {searchScope === 'parish' && (
+                          <>
+                            <span>{getTypeLabel(item.placeType)}</span>
+                            <span aria-hidden="true"> · </span>
+                          </>
+                        )}
+                        <span>{item.address}</span>
+                      </div>
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : isLoading ? (
+            <div className="px-3.5 py-3 text-xs text-slate-500 flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+              <span>
+                {searchScope === 'parish'
+                  ? 'Szukam parafii, kościołów i miejscowości...'
+                  : 'Szukam adresu...'}
+              </span>
+            </div>
+          ) : (
+            <div className="px-3.5 py-3 text-xs text-slate-500 leading-relaxed">
+              {searchScope === 'parish'
+                ? 'Brak dokładnego dopasowania. Wpisz samo miasto (np. Mikołów) lub kliknij „Parafie w pobliżu” poniżej.'
+                : 'Nie znaleziono pasującego adresu.'}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

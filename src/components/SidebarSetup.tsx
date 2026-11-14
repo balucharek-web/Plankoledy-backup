@@ -1,16 +1,24 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Car,
   CheckCircle2,
+  Church,
   Cloud,
   Footprints,
+  Loader2,
+  LocateFixed,
   LogIn,
   MapPin,
   Maximize2,
   Minimize2,
   Pentagon,
   Trash2,
+  X,
 } from 'lucide-react';
+import {
+  NearbyParishCandidate,
+  fetchNearbyParishesOsm,
+} from '../services/overpassStreets';
 import {
   LatLng,
   MapInteractionMode,
@@ -42,6 +50,11 @@ interface SidebarSetupProps {
   onNextStep: () => void;
 }
 
+function formatShortDistance(meters: number): string {
+  if (meters < 1000) return `${meters} m`;
+  return `${(meters / 1000).toFixed(1)} km`;
+}
+
 export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   parish,
   activeParishId,
@@ -63,6 +76,55 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onNextStep,
 }) => {
   const isDrawing = interactionMode === 'draw_boundary';
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbyError, setNearbyError] = useState<string | null>(null);
+  const [nearbyChurches, setNearbyChurches] = useState<
+    NearbyParishCandidate[] | null
+  >(null);
+
+  const loadChurchesAround = async (center: LatLng) => {
+    setNearbyLoading(true);
+    setNearbyError(null);
+    try {
+      const list = await fetchNearbyParishesOsm(center, 6000);
+      setNearbyChurches(list);
+      if (list.length === 0) {
+        setNearbyError('Nie znaleziono kościołów w promieniu 6 km.');
+      }
+    } catch (err) {
+      setNearbyError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się pobrać listy kościołów w okolicy.'
+      );
+    } finally {
+      setNearbyLoading(false);
+    }
+  };
+
+  const handleFindNearbyGps = () => {
+    if (!navigator.geolocation) {
+      setNearbyError('Twoja przeglądarka nie obsługuje lokalizacji GPS.');
+      return;
+    }
+    setNearbyLoading(true);
+    setNearbyError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        void loadChurchesAround({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+      },
+      () => {
+        setNearbyLoading(false);
+        setNearbyError(
+          'Brak zgody na lokalizację GPS. Wpisz nazwę miasta powyżej (np. Mikołów).'
+        );
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
 
   return (
     <div className="divide-y divide-slate-200">
@@ -80,15 +142,108 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           )}
         </div>
         <p className="text-xs text-slate-500 mb-3">
-          Wyszukaj kościół parafialny lub plebanię, z której księża wyruszają na
-          kolędę.
+          Wpisz dowolną frazę — nazwę parafii, imię patrona z miastem albo samo
+          miasto.
         </p>
 
         <PlaceSearchInput
-          placeholder="Dodaj lub wyszukaj parafię, np. Bazylika Mariacka"
-          onSelect={onSelectParish}
+          placeholder="np. św Antoni Mikołów, Bazylika Mariacka lub Mikołów"
+          searchScope="parish"
+          onSelect={(place) => {
+            setNearbyChurches(null);
+            setNearbyError(null);
+            onSelectParish(place);
+            if (place.placeType === 'place') {
+              void loadChurchesAround(place.location);
+            }
+          }}
           initialValue={parish?.name ?? ''}
         />
+
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            disabled={nearbyLoading}
+            onClick={handleFindNearbyGps}
+            className="flex-1 min-w-[140px] min-h-[38px] py-1.5 px-3 text-xs font-medium rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+          >
+            {nearbyLoading ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
+            ) : (
+              <LocateFixed className="w-3.5 h-3.5 text-amber-700" />
+            )}
+            <span>Parafie w pobliżu (GPS)</span>
+          </button>
+
+          {parish && (
+            <button
+              type="button"
+              disabled={nearbyLoading}
+              onClick={() => void loadChurchesAround(parish.location)}
+              className="flex-1 min-w-[140px] min-h-[38px] py-1.5 px-3 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <Church className="w-3.5 h-3.5 text-amber-700" />
+              <span>Kościoły w okolicy</span>
+            </button>
+          )}
+        </div>
+
+        {nearbyError && (
+          <p className="mt-2 text-xs text-red-600">{nearbyError}</p>
+        )}
+
+        {nearbyChurches && nearbyChurches.length > 0 && (
+          <div className="mt-3 border border-slate-200 rounded-xl bg-white overflow-hidden">
+            <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <span className="text-xs font-medium text-slate-700">
+                Kościoły i parafie w promieniu 6 km ({nearbyChurches.length})
+              </span>
+              <button
+                type="button"
+                onClick={() => setNearbyChurches(null)}
+                aria-label="Zamknij listę kościołów"
+                className="p-1 text-slate-400 hover:text-slate-700 rounded"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <ul className="max-h-52 overflow-y-auto divide-y divide-slate-100">
+              {nearbyChurches.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectParish({
+                        name: item.name,
+                        address: item.address,
+                        location: item.location,
+                        placeId: item.id,
+                        placeType: 'parish',
+                      });
+                      setNearbyChurches(null);
+                    }}
+                    className="w-full min-h-[44px] px-3 py-2 text-left hover:bg-amber-50/60 flex items-start justify-between gap-2 transition-colors"
+                  >
+                    <div className="min-w-0 flex items-start gap-2">
+                      <Church className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-slate-900 truncate">
+                          {item.name}
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate">
+                          {item.address}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-mono tabular-nums text-slate-500 shrink-0 mt-0.5">
+                      {formatShortDistance(item.distanceMeters)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {parish && (
           <div className="mt-3 pt-3 border-t border-slate-100 text-xs text-slate-600">
