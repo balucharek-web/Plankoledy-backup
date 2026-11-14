@@ -22,7 +22,10 @@ import {
   googleProvider,
 } from './firebase';
 import { useParishRouteOptimizer } from './hooks/useParishRouteOptimizer';
-import { reverseGeocodeHouseAddress } from './services/overpassStreets';
+import {
+  fetchStreetHousesAtLocation,
+  reverseGeocodeHouseAddress,
+} from './services/overpassStreets';
 import {
   DEFAULT_PLAN_CONFIG,
   batchUpdateStopFieldInFirestore,
@@ -47,6 +50,7 @@ import {
   ParishCenter,
   PlanConfig,
   SavedParishRecord,
+  StreetPickFeedback,
   VisitStop,
 } from './types/parish';
 import {
@@ -96,11 +100,32 @@ function ParishPlannerWorkspace({
   const [highlightedStopId, setHighlightedStopId] = useState<string | null>(
     null
   );
+  const [streetPickFeedback, setStreetPickFeedback] =
+    useState<StreetPickFeedback | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
 
   const boundaryDebounceRef = useRef<number | null>(null);
+  const feedbackTimerRef = useRef<number | null>(null);
   const activeParishIdRef = useRef<string | null>(activeParishId);
   activeParishIdRef.current = activeParishId;
+  const stopsRef = useRef<VisitStop[]>(stops);
+  stopsRef.current = stops;
+
+  const showStreetFeedback = useCallback(
+    (feedback: StreetPickFeedback, autoHideMs = 6000) => {
+      if (feedbackTimerRef.current) {
+        window.clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = null;
+      }
+      setStreetPickFeedback(feedback);
+      if (feedback.status !== 'loading' && autoHideMs > 0) {
+        feedbackTimerRef.current = window.setTimeout(() => {
+          setStreetPickFeedback(null);
+        }, autoHideMs);
+      }
+    },
+    []
+  );
 
   const {
     routes,
@@ -584,6 +609,100 @@ function ParishPlannerWorkspace({
     ]
   );
 
+  // Clicking any street on the map detects the street name & imports all its addressed houses
+  const handleMapPickStreet = useCallback(
+    async (location: LatLng) => {
+      showStreetFeedback(
+        {
+          status: 'loading',
+          message: 'Rozpoznaję ulicę i pobieram wszystkie numery domów...',
+        },
+        0
+      );
+
+      try {
+        const result = await fetchStreetHousesAtLocation({
+          location,
+          boundary,
+          parishCenter: parish?.location,
+        });
+
+        if (result.houses.length === 0) {
+          showStreetFeedback(
+            {
+              status: 'info',
+              message: `Rozpoznano „${result.streetName}”, ale w bazie OpenStreetMap brak numerów budynków przy tej ulicy.`,
+            },
+            7000
+          );
+          return;
+        }
+
+        const existingStops = stopsRef.current;
+        const existingAddresses = new Set(
+          existingStops.map((s) => s.address.trim().toLowerCase())
+        );
+
+        const newHouses = result.houses.filter((h) => {
+          const normAddr = h.fullAddress.trim().toLowerCase();
+          if (existingAddresses.has(normAddr)) return false;
+          const tooClose = existingStops.some(
+            (s) =>
+              Math.abs(s.location.lat - h.location.lat) < 0.00006 &&
+              Math.abs(s.location.lng - h.location.lng) < 0.00008
+          );
+          return !tooClose;
+        });
+
+        const skippedCount = result.houses.length - newHouses.length;
+
+        if (newHouses.length === 0) {
+          showStreetFeedback(
+            {
+              status: 'info',
+              message: `Wszystkie ${result.houses.length} domy z „${result.streetName}” są już na liście.`,
+            },
+            5500
+          );
+          return;
+        }
+
+        const placesToAdd: SelectedPlaceData[] = newHouses.map((h) => ({
+          name: h.label,
+          address: h.fullAddress,
+          location: h.location,
+          placeId: '',
+        }));
+
+        handleBatchAddStops(placesToAdd);
+
+        const boundaryNote = result.filteredByBoundary ? ' w obrysie parafii' : '';
+        const skippedNote =
+          skippedCount > 0 ? ` (${skippedCount} już było na liście)` : '';
+
+        showStreetFeedback(
+          {
+            status: 'success',
+            message: `Dodano ${newHouses.length} domów z „${result.streetName}”${boundaryNote}${skippedNote}.`,
+          },
+          6500
+        );
+      } catch (err) {
+        showStreetFeedback(
+          {
+            status: 'error',
+            message:
+              err instanceof Error
+                ? err.message
+                : 'Nie udało się pobrać domów z wybranej ulicy.',
+          },
+          6500
+        );
+      }
+    },
+    [boundary, handleBatchAddStops, parish?.location, showStreetFeedback]
+  );
+
   const handleUpdateStop = useCallback(
     (id: string, patch: Partial<VisitStop>) => {
       const currentId = activeParishIdRef.current;
@@ -752,7 +871,7 @@ function ParishPlannerWorkspace({
               type="button"
               onClick={onSignOutGoogle}
               title={`Zalogowano: ${authUser.email ?? ''}`}
-              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
             >
               <LogOut className="w-3.5 h-3.5 text-slate-500" />
               <span className="hidden sm:inline max-w-[110px] truncate">
@@ -765,7 +884,7 @@ function ParishPlannerWorkspace({
             <button
               type="button"
               onClick={onSignInGoogle}
-              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              className="px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
             >
               <LogIn className="w-3.5 h-3.5 text-amber-700" />
               <span>Zaloguj</span>
@@ -777,7 +896,7 @@ function ParishPlannerWorkspace({
             type="button"
             disabled={!parish || stops.length === 0 || isComputing}
             onClick={handleComputeRoutes}
-            className="px-3 sm:px-4 py-2 text-xs font-medium text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap shrink-0"
+            className="px-3 sm:px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl transition-colors whitespace-nowrap shrink-0"
           >
             {isComputing ? 'Liczenie...' : 'Wyznacz trasy'}
           </button>
@@ -792,7 +911,7 @@ function ParishPlannerWorkspace({
             setMainView('workspace');
             setMobilePane('panel');
           }}
-          className={`min-h-[36px] px-2 py-1.5 rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
             mainView === 'workspace' && mobilePane === 'panel'
               ? 'bg-slate-900 text-white'
               : 'text-slate-600 hover:bg-slate-100'
@@ -807,7 +926,7 @@ function ParishPlannerWorkspace({
             setMainView('workspace');
             setMobilePane('map');
           }}
-          className={`min-h-[36px] px-2 py-1.5 rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
             mainView === 'workspace' && mobilePane === 'map'
               ? 'bg-amber-700 text-white'
               : 'text-slate-600 hover:bg-slate-100'
@@ -819,7 +938,7 @@ function ParishPlannerWorkspace({
         <button
           type="button"
           onClick={() => setMainView('schedule')}
-          className={`min-h-[36px] px-2 py-1.5 rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+          className={`min-h-[36px] px-2 py-1.5 rounded-xl text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
             mainView === 'schedule'
               ? 'bg-slate-900 text-white'
               : 'text-slate-600 hover:bg-slate-100'
@@ -855,7 +974,7 @@ function ParishPlannerWorkspace({
               <button
                 type="button"
                 onClick={() => setSidebarTab('setup')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
                   sidebarTab === 'setup'
                     ? 'bg-white text-slate-900 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900'
@@ -866,7 +985,7 @@ function ParishPlannerWorkspace({
               <button
                 type="button"
                 onClick={() => setSidebarTab('stops')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap tabular-nums ${
+                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap tabular-nums ${
                   sidebarTab === 'stops'
                     ? 'bg-white text-slate-900 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900'
@@ -877,7 +996,7 @@ function ParishPlannerWorkspace({
               <button
                 type="button"
                 onClick={() => setSidebarTab('routes')}
-                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap tabular-nums ${
+                className={`min-h-[36px] py-2 px-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap tabular-nums ${
                   sidebarTab === 'routes'
                     ? 'bg-white text-slate-900 shadow-sm'
                     : 'text-slate-600 hover:text-slate-900'
@@ -924,8 +1043,17 @@ function ParishPlannerWorkspace({
                   stops={stops}
                   config={config}
                   interactionMode={interactionMode}
+                  streetPickFeedback={streetPickFeedback}
+                  onDismissStreetFeedback={() => setStreetPickFeedback(null)}
                   onAddPlaceStop={handleAddPlaceStop}
                   onBatchAddStops={handleBatchAddStops}
+                  onTogglePickStreetMode={() => {
+                    setInteractionMode((m) => {
+                      const next = m === 'pick_street' ? 'pan' : 'pick_street';
+                      if (next === 'pick_street') setMobilePane('map');
+                      return next;
+                    });
+                  }}
                   onToggleMapAddMode={() => {
                     setInteractionMode((m) => {
                       const next = m === 'add_stop' ? 'pan' : 'add_stop';
@@ -972,6 +1100,8 @@ function ParishPlannerWorkspace({
               routeObjects={routeObjects}
               interactionMode={interactionMode}
               highlightedStopId={highlightedStopId}
+              streetPickFeedback={streetPickFeedback}
+              onDismissStreetFeedback={() => setStreetPickFeedback(null)}
               onSetInteractionMode={setInteractionMode}
               onCreatePresetBoundary={handleCreatePresetBoundary}
               onScaleBoundary={handleScaleBoundary}
@@ -980,12 +1110,13 @@ function ParishPlannerWorkspace({
               onBoundaryUpdate={(pts) => updateBoundaryAndRecheckStops(pts, true)}
               onCancelInteraction={() => setInteractionMode('pan')}
               onMapAddStop={handleMapAddStop}
+              onMapPickStreet={handleMapPickStreet}
               onSelectStop={setHighlightedStopId}
               onDeleteStop={handleDeleteStop}
             />
 
             {stops.length > 0 && (
-              <div className="no-print absolute top-3 left-3 sm:top-auto sm:bottom-4 sm:left-4 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-lg px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
+              <div className="no-print absolute top-3 left-3 sm:top-auto sm:bottom-4 sm:left-4 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
                 {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                   <span key={p.id} className="inline-flex items-center gap-1.5">
                     <span

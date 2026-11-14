@@ -19,10 +19,13 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
       aria-labelledby="guide-title"
       className="fixed inset-0 z-50 bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
     >
-      <div className="bg-white border border-slate-200 rounded-xl shadow-xl max-w-2xl w-full max-h-[92dvh] sm:max-h-[85vh] flex flex-col overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl max-w-2xl w-full max-h-[92dvh] sm:max-h-[85vh] flex flex-col overflow-hidden">
         <div className="px-4 py-3.5 sm:px-6 sm:py-4 border-b border-slate-200 flex items-center justify-between gap-2">
-          <h2 id="guide-title" className="text-sm sm:text-base font-semibold text-slate-900">
-            Jak działa i jak zbudowana jest ta aplikacja
+          <h2
+            id="guide-title"
+            className="text-sm sm:text-base font-semibold text-slate-900"
+          >
+            Jak działa Planer Kolędy
           </h2>
           <button
             type="button"
@@ -35,88 +38,81 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
         </div>
 
         <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-slate-700 leading-relaxed">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-900 mb-1">
-              1. Stos technologiczny (Frontend + Google Maps Platform)
+          <div className="space-y-2.5">
+            <h3 className="text-sm font-semibold text-slate-900">
+              Planowanie kolędy w 4 prostych krokach
             </h3>
-            <p className="text-xs text-slate-600">
-              Aplikacja działa w pełni w przeglądarce w oparciu o React,
-              TypeScript oraz oficjalną bibliotekę{' '}
-              <code className="font-mono text-slate-900 bg-slate-100 px-1 py-0.5 rounded">
-                @vis.gl/react-google-maps
-              </code>{' '}
-              bez konieczności stosowania przestarzałych usług typu
-              DirectionsService czy Marker.
-            </p>
+            <ol className="space-y-2 text-xs text-slate-600 list-decimal pl-4">
+              <li>
+                <strong className="text-slate-900">
+                  Zaloguj się i ustaw parafię
+                </strong>{' '}
+                — wyszukaj swój kościół lub plebanię w zakładce{' '}
+                <em>1. Parafia</em>. Po zalogowaniu przez Google każda parafia,
+                jej granice oraz domy zapisują się automatycznie wyłącznie na
+                Twoim koncie.
+              </li>
+              <li>
+                <strong className="text-slate-900">
+                  Wyznacz teren parafii (opcjonalnie)
+                </strong>{' '}
+                — wybierz gotowy obrys (300 m, 500 m, 1 km) albo narysuj własny
+                wielokąt na mapie i dopasuj go przesuwając białe punkty.
+              </li>
+              <li>
+                <strong className="text-slate-900">
+                  Kliknij ulicę na mapie, aby pobrać wszystkie domy
+                </strong>{' '}
+                — w zakładce <em>2. Domy</em> (lub na pasku u dołu mapy) wybierz{' '}
+                <strong>Kliknij ulicę</strong> i dotknij dowolną ulicę. Aplikacja
+                rozpozna ulicę, pobierze wszystkie domy z numerami i doda je
+                automatycznie do planu parafii.
+              </li>
+              <li>
+                <strong className="text-slate-900">
+                  Wyznacz optymalne trasy i nawiguj
+                </strong>{' '}
+                — kliknij <strong>Wyznacz optymalne trasy</strong>. Algorytm
+                podzieli domy między 1–4 księży, ułoży najkrótszą kolejność
+                odwiedzin, wyliczy godziny wizyt i wygeneruje gotowe linki do
+                nawigacji Google Maps oraz wydruk harmonogramu.
+              </li>
+            </ol>
           </div>
 
           <div className="space-y-2.5 border-t border-slate-100 pt-4">
             <h3 className="text-sm font-semibold text-slate-900">
-              2. Wykorzystane usługi Google Maps Platform
+              Wykorzystane technologie i mapy
             </h3>
             <ul className="space-y-2 text-xs text-slate-600 list-disc pl-4">
               <li>
-                <strong className="text-slate-900">Maps JavaScript API</strong>{' '}
-                — interaktywna mapa z nowoczesnymi znacznikami{' '}
-                <code className="font-mono">AdvancedMarkerElement</code> i
-                warstwą poligonów do wyznaczania granic parafii.
+                <strong className="text-slate-900">
+                  Google Maps JavaScript + Places (New)
+                </strong>{' '}
+                — interaktywna mapa z warstwą granic parafii oraz wyszukiwaniem
+                kościołów i adresów domów.
               </li>
               <li>
-                <strong className="text-slate-900">Places API (New)</strong> —
-                podpowiedzi adresów (
-                <code className="font-mono">
-                  AutocompleteSuggestion.fetchAutocompleteSuggestions
-                </code>{' '}
-                z tokenem sesji <code className="font-mono">AutocompleteSessionToken</code>)
-                oraz masowy import ulic przez{' '}
-                <code className="font-mono">Place.searchByText</code>.
-              </li>
-              <li>
-                <strong className="text-slate-900">Routes API (SDK JS)</strong>{' '}
-                — wywołanie{' '}
-                <code className="font-mono">Route.computeRoutes</code> z flagą{' '}
-                <code className="font-mono">optimizeWaypointOrder: true</code>,
-                które rozwiązuje problem komiwojażera (TSP) i zwraca optymalną
-                kolejność przystanków (
-                <code className="font-mono">
-                  optimizedIntermediateWaypointIndices
-                </code>
-                ), odcinki oraz polilinię trasy (do 25 punktów pośrednich na
-                jedną trasę).
-              </li>
-              <li>
-                <strong className="text-slate-900">Geometry Library</strong> —
-                sprawdzanie funkcją{' '}
-                <code className="font-mono">
-                  geometry.poly.containsLocation
-                </code>
-                , czy wskazany dom znajduje się wewnątrz wyrysowanego terenu
-                parafii.
+                <strong className="text-slate-900">Google Routes API</strong> —
+                optymalizacja kolejności przystanków (problem komiwojażera) w
+                trybie pieszym lub samochodowym (do 25 przystanków na jedną
+                trasę księdza).
               </li>
               <li>
                 <strong className="text-slate-900">
-                  OpenStreetMap (Overpass API)
+                  OpenStreetMap (Overpass API + Nominatim)
                 </strong>{' '}
-                — automatyczne pobieranie listy nazwanych ulic i numerów domów
-                (z podziałem na parzyste/nieparzyste) z narysowanego obrysu
-                parafii lub promienia wokół kościoła.
+                — szybkie rozpoznawanie klikniętej ulicy na mapie i masowe
+                pobieranie wszystkich numerów budynków na tej ulicy.
+              </li>
+              <li>
+                <strong className="text-slate-900">
+                  Firebase Auth + Firestore
+                </strong>{' '}
+                — prywatne zapamiętywanie parafii i domów w chmurze wyłącznie
+                dla zalogowanego właściciela konta Google.
               </li>
             </ul>
-          </div>
-
-          <div className="space-y-2 border-t border-slate-100 pt-4">
-            <h3 className="text-sm font-semibold text-slate-900">
-              3. Algorytm podziału na wielu księży
-            </h3>
-            <p className="text-xs text-slate-600">
-              Gdy kolęduje jednocześnie od 2 do 4 księży, aplikacja sortuje
-              punkty kątowo wokół kościoła parafialnego i dzieli je na spójne
-              sektory geograficzne (z poszanowaniem limitu 25 punktów na trasę w
-              Routes API). Następnie dla każdego księdza osobno wywołuje
-              optymalizację trasy i dolicza czas trwania wizyt w domach, aby
-              wygenerować gotowy harmonogram godzinowy oraz link do nawigacji w
-              telefonie.
-            </p>
           </div>
         </div>
       </div>

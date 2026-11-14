@@ -1,4 +1,5 @@
 import { LatLng } from '../types/parish';
+import { isPointInsideBoundary } from '../utils/spatial';
 
 export interface OsmHousePoint {
   id: string;
@@ -17,6 +18,13 @@ export interface OsmStreetGroup {
   houses: OsmHousePoint[];
 }
 
+export interface StreetHousesPickResult {
+  streetName: string;
+  streetCenter: LatLng;
+  houses: OsmHousePoint[];
+  filteredByBoundary: boolean;
+}
+
 export interface ResolvedHouseAddress {
   label: string;
   address: string;
@@ -29,6 +37,7 @@ interface OverpassElement {
   lat?: number;
   lon?: number;
   center?: { lat: number; lon: number };
+  geometry?: Array<{ lat: number; lon: number }>;
   tags?: Record<string, string>;
 }
 
@@ -70,9 +79,93 @@ function formatPolishHouseAddress(
   return { label, fullAddress };
 }
 
+function haversineMeters(a: LatLng, b: LatLng): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const c =
+    sinLat * sinLat +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * sinLng * sinLng;
+  return 2 * R * Math.atan2(Math.sqrt(c), Math.sqrt(1 - c));
+}
+
+function computeBoundingBox(
+  boundary: LatLng[],
+  center: LatLng,
+  fallbackRadiusMeters: number,
+  extraPoint?: LatLng
+): { south: number; west: number; north: number; east: number } {
+  if (boundary.length >= 3) {
+    let south = 90;
+    let north = -90;
+    let west = 180;
+    let east = -180;
+    for (const pt of boundary) {
+      if (pt.lat < south) south = pt.lat;
+      if (pt.lat > north) north = pt.lat;
+      if (pt.lng < west) west = pt.lng;
+      if (pt.lng > east) east = pt.lng;
+    }
+    if (extraPoint) {
+      if (extraPoint.lat < south) south = extraPoint.lat;
+      if (extraPoint.lat > north) north = extraPoint.lat;
+      if (extraPoint.lng < west) west = extraPoint.lng;
+      if (extraPoint.lng > east) east = extraPoint.lng;
+    }
+    // Small ~40m margin so houses sitting on boundary streets are captured
+    const padLat = 40 / 111320;
+    const padLng =
+      40 / (111320 * Math.max(0.2, Math.cos((center.lat * Math.PI) / 180)));
+    return {
+      south: south - padLat,
+      west: west - padLng,
+      north: north + padLat,
+      east: east + padLng,
+    };
+  }
+
+  const latDelta = fallbackRadiusMeters / 111320;
+  const lngDelta =
+    fallbackRadiusMeters /
+    (111320 * Math.max(0.2, Math.cos((center.lat * Math.PI) / 180)));
+
+  let south = center.lat - latDelta;
+  let north = center.lat + latDelta;
+  let west = center.lng - lngDelta;
+  let east = center.lng + lngDelta;
+
+  if (extraPoint) {
+    south = Math.min(south, extraPoint.lat - latDelta * 0.4);
+    north = Math.max(north, extraPoint.lat + latDelta * 0.4);
+    west = Math.min(west, extraPoint.lng - lngDelta * 0.4);
+    east = Math.max(east, extraPoint.lng + lngDelta * 0.4);
+  }
+
+  return { south, west, north, east };
+}
+
+function escapeOverpassRegex(input: string): string {
+  return input
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/"/g, '\\"');
+}
+
+function buildPolishStreetRegex(streetName: string): string {
+  const trimmed = streetName.trim();
+  const prefixMatch = trimmed.match(
+    /^(ul\.?|ulica|al\.?|aleja|os\.?|osiedle|pl\.?|plac)\s+(.+)$/i
+  );
+  const core = prefixMatch ? prefixMatch[2].trim() : trimmed;
+  const escapedCore = escapeOverpassRegex(core);
+  return `^(ul\\.?\\s+|ulica\\s+|al\\.?\\s+|aleja\\s+|os\\.?\\s+|osiedle\\s+|pl\\.?\\s+|plac\\s+)?${escapedCore}$`;
+}
+
 async function runOverpassQuery(
   query: string,
-  timeoutMs = 28000
+  timeoutMs = 22000
 ): Promise<OverpassElement[]> {
   let lastError: Error | null = null;
 
@@ -99,7 +192,9 @@ async function runOverpassQuery(
       });
 
       if (!response.ok) {
-        throw new Error(`Serwer OpenStreetMap zwrócił kod HTTP ${response.status}.`);
+        throw new Error(
+          `Serwer OpenStreetMap zwrócił kod HTTP ${response.status}.`
+        );
       }
 
       const data = (await response.json()) as {
@@ -124,7 +219,7 @@ async function runOverpassQuery(
         (err instanceof DOMException && err.name === 'AbortError')
       ) {
         lastError = new Error(
-          'Serwer OpenStreetMap nie odpowiedział na czas (zbyt duży obszar lub słabsze połączenie). Spróbuj ponownie lub zmniejsz obrys.'
+          'Serwer OpenStreetMap nie odpowiedział na czas (zbyt duży obszar lub chwilowe przeciążenie). Spróbuj ponownie lub zmniejsz obrys.'
         );
       } else {
         lastError =
@@ -140,6 +235,11 @@ async function runOverpassQuery(
   throw lastError ?? new Error('Nie udało się pobrać danych z OpenStreetMap.');
 }
 
+/**
+ * Fetches named streets & addressed houses within a parish boundary or radius.
+ * Uses a fast bounding-box Overpass query followed by exact client-side polygon filtering
+ * to avoid expensive Overpass server-side (poly:...) spatial timeouts.
+ */
 export async function fetchParishStreetsFromOsm(params: {
   boundary: LatLng[];
   center: LatLng;
@@ -148,20 +248,30 @@ export async function fetchParishStreetsFromOsm(params: {
   const { boundary, center, radiusMeters } = params;
   const hasBoundary = boundary.length >= 3;
 
-  const areaFilter = hasBoundary
-    ? `(poly:"${boundary.map((p) => `${p.lat.toFixed(5)} ${p.lng.toFixed(5)}`).join(' ')}")`
-    : `(around:${Math.round(radiusMeters)},${center.lat.toFixed(5)},${center.lng.toFixed(5)})`;
+  const { south, west, north, east } = computeBoundingBox(
+    boundary,
+    center,
+    radiusMeters
+  );
+  const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(5)},${east.toFixed(5)})`;
 
   const query = `
-[out:json][timeout:25];
+[out:json][timeout:20];
 (
-  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${areaFilter};
-  nwr["addr:street"]["addr:housenumber"]${areaFilter};
+  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${bbox};
+  nwr["addr:street"]["addr:housenumber"]${bbox};
 );
 out center tags qt;
 `.trim();
 
-  const elements = await runOverpassQuery(query, 28000);
+  const elements = await runOverpassQuery(query, 24000);
+
+  const isInsideArea = (pt: LatLng): boolean => {
+    if (hasBoundary) {
+      return isPointInsideBoundary(pt, boundary);
+    }
+    return haversineMeters(center, pt) <= radiusMeters;
+  };
 
   const streetMap: Record<
     string,
@@ -192,6 +302,9 @@ out center tags qt;
     const lat = el.lat ?? el.center?.lat;
     const lng = el.lon ?? el.center?.lon;
     if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+
+    const pt = { lat, lng };
+    if (!isInsideArea(pt)) continue;
 
     const tags = el.tags ?? {};
 
@@ -231,7 +344,7 @@ out center tags qt;
           city,
           label,
           fullAddress,
-          location: { lat, lng },
+          location: pt,
         };
       }
     }
@@ -257,6 +370,233 @@ out center tags qt;
 
 function sqDistance(a: LatLng, b: LatLng): number {
   return (a.lat - b.lat) ** 2 + (a.lng - b.lng) ** 2;
+}
+
+function minDistanceSqToElement(el: OverpassElement, target: LatLng): number {
+  let best = Number.POSITIVE_INFINITY;
+  if (el.geometry && el.geometry.length > 0) {
+    for (const node of el.geometry) {
+      const d = sqDistance(target, { lat: node.lat, lng: node.lon });
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  const lat = el.lat ?? el.center?.lat;
+  const lng = el.lon ?? el.center?.lon;
+  if (typeof lat === 'number' && typeof lng === 'number') {
+    return sqDistance(target, { lat, lng });
+  }
+  return best;
+}
+
+async function detectStreetNameAtLocation(
+  location: LatLng
+): Promise<{ streetName: string; fallbackCity?: string; fallbackPostcode?: string } | null> {
+  // 1. Overpass way geometry + nearby address lookup (very fast around 55m)
+  try {
+    const query = `
+[out:json][timeout:8];
+(
+  way["highway"]["name"](around:55,${location.lat.toFixed(6)},${location.lng.toFixed(6)});
+  nwr["addr:street"](around:45,${location.lat.toFixed(6)},${location.lng.toFixed(6)});
+);
+out geom tags;
+`.trim();
+
+    const elements = await runOverpassQuery(query, 9000);
+    let bestWay: { dist: number; name: string } | null = null;
+    let bestAddr: {
+      dist: number;
+      name: string;
+      city?: string;
+      postcode?: string;
+    } | null = null;
+
+    for (const el of elements) {
+      const tags = el.tags ?? {};
+      const dist = minDistanceSqToElement(el, location);
+
+      if (tags.highway && tags.name) {
+        if (!bestWay || dist < bestWay.dist) {
+          bestWay = { dist, name: tags.name.trim() };
+        }
+      }
+      if (tags['addr:street']) {
+        if (!bestAddr || dist < bestAddr.dist) {
+          bestAddr = {
+            dist,
+            name: tags['addr:street'].trim(),
+            city: tags['addr:city'],
+            postcode: tags['addr:postcode'],
+          };
+        }
+      }
+    }
+
+    if (bestWay) {
+      return {
+        streetName: bestWay.name,
+        fallbackCity: bestAddr?.city,
+        fallbackPostcode: bestAddr?.postcode,
+      };
+    }
+    if (bestAddr) {
+      return {
+        streetName: bestAddr.name,
+        fallbackCity: bestAddr.city,
+        fallbackPostcode: bestAddr.postcode,
+      };
+    }
+  } catch {
+    // Fall through to Nominatim reverse geocode
+  }
+
+  // 2. Fallback: Nominatim reverse geocode
+  try {
+    const nomUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${location.lat.toFixed(6)}&lon=${location.lng.toFixed(6)}&addressdetails=1&accept-language=pl`;
+    const nomRes = await fetch(nomUrl, {
+      headers: { Accept: 'application/json' },
+    });
+    if (nomRes.ok) {
+      const nomData = (await nomRes.json()) as {
+        address?: Record<string, string>;
+      };
+      const addr = nomData.address ?? {};
+      const road =
+        addr.road ||
+        addr.pedestrian ||
+        addr.residential ||
+        addr.footway ||
+        '';
+      if (road.trim()) {
+        return {
+          streetName: road.trim(),
+          fallbackCity: addr.city || addr.town || addr.village || addr.municipality,
+          fallbackPostcode: addr.postcode,
+        };
+      }
+    }
+  } catch {
+    // Handled by null return
+  }
+
+  return null;
+}
+
+/**
+ * Resolves the street clicked on the map and downloads ALL houses with numbers on that street
+ * inside the parish bounding area (clipped to parish boundary when houses exist inside it).
+ */
+export async function fetchStreetHousesAtLocation(params: {
+  location: LatLng;
+  boundary: LatLng[];
+  parishCenter?: LatLng;
+}): Promise<StreetHousesPickResult> {
+  const { location, boundary, parishCenter } = params;
+  const detected = await detectStreetNameAtLocation(location);
+
+  if (!detected) {
+    throw new Error(
+      'Nie rozpoznano nazwy ulicy w tym miejscu. Przybliż mapę i kliknij bezpośrednio na linię ulicy.'
+    );
+  }
+
+  const { streetName, fallbackCity, fallbackPostcode } = detected;
+  const hasBoundary = boundary.length >= 3;
+  const { south, west, north, east } = computeBoundingBox(
+    boundary,
+    parishCenter ?? location,
+    1800,
+    location
+  );
+  const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(5)},${east.toFixed(5)})`;
+  const streetRegex = buildPolishStreetRegex(streetName);
+
+  const query = `
+[out:json][timeout:15];
+(
+  nwr["addr:street"~"${streetRegex}",i]["addr:housenumber"]${bbox};
+);
+out center tags qt;
+`.trim();
+
+  const elements = await runOverpassQuery(query, 18000);
+
+  const byNumber: Record<string, OsmHousePoint> = {};
+  let sumLat = 0;
+  let sumLng = 0;
+  let count = 0;
+
+  for (const el of elements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+
+    const tags = el.tags ?? {};
+    const addrNum = tags['addr:housenumber']?.trim();
+    if (!addrNum) continue;
+
+    const canonicalStreet = tags['addr:street']?.trim() || streetName;
+    const key = addrNum.toLowerCase();
+    if (byNumber[key]) continue;
+
+    const postcode = tags['addr:postcode'] || fallbackPostcode;
+    const city = tags['addr:city'] || fallbackCity;
+    const { label, fullAddress } = formatPolishHouseAddress(
+      canonicalStreet,
+      addrNum,
+      postcode,
+      city
+    );
+
+    byNumber[key] = {
+      id: `${el.type}-${el.id}`,
+      street: canonicalStreet,
+      houseNumber: addrNum,
+      postcode,
+      city,
+      label,
+      fullAddress,
+      location: { lat, lng },
+    };
+
+    sumLat += lat;
+    sumLng += lng;
+    count += 1;
+  }
+
+  const allHouses = Object.values(byNumber).sort((a, b) =>
+    naturalHouseCompare(a.houseNumber, b.houseNumber)
+  );
+
+  if (hasBoundary && allHouses.length > 0) {
+    const insideOnly = allHouses.filter((h) =>
+      isPointInsideBoundary(h.location, boundary)
+    );
+    if (insideOnly.length > 0) {
+      return {
+        streetName,
+        streetCenter: {
+          lat:
+            insideOnly.reduce((acc, h) => acc + h.location.lat, 0) /
+            insideOnly.length,
+          lng:
+            insideOnly.reduce((acc, h) => acc + h.location.lng, 0) /
+            insideOnly.length,
+        },
+        houses: insideOnly,
+        filteredByBoundary: true,
+      };
+    }
+  }
+
+  return {
+    streetName,
+    streetCenter:
+      count > 0 ? { lat: sumLat / count, lng: sumLng / count } : location,
+    houses: allHouses,
+    filteredByBoundary: false,
+  };
 }
 
 /**

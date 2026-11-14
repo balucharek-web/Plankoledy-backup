@@ -6,7 +6,7 @@ Przeglądarkowa aplikacja do planowania odwiedzin duszpasterskich na terenie par
 
 - **Wybór parafii i zapamiętywanie (Firebase)** – wyszukiwanie przez Google Places API (New). Zalogowani przez Google użytkownicy mają automatycznie zapamiętane wszystkie dodane parafie, granice terenu, ustawienia i domy w bazie **Firebase Firestore**.
 - **Intuicyjne wyznaczanie terenu parafii** – szybki obrys (300 m, 500 m, 1 km) jednym kliknięciem, przyciski powiększania/zmniejszania lub ręczne rysowanie wielokąta z przeciągalnymi uchwytami wierzchołków (w pełni obsługiwane także na telefonach).
-- **Automatyczne pobieranie ulic i domów (OpenStreetMap)** – pobieranie ulic z wyznaczonego obszaru (lub promienia wokół parafii), wybór parzystości numerów (wszystkie / parzyste / nieparzyste), naturalne sortowanie polskich numerów domów i zapis w formie pełnego adresu domu.
+- **Kliknij ulicę na mapie (OpenStreetMap)** – dotknięcie dowolnej ulicy na mapie automatycznie rozpoznaje jej nazwę, pobiera wszystkie domy z numerami i dodaje je do wybranej parafii (bez duplikatów). Dostępna jest również lista wszystkich ulic z narysowanego obrysu parafii z wyborem parzystości numerów.
 - **Dodawanie pojedynczych domów** – wyszukiwarka adresów lub kliknięcie bezpośrednio na budynek na mapie (automatyczne rozpoznanie adresu przez Overpass / Nominatim).
 - **Podział na 1–4 księży i optymalizacja tras** – geometryczny podział na sektory kątowe oraz wyznaczanie kolejności odwiedzin przez Google Maps Routes API (`computeRoutes` z `optimizeWaypointOrder`).
 - **Harmonogram, nawigacja i eksport** – obliczanie godzin przyjścia i wyjścia, linki do nawigacji w Google Maps, widok do druku oraz eksport do pliku CSV (UTF-8 z separatorem `;` dla Excela).
@@ -45,11 +45,10 @@ Przeglądarkowa aplikacja do planowania odwiedzin duszpasterskich na terenie par
 
    Aplikacja będzie dostępna pod adresem `http://localhost:3000`.
 
-## Budowanie produkcyjne i weryfikacja
+## Wdrożenie na GitHub Pages
 
-```bash
-npm run lint
-npm run build
-```
+Repozytorium zawiera gotowy workflow `.github/workflows/deploy.yml`. Aby uruchomić działającą wersję pod adresem `https://balucharek-web.github.io/Plankoledy/`:
 
-Gotowe pliki statyczne zostaną zapisane w katalogu `dist/`, który można wdrożyć na dowolny hosting statyczny (np. Vercel, Netlify, Cloudflare Pages) – pamiętając o ustawieniu zmiennej środowiskowej `VITE_GOOGLE_MAPS_API_KEY` w panelu hostingu.
+1. W ustawieniach repozytorium na GitHubie (**Settings -> Pages -> Build and deployment -> Source**) wybierz **GitHub Actions** (w przypadku darmowego konta GitHub repozytorium musi być publiczne).
+2. W **Settings -> Secrets and variables -> Actions** dodaj sekret `VITE_GOOGLE_MAPS_API_KEY` ze swoim kluczem Google Maps API.
+3. W konsoli Firebase (**Authentication -> Settings -> Authorized domains**) dodaj domenę `balucharek-web.github.io`, aby działało logowanie Google.

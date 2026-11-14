@@ -10,14 +10,18 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import {
+  AlertCircle,
   Check,
+  CheckCircle2,
   Church,
   CircleDashed,
   Hand,
+  Loader2,
   MapPinPlus,
   Maximize2,
   Minimize2,
   Pentagon,
+  Route,
   Trash2,
   Undo2,
   X,
@@ -29,6 +33,7 @@ import {
   PRIEST_PALETTE,
   ParishCenter,
   PriestRouteResult,
+  StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
 
@@ -46,6 +51,8 @@ interface ParishMapProps {
   routeObjects: RoutePolylineEntry[];
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
+  streetPickFeedback: StreetPickFeedback | null;
+  onDismissStreetFeedback: () => void;
   onSetInteractionMode: (mode: MapInteractionMode) => void;
   onCreatePresetBoundary: (radiusMeters?: number) => void;
   onScaleBoundary: (factor: number) => void;
@@ -54,6 +61,7 @@ interface ParishMapProps {
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
   onMapAddStop: (location: LatLng) => void;
+  onMapPickStreet: (location: LatLng) => void;
   onSelectStop: (stopId: string | null) => void;
   onDeleteStop: (stopId: string) => void;
 }
@@ -243,7 +251,8 @@ const RoutePolylinesLayer: React.FC<{
 };
 
 /**
- * Handles camera panning, editable parish polygon drawing, and click-to-add-house mode.
+ * Handles camera panning, editable parish polygon drawing, click-street-to-import,
+ * and click-to-add-house modes.
  */
 const MapControllerLayer: React.FC<{
   parish: ParishCenter | null;
@@ -257,6 +266,7 @@ const MapControllerLayer: React.FC<{
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
   onMapAddStop: (location: LatLng) => void;
+  onMapPickStreet: (location: LatLng) => void;
 }> = ({
   parish,
   boundary,
@@ -269,6 +279,7 @@ const MapControllerLayer: React.FC<{
   onBoundaryUpdate,
   onCancelInteraction,
   onMapAddStop,
+  onMapPickStreet,
 }) => {
   const map = useMap();
   const lastParishKeyRef = useRef<string>('');
@@ -292,14 +303,24 @@ const MapControllerLayer: React.FC<{
   }, [map, parish]);
 
   useEffect(() => {
-    if (!map || interactionMode !== 'add_stop') return;
+    if (
+      !map ||
+      (interactionMode !== 'add_stop' && interactionMode !== 'pick_street')
+    ) {
+      return;
+    }
 
     map.setOptions({ draggableCursor: 'crosshair' });
     const listener = map.addListener(
       'click',
       (ev: google.maps.MapMouseEvent) => {
         if (!ev.latLng) return;
-        onMapAddStop({ lat: ev.latLng.lat(), lng: ev.latLng.lng() });
+        const coords = { lat: ev.latLng.lat(), lng: ev.latLng.lng() };
+        if (interactionMode === 'pick_street') {
+          onMapPickStreet(coords);
+        } else {
+          onMapAddStop(coords);
+        }
       }
     );
 
@@ -307,18 +328,18 @@ const MapControllerLayer: React.FC<{
       google.maps.event.removeListener(listener);
       map.setOptions({ draggableCursor: null });
     };
-  }, [map, interactionMode, onMapAddStop]);
+  }, [map, interactionMode, onMapAddStop, onMapPickStreet]);
 
   if (!parish) return null;
 
   return (
     <MapControl position={ControlPosition.BOTTOM_CENTER}>
       {interactionMode === 'pan' && (
-        <div className="no-print mb-6 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl shadow-lg p-1.5 flex flex-wrap items-center justify-center gap-1 text-xs text-slate-800">
+        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200/90 rounded-2xl shadow-lg p-1.5 flex flex-wrap items-center justify-center gap-1 text-xs text-slate-800">
           <button
             type="button"
             onClick={() => onSetInteractionMode('pan')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-900 text-white font-medium inline-flex items-center gap-1.5 whitespace-nowrap"
+            className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-900 text-white font-medium inline-flex items-center gap-1.5 whitespace-nowrap"
           >
             <Hand className="w-3.5 h-3.5" />
             Przesuwaj
@@ -329,7 +350,7 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={() => onCreatePresetBoundary(300)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <CircleDashed className="w-3.5 h-3.5" />
                 300 m
@@ -337,7 +358,7 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={() => onCreatePresetBoundary(500)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <CircleDashed className="w-3.5 h-3.5" />
                 500 m
@@ -345,7 +366,7 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={() => onCreatePresetBoundary(1000)}
-                className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <CircleDashed className="w-3.5 h-3.5" />
                 1 km
@@ -357,7 +378,7 @@ const MapControllerLayer: React.FC<{
                 type="button"
                 onClick={() => onScaleBoundary(0.82)}
                 title="Zmniejsz zaznaczony teren"
-                className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <Minimize2 className="w-3.5 h-3.5" />
                 Mniejszy
@@ -366,7 +387,7 @@ const MapControllerLayer: React.FC<{
                 type="button"
                 onClick={() => onScaleBoundary(1.22)}
                 title="Powiększ zaznaczony teren"
-                className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-amber-50 text-amber-800 font-medium inline-flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <Maximize2 className="w-3.5 h-3.5" />
                 Większy
@@ -377,7 +398,7 @@ const MapControllerLayer: React.FC<{
           <button
             type="button"
             onClick={() => onSetInteractionMode('draw_boundary')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+            className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
           >
             <Pentagon className="w-3.5 h-3.5" />
             {boundary.length >= 3 ? 'Przerysuj' : 'Rysuj teren'}
@@ -388,10 +409,9 @@ const MapControllerLayer: React.FC<{
               type="button"
               onClick={onClearBoundary}
               title="Usuń granice terenu"
-              className="min-h-[36px] px-2 py-1.5 rounded-lg hover:bg-red-50 text-slate-500 hover:text-red-600 inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+              className="min-h-[36px] px-2 py-1.5 rounded-xl hover:bg-red-50 text-slate-500 hover:text-red-600 inline-flex items-center gap-1 whitespace-nowrap transition-colors"
             >
               <Trash2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Usuń obrys</span>
             </button>
           )}
 
@@ -399,8 +419,17 @@ const MapControllerLayer: React.FC<{
 
           <button
             type="button"
+            onClick={() => onSetInteractionMode('pick_street')}
+            className="min-h-[36px] px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+          >
+            <Route className="w-3.5 h-3.5 text-amber-700" />
+            Kliknij ulicę
+          </button>
+
+          <button
+            type="button"
             onClick={() => onSetInteractionMode('add_stop')}
-            className="min-h-[36px] px-2.5 py-1.5 rounded-lg hover:bg-amber-50 text-amber-900 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+            className="min-h-[36px] px-2.5 py-1.5 rounded-xl hover:bg-slate-100 text-slate-700 font-medium inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
           >
             <MapPinPlus className="w-3.5 h-3.5" />
             Dodaj dom
@@ -409,7 +438,7 @@ const MapControllerLayer: React.FC<{
       )}
 
       {interactionMode === 'draw_boundary' && (
-        <div className="no-print mb-6 mx-2 max-w-[calc(100vw-16px)] bg-white border border-slate-200 rounded-xl shadow-lg px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2.5 text-sm text-slate-900">
+        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2.5 text-sm text-slate-900">
           <span className="font-medium text-xs sm:text-sm text-center">
             Dotknij kolejne narożniki terenu · Punkty:{' '}
             <span className="font-mono tabular-nums font-bold text-amber-800">
@@ -421,7 +450,7 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={undoLastVertex}
-                className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+                className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
               >
                 <Undo2 className="w-3.5 h-3.5" />
                 Cofnij
@@ -431,7 +460,7 @@ const MapControllerLayer: React.FC<{
               <button
                 type="button"
                 onClick={finishDraft}
-                className="min-h-[38px] px-3.5 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+                className="min-h-[38px] px-3.5 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
               >
                 <Check className="w-3.5 h-3.5" />
                 Zakończ obrys
@@ -443,7 +472,7 @@ const MapControllerLayer: React.FC<{
                 cancelDraft();
                 onCancelInteraction();
               }}
-              className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
             >
               <X className="w-3.5 h-3.5" />
               Anuluj
@@ -452,8 +481,25 @@ const MapControllerLayer: React.FC<{
         </div>
       )}
 
+      {interactionMode === 'pick_street' && (
+        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
+          <Route className="w-4 h-4 text-amber-700 shrink-0" />
+          <span className="font-medium text-xs sm:text-sm">
+            Kliknij dowolną ulicę na mapie — pobierzemy wszystkie domy z tej
+            ulicy
+          </span>
+          <button
+            type="button"
+            onClick={onCancelInteraction}
+            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-xl whitespace-nowrap shrink-0"
+          >
+            Zakończ
+          </button>
+        </div>
+      )}
+
       {interactionMode === 'add_stop' && (
-        <div className="no-print mb-6 mx-2 max-w-[calc(100vw-16px)] bg-white border border-slate-200 rounded-xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
+        <div className="no-print mb-5 mx-2 max-w-[calc(100vw-16px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-lg px-3.5 py-2.5 flex items-center justify-between gap-3 text-sm text-slate-900">
           <MapPinPlus className="w-4 h-4 text-amber-700 shrink-0" />
           <span className="font-medium text-xs sm:text-sm">
             Dotknij budynek na mapie — zapiszemy jego adres domu
@@ -461,7 +507,7 @@ const MapControllerLayer: React.FC<{
           <button
             type="button"
             onClick={onCancelInteraction}
-            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl whitespace-nowrap shrink-0"
           >
             Zakończ
           </button>
@@ -479,6 +525,8 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   routeObjects,
   interactionMode,
   highlightedStopId,
+  streetPickFeedback,
+  onDismissStreetFeedback,
   onSetInteractionMode,
   onCreatePresetBoundary,
   onScaleBoundary,
@@ -487,6 +535,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   onBoundaryUpdate,
   onCancelInteraction,
   onMapAddStop,
+  onMapPickStreet,
   onSelectStop,
   onDeleteStop,
 }) => {
@@ -530,6 +579,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           onBoundaryUpdate={onBoundaryUpdate}
           onCancelInteraction={onCancelInteraction}
           onMapAddStop={onMapAddStop}
+          onMapPickStreet={onMapPickStreet}
         />
 
         <RoutePolylinesLayer routeObjects={routeObjects} />
@@ -558,6 +608,39 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           );
         })}
       </GoogleMap>
+
+      {streetPickFeedback && (
+        <div
+          className={`no-print absolute top-3 left-1/2 -translate-x-1/2 z-20 max-w-[calc(100%-24px)] sm:max-w-md px-3.5 py-2.5 rounded-xl border shadow-lg backdrop-blur-md flex items-center gap-2.5 text-xs font-medium ${
+            streetPickFeedback.status === 'loading'
+              ? 'bg-white/95 border-slate-200 text-slate-800'
+              : streetPickFeedback.status === 'success'
+                ? 'bg-emerald-50/95 border-emerald-200 text-emerald-900'
+                : streetPickFeedback.status === 'error'
+                  ? 'bg-red-50/95 border-red-200 text-red-900'
+                  : 'bg-amber-50/95 border-amber-200 text-amber-900'
+          }`}
+        >
+          {streetPickFeedback.status === 'loading' ? (
+            <Loader2 className="w-4 h-4 animate-spin text-amber-700 shrink-0" />
+          ) : streetPickFeedback.status === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+          )}
+          <span className="leading-snug">{streetPickFeedback.message}</span>
+          {streetPickFeedback.status !== 'loading' && (
+            <button
+              type="button"
+              onClick={onDismissStreetFeedback}
+              aria-label="Zamknij powiadomienie"
+              className="p-1 rounded-md hover:bg-black/5 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };

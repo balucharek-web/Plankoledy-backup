@@ -101,7 +101,16 @@ export const PRIEST_PALETTE: PriestProfile[] = [
   },
 ];
 
-export type MapInteractionMode = 'pan' | 'draw_boundary' | 'add_stop';
+export type MapInteractionMode =
+  | 'pan'
+  | 'draw_boundary'
+  | 'pick_street'
+  | 'add_stop';
+
+export interface StreetPickFeedback {
+  status: 'loading' | 'success' | 'info' | 'error';
+  message: string;
+}
 
 export interface SavedParishRecord {
   id: string;

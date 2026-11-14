@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useMapsLibrary } from '@vis.gl/react-google-maps';
 import {
   AlertTriangle,
@@ -6,8 +6,10 @@ import {
   Loader2,
   MapPinPlus,
   Route,
+  Search,
   Split,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   LatLng,
@@ -15,6 +17,7 @@ import {
   PRIEST_PALETTE,
   ParishCenter,
   PlanConfig,
+  StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
 import { notifyIfQuotaExceeded } from '../utils/quota';
@@ -27,8 +30,11 @@ interface SidebarStopsProps {
   stops: VisitStop[];
   config: PlanConfig;
   interactionMode: MapInteractionMode;
+  streetPickFeedback: StreetPickFeedback | null;
+  onDismissStreetFeedback: () => void;
   onAddPlaceStop: (place: SelectedPlaceData) => void;
   onBatchAddStops: (places: SelectedPlaceData[]) => void;
+  onTogglePickStreetMode: () => void;
   onToggleMapAddMode: () => void;
   onUpdateStop: (id: string, patch: Partial<VisitStop>) => void;
   onDeleteStop: (id: string) => void;
@@ -45,8 +51,11 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   stops,
   config,
   interactionMode,
+  streetPickFeedback,
+  onDismissStreetFeedback,
   onAddPlaceStop,
   onBatchAddStops,
+  onTogglePickStreetMode,
   onToggleMapAddMode,
   onUpdateStop,
   onDeleteStop,
@@ -62,6 +71,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   const [batchText, setBatchText] = useState('');
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchStatus, setBatchStatus] = useState<string | null>(null);
+  const [stopFilter, setStopFilter] = useState('');
 
   const handleBatchImport = async () => {
     if (!placesLib || !parish) return;
@@ -128,10 +138,20 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
       ? stops.filter((s) => s.inBoundary === false).length
       : 0;
 
+  const filteredStops = useMemo(() => {
+    const q = stopFilter.trim().toLowerCase();
+    if (!q) return stops;
+    return stops.filter(
+      (s) =>
+        s.address.toLowerCase().includes(q) ||
+        (s.notes && s.notes.toLowerCase().includes(q))
+    );
+  }, [stops, stopFilter]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Add controls */}
-      <div className="p-4 sm:p-5 border-b border-slate-200 space-y-3">
+      <div className="p-4 sm:p-5 border-b border-slate-200 space-y-3 bg-white">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-900">
             Punkty odwiedzin ({stops.length})
@@ -158,12 +178,31 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           clearOnSelect={true}
         />
 
+        {/* Primary interactive map street & house pickers */}
+        <button
+          type="button"
+          disabled={!parish}
+          onClick={onTogglePickStreetMode}
+          className={`w-full min-h-[42px] py-2 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
+            interactionMode === 'pick_street'
+              ? 'bg-amber-700 border-amber-700 text-white shadow-sm'
+              : 'bg-amber-50/80 border-amber-200 text-amber-950 hover:bg-amber-100/80 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400'
+          }`}
+        >
+          <Route className="w-4 h-4 shrink-0" />
+          <span>
+            {interactionMode === 'pick_street'
+              ? 'Tryb aktywny — kliknij ulicę na mapie'
+              : 'Kliknij ulicę na mapie (pobierz wszystkie domy)'}
+          </span>
+        </button>
+
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
             disabled={!parish}
             onClick={onToggleMapAddMode}
-            className={`min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
               interactionMode === 'add_stop'
                 ? 'bg-amber-700 border-amber-700 text-white'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50'
@@ -171,18 +210,18 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           >
             <MapPinPlus className="w-3.5 h-3.5" />
             {interactionMode === 'add_stop'
-              ? 'Kliknij na mapie'
-              : 'Dodaj z mapy'}
+              ? 'Kliknij budynek'
+              : 'Pojedynczy dom'}
           </button>
 
           <button
             type="button"
             disabled={!parish}
             onClick={() => setShowBatch((v) => !v)}
-            className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+            className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <ListPlus className="w-3.5 h-3.5" />
-            Wklej listę ulic
+            Wklej listę
           </button>
         </div>
 
@@ -190,13 +229,37 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           type="button"
           disabled={!parish}
           onClick={() => setOsmModalOpen(true)}
-          className="w-full min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 inline-flex items-center justify-center gap-1.5 transition-colors"
+          className="w-full min-h-[38px] py-2 px-3 text-xs font-medium rounded-xl border bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors"
         >
-          <Route className="w-3.5 h-3.5 shrink-0" />
+          <Search className="w-3.5 h-3.5 shrink-0 text-slate-500" />
           <span className="truncate">
-            Pobierz ulice z terenu parafii (OpenStreetMap)
+            Lista wszystkich ulic z obszaru parafii (OSM)
           </span>
         </button>
+
+        {streetPickFeedback && (
+          <div
+            className={`p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+              streetPickFeedback.status === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : streetPickFeedback.status === 'error'
+                  ? 'bg-red-50 border-red-200 text-red-900'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+            }`}
+          >
+            <span>{streetPickFeedback.message}</span>
+            {streetPickFeedback.status !== 'loading' && (
+              <button
+                type="button"
+                onClick={onDismissStreetFeedback}
+                aria-label="Zamknij"
+                className="p-0.5 text-current/70 hover:text-current shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
 
         {showBatch && (
           <div className="pt-2 border-t border-slate-100 space-y-2">
@@ -212,7 +275,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
               value={batchText}
               onChange={(e) => setBatchText(e.target.value)}
               placeholder={'ul. Mickiewicza 4, Kraków\nul. Słowackiego 12, Kraków'}
-              className="w-full p-2.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
+              className="w-full p-2.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600"
             />
             <div className="flex items-center justify-end gap-2">
               <button
@@ -240,7 +303,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
         )}
 
         {outsideCount > 0 && (
-          <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900">
+          <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
             <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <span>
               {outsideCount}{' '}
@@ -256,11 +319,34 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           <button
             type="button"
             onClick={onAutoPartition}
-            className="w-full py-2 px-3 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors"
+            className="w-full min-h-[38px] py-2 px-3 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
           >
             <Split className="w-3.5 h-3.5" />
             Podziel automatycznie na {config.priestCount} księży według rejonów
           </button>
+        )}
+
+        {stops.length > 4 && (
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={stopFilter}
+              onChange={(e) => setStopFilter(e.target.value)}
+              placeholder="Filtruj dodane domy po ulicy lub uwagach..."
+              className="w-full pl-8 pr-8 py-2 text-base sm:text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
+            />
+            {stopFilter && (
+              <button
+                type="button"
+                onClick={() => setStopFilter('')}
+                aria-label="Wyczyść filtr"
+                className="p-1 text-slate-400 hover:text-slate-700 absolute right-2 top-1/2 -translate-y-1/2"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -271,13 +357,18 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
             <p className="text-sm font-medium text-slate-700">
               Brak dodanych domów do odwiedzenia
             </p>
-            <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
-              Wpisz adres w wyszukiwarce powyżej, wklej listę ulic lub kliknij
-              „Dodaj z mapy”, aby wskazać domy bezpośrednio na mapie.
+            <p className="text-xs text-slate-500 mt-1.5 max-w-xs mx-auto leading-relaxed">
+              Kliknij <strong>„Kliknij ulicę na mapie”</strong>, aby jednym
+              dotknięciem pobrać wszystkie domy z wybranej ulicy, albo wpisz
+              adres ręcznie powyżej.
             </p>
           </div>
+        ) : filteredStops.length === 0 ? (
+          <div className="p-8 text-center text-xs text-slate-500">
+            Brak adresów pasujących do frazy „{stopFilter}”.
+          </div>
         ) : (
-          stops.map((stop, index) => {
+          filteredStops.map((stop, index) => {
             const palette =
               PRIEST_PALETTE.find((p) => p.id === stop.priestId) ??
               PRIEST_PALETTE[0];
@@ -315,7 +406,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     type="button"
                     onClick={() => onDeleteStop(stop.id)}
                     aria-label="Usuń dom"
-                    className="p-1 text-slate-400 hover:text-red-600 rounded transition-colors shrink-0"
+                    className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors shrink-0"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -333,7 +424,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     }
                     aria-label="Adres domu"
                     placeholder="Adres domu (np. ul. Lipowa 12)"
-                    className="flex-1 min-w-[140px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-amber-600"
+                    className="flex-1 min-w-[140px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
                   />
 
                   <input
@@ -344,7 +435,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     }
                     aria-label="Rodzina lub uwagi"
                     placeholder="Rodzina / uwagi"
-                    className="w-32 sm:w-28 px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded text-slate-700 focus:outline-none focus:border-amber-600"
+                    className="w-32 sm:w-28 px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-amber-600"
                   />
 
                   <div className="flex items-center gap-1">
@@ -362,7 +453,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         })
                       }
                       aria-label="Czas wizyty w minutach"
-                      className="w-14 px-2 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded text-slate-800 text-right focus:outline-none focus:border-amber-600"
+                      className="w-14 px-2 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-800 text-right focus:outline-none focus:border-amber-600"
                     />
                     <span className="text-xs text-slate-500">min</span>
                   </div>
@@ -376,7 +467,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         })
                       }
                       aria-label="Przypisany ksiądz"
-                      className="px-2 py-1 text-xs bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-amber-600"
+                      className="px-2 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
                     >
                       {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                         <option key={p.id} value={p.id}>
@@ -404,7 +495,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           type="button"
           disabled={!parish || stops.length === 0 || isComputing}
           onClick={onComputeRoutes}
-          className="w-full py-2.5 px-4 text-sm font-medium text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-lg inline-flex items-center justify-center gap-2 transition-colors"
+          className="w-full min-h-[42px] py-2.5 px-4 text-sm font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
         >
           {isComputing && <Loader2 className="w-4 h-4 animate-spin" />}
           {isComputing
