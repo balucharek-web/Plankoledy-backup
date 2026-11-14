@@ -15,7 +15,8 @@ export interface UseAutocompleteSuggestionsResult {
  */
 export function useAutocompleteSuggestions(
   inputString: string,
-  biasLocation?: { lat: number; lng: number } | null
+  biasLocation?: { lat: number; lng: number } | null,
+  enabled: boolean = true
 ): UseAutocompleteSuggestionsResult {
   const placesLib = useMapsLibrary('places');
   const sessionTokenRef =
@@ -29,7 +30,7 @@ export function useAutocompleteSuggestions(
 
   useEffect(() => {
     const trimmed = inputString.trim();
-    if (!placesLib || trimmed.length < 2) {
+    if (!enabled || !placesLib || trimmed.length < 2) {
       setSuggestions([]);
       setIsLoading(false);
       setError(null);
@@ -40,6 +41,15 @@ export function useAutocompleteSuggestions(
     const timer = window.setTimeout(async () => {
       try {
         const { AutocompleteSessionToken, AutocompleteSuggestion } = placesLib;
+        if (typeof AutocompleteSuggestion?.fetchAutocompleteSuggestions !== 'function') {
+          if (!cancelled) {
+            setSuggestions([]);
+            setIsLoading(false);
+            setError('AutocompleteSuggestion unavailable');
+          }
+          return;
+        }
+
         if (!sessionTokenRef.current) {
           sessionTokenRef.current = new AutocompleteSessionToken();
         }
@@ -83,11 +93,12 @@ export function useAutocompleteSuggestions(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [placesLib, inputString, biasLocation?.lat, biasLocation?.lng]);
+  }, [enabled, placesLib, inputString, biasLocation?.lat, biasLocation?.lng]);
 
   const resetSession = useCallback(() => {
     sessionTokenRef.current = null;
     setSuggestions([]);
+    setError(null);
   }, []);
 
   return {

@@ -57,21 +57,33 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
 }) => {
   const placesLib = useMapsLibrary('places');
   const [inputValue, setInputValue] = useState(initialValue);
+  const [isUserEditing, setIsUserEditing] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [fetchingDetails, setFetchingDetails] = useState(false);
   const [textFallbackResults, setTextFallbackResults] = useState<
     SelectedPlaceData[]
   >([]);
   const [fallbackLoading, setFallbackLoading] = useState(false);
+  const [fallbackCompleted, setFallbackCompleted] = useState(false);
+  const [fallbackFailed, setFallbackFailed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [localError, setLocalError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const trimmedQuery = inputValue.trim();
+  const autocompleteEnabled =
+    isUserEditing && isOpen && trimmedQuery.length >= 2;
+
   const { suggestions, isLoading, error, resetSession } =
-    useAutocompleteSuggestions(inputValue, biasLocation);
+    useAutocompleteSuggestions(inputValue, biasLocation, autocompleteEnabled);
 
   useEffect(() => {
+    setIsUserEditing(false);
     setInputValue(initialValue);
+    setTextFallbackResults([]);
+    setFallbackCompleted(false);
+    setFallbackFailed(false);
+    setLocalError(null);
   }, [initialValue]);
 
   useEffect(() => {
@@ -91,79 +103,113 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
-  // When searching for a parish and Google Autocomplete yields sparse results,
-  // automatically fall back to Text Search + OSM parish search.
+  // Automatically fall back to Text Search + OSM/Nominatim whenever the user is
+  // actively searching and Google Autocomplete fails, is unavailable, or returns sparse results.
+  const needsFallback =
+    autocompleteEnabled &&
+    !isLoading &&
+    (Boolean(error) ||
+      !placesLib ||
+      suggestions.length === 0 ||
+      (searchScope === 'parish' && suggestions.length < 2));
+
   useEffect(() => {
-    const trimmed = inputValue.trim();
-    if (
-      searchScope !== 'parish' ||
-      !isOpen ||
-      trimmed.length < 2 ||
-      trimmed === initialValue ||
-      isLoading ||
-      suggestions.length >= 2
-    ) {
-      if (suggestions.length >= 2 || trimmed.length < 2) {
+    if (!needsFallback) {
+      if (
+        !autocompleteEnabled ||
+        suggestions.length >= 2 ||
+        (searchScope === 'address' && suggestions.length > 0)
+      ) {
         setTextFallbackResults([]);
+        setFallbackCompleted(false);
+        setFallbackFailed(false);
       }
       return;
     }
 
     let cancelled = false;
+    const delayMs = error ? 80 : 280;
     const timer = window.setTimeout(async () => {
       setFallbackLoading(true);
+      setFallbackCompleted(false);
+      setFallbackFailed(false);
       try {
         let fallbackItems: SelectedPlaceData[] = [];
-        if (placesLib) {
-          const textRes = await placesLib.Place.searchByText({
-            textQuery: trimmed,
-            fields: ['displayName', 'formattedAddress', 'location', 'id'],
-            locationBias: biasLocation ?? undefined,
-            language: 'pl',
-            region: 'pl',
-            maxResultCount: 6,
-          });
-          fallbackItems = (textRes?.places ?? [])
-            .filter((p) => p.location)
-            .map((p) => ({
-              name: p.displayName || trimmed,
-              address: p.formattedAddress || p.displayName || trimmed,
-              location: { lat: p.location!.lat(), lng: p.location!.lng() },
-              placeId: p.id || `g_${p.location!.lat()}_${p.location!.lng()}`,
-              placeType: 'parish' as const,
-            }));
+        if (placesLib?.Place?.searchByText && !error) {
+          try {
+            const textRes = await placesLib.Place.searchByText({
+              textQuery: trimmedQuery,
+              fields: ['displayName', 'formattedAddress', 'location', 'id'],
+              locationBias: biasLocation
+                ? { center: biasLocation, radius: 15000 }
+                : undefined,
+              language: 'pl',
+              region: 'pl',
+              maxResultCount: 6,
+            });
+            fallbackItems = (textRes?.places ?? [])
+              .filter((p) => p.location)
+              .map((p) => ({
+                name: p.displayName || trimmedQuery,
+                address: p.formattedAddress || p.displayName || trimmedQuery,
+                location: { lat: p.location!.lat(), lng: p.location!.lng() },
+                placeId: p.id || `g_${p.location!.lat()}_${p.location!.lng()}`,
+                placeType:
+                  searchScope === 'parish'
+                    ? ('parish' as const)
+                    : ('address' as const),
+              }));
+          } catch (searchErr) {
+            notifyIfQuotaExceeded(searchErr);
+            // Fall through to OSM / Nominatim fallback
+          }
         }
 
         if (fallbackItems.length === 0) {
-          fallbackItems = await searchParishesOsm(trimmed, biasLocation, 6);
+          fallbackItems =
+            searchScope === 'parish'
+              ? await searchParishesOsm(trimmedQuery, biasLocation, 8)
+              : await searchPlacesNominatim(trimmedQuery, biasLocation, 6);
         }
 
         if (!cancelled) {
           setTextFallbackResults(fallbackItems);
+          setFallbackCompleted(true);
+          setFallbackFailed(false);
         }
       } catch {
         if (!cancelled) {
           try {
-            const osmItems = await searchParishesOsm(trimmed, biasLocation, 6);
-            if (!cancelled) setTextFallbackResults(osmItems);
+            const osmItems =
+              searchScope === 'parish'
+                ? await searchParishesOsm(trimmedQuery, biasLocation, 8)
+                : await searchPlacesNominatim(trimmedQuery, biasLocation, 6);
+            if (!cancelled) {
+              setTextFallbackResults(osmItems);
+              setFallbackCompleted(true);
+              setFallbackFailed(false);
+            }
           } catch {
-            // Ignore secondary fallback errors
+            if (!cancelled) {
+              setFallbackCompleted(true);
+              setFallbackFailed(true);
+            }
           }
         }
       } finally {
         if (!cancelled) setFallbackLoading(false);
       }
-    }, 320);
+    }, delayMs);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
   }, [
-    inputValue,
-    initialValue,
-    isOpen,
-    isLoading,
+    needsFallback,
+    autocompleteEnabled,
+    trimmedQuery,
+    error,
     suggestions.length,
     searchScope,
     placesLib,
@@ -207,8 +253,11 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
         placeType: searchScope === 'parish' ? 'parish' : 'address',
       });
 
+      setIsUserEditing(false);
       resetSession();
       setTextFallbackResults([]);
+      setFallbackCompleted(false);
+      setFallbackFailed(false);
       setIsOpen(false);
       setFetchingDetails(false);
       setInputValue(clearOnSelect ? '' : name);
@@ -220,9 +269,13 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   };
 
   const handleSelectFallbackItem = (item: SelectedPlaceData) => {
+    setIsUserEditing(false);
     onSelect(item);
     resetSession();
     setTextFallbackResults([]);
+    setFallbackCompleted(false);
+    setFallbackFailed(false);
+    setLocalError(null);
     setIsOpen(false);
     setInputValue(clearOnSelect ? '' : item.name);
   };
@@ -232,7 +285,11 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   const totalCount = usingFallback
     ? textFallbackResults.length
     : suggestions.length;
-  const trimmedQuery = inputValue.trim();
+  const visibleError =
+    localError ||
+    (error && fallbackFailed && totalCount === 0
+      ? 'Nie udało się połączyć z wyszukiwarką adresów. Sprawdź internet i spróbuj ponownie.'
+      : null);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Escape') {
@@ -275,9 +332,11 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
           type="text"
           value={inputValue}
           onChange={(e) => {
+            setIsUserEditing(true);
             setInputValue(e.target.value);
             setIsOpen(true);
             setLocalError(null);
+            setFallbackFailed(false);
           }}
           onFocus={(e) => {
             if (initialValue && e.currentTarget.value === initialValue) {
@@ -301,9 +360,13 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
             <button
               type="button"
               onClick={() => {
+                setIsUserEditing(false);
                 setInputValue('');
                 resetSession();
                 setTextFallbackResults([]);
+                setFallbackCompleted(false);
+                setFallbackFailed(false);
+                setLocalError(null);
                 setIsOpen(false);
               }}
               aria-label="Wyczyść wyszukiwanie"
@@ -314,20 +377,30 @@ const GooglePlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
           )}
       </div>
 
-      {(error || localError) && (
-        <p className="mt-1.5 text-xs text-red-600">{localError || error}</p>
+      {visibleError && (
+        <p className="mt-1.5 text-xs text-red-600">{visibleError}</p>
       )}
 
       {isOpen &&
+        isUserEditing &&
         (totalCount > 0 ||
           (trimmedQuery.length >= 2 &&
-            trimmedQuery !== initialValue &&
-            (isLoading || fallbackLoading))) && (
+            (isLoading || fallbackLoading || fallbackCompleted))) && (
           <div className="absolute z-30 mt-1.5 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-72 overflow-y-auto">
-            {totalCount === 0 ? (
+            {totalCount === 0 && (isLoading || fallbackLoading) ? (
               <div className="px-3.5 py-3 text-xs text-slate-500 flex items-center gap-2">
                 <Loader2 className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
-                <span>Szukam pasujących miejsc...</span>
+                <span>
+                  {searchScope === 'parish'
+                    ? 'Szukam parafii, kościołów i miejscowości...'
+                    : 'Szukam pasujących adresów...'}
+                </span>
+              </div>
+            ) : totalCount === 0 ? (
+              <div className="px-3.5 py-3 text-xs text-slate-500 leading-relaxed">
+                {searchScope === 'parish'
+                  ? 'Brak dokładnego dopasowania. Wpisz samo miasto (np. Mikołów) lub kliknij „Parafie w pobliżu” poniżej.'
+                  : 'Nie znaleziono pasującego adresu.'}
               </div>
             ) : usingFallback ? (
               <ul role="listbox" className="divide-y divide-slate-100">
@@ -424,6 +497,7 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
   useEffect(() => {
     suppressSearchRef.current = true;
     setInputValue(initialValue);
+    setError(null);
   }, [initialValue]);
 
   useEffect(() => {
@@ -568,6 +642,7 @@ const OsmPlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
               setInputValue('');
               setResults([]);
               setHasSearched(false);
+              setError(null);
               setIsOpen(false);
             }}
             aria-label="Wyczyść wyszukiwanie"
