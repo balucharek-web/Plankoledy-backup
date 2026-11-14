@@ -28,6 +28,30 @@ export function createPresetBoundaryPolygon(
   return points;
 }
 
+export function scaleBoundaryFromCenter(
+  boundary: LatLng[],
+  factor: number,
+  fallbackCenter?: LatLng
+): LatLng[] {
+  if (boundary.length < 3) return boundary;
+  const centroid = boundary.reduce(
+    (acc, pt) => ({
+      lat: acc.lat + pt.lat / boundary.length,
+      lng: acc.lng + pt.lng / boundary.length,
+    }),
+    { lat: 0, lng: 0 }
+  );
+  const origin =
+    Number.isFinite(centroid.lat) && Number.isFinite(centroid.lng)
+      ? centroid
+      : fallbackCenter ?? boundary[0];
+
+  return boundary.map((pt) => ({
+    lat: Math.max(-89.9, Math.min(89.9, origin.lat + (pt.lat - origin.lat) * factor)),
+    lng: Math.max(-179.9, Math.min(179.9, origin.lng + (pt.lng - origin.lng) * factor)),
+  }));
+}
+
 export function formatDistance(meters: number): string {
   if (meters < 1000) {
     return `${Math.round(meters)} m`;

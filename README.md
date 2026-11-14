@@ -4,8 +4,8 @@ Przeglądarkowa aplikacja do planowania odwiedzin duszpasterskich na terenie par
 
 ## Funkcje
 
-- **Wybór parafii i kościoła** – wyszukiwanie przez Google Places API (New) z automatycznym centrowaniem mapy.
-- **Intuicyjne wyznaczanie terenu parafii** – szybki obrys (500 m wokół kościoła) jednym kliknięciem lub ręczne rysowanie wielokąta z przeciągalnymi uchwytami wierzchołków.
+- **Wybór parafii i zapamiętywanie (Firebase)** – wyszukiwanie przez Google Places API (New). Zalogowani przez Google użytkownicy mają automatycznie zapamiętane wszystkie dodane parafie, granice terenu, ustawienia i domy w bazie **Firebase Firestore**.
+- **Intuicyjne wyznaczanie terenu parafii** – szybki obrys (300 m, 500 m, 1 km) jednym kliknięciem, przyciski powiększania/zmniejszania lub ręczne rysowanie wielokąta z przeciągalnymi uchwytami wierzchołków (w pełni obsługiwane także na telefonach).
 - **Automatyczne pobieranie ulic i domów (OpenStreetMap)** – pobieranie ulic z wyznaczonego obszaru (lub promienia wokół parafii), wybór parzystości numerów (wszystkie / parzyste / nieparzyste), naturalne sortowanie polskich numerów domów i zapis w formie pełnego adresu domu.
 - **Dodawanie pojedynczych domów** – wyszukiwarka adresów lub kliknięcie bezpośrednio na budynek na mapie (automatyczne rozpoznanie adresu przez Overpass / Nominatim).
 - **Podział na 1–4 księży i optymalizacja tras** – geometryczny podział na sektory kątowe oraz wyznaczanie kolejności odwiedzin przez Google Maps Routes API (`computeRoutes` z `optimizeWaypointOrder`).

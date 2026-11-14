@@ -102,3 +102,12 @@ export const PRIEST_PALETTE: PriestProfile[] = [
 ];
 
 export type MapInteractionMode = 'pan' | 'draw_boundary' | 'add_stop';
+
+export interface SavedParishRecord {
+  id: string;
+  parish: ParishCenter;
+  boundary: LatLng[];
+  config: PlanConfig;
+  updatedAtMs: number;
+}
+

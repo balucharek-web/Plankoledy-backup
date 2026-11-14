@@ -1,0 +1,165 @@
+{
+  "entities": {
+    "Parish": {
+      "title": "Parish",
+      "description": "A saved parish with its starting point, territory boundary polygon, and default koleda planning settings.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who saved this parish.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the parish or church.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "address": {
+          "type": "string",
+          "description": "Formatted street address of the parish.",
+          "minLength": 0,
+          "maxLength": 350
+        },
+        "placeId": {
+          "type": "string",
+          "description": "Google Places ID of the parish.",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "location": {
+          "type": "object",
+          "description": "Geographic coordinates { lat, lng } of the parish center."
+        },
+        "boundary": {
+          "type": "array",
+          "description": "Bounded polygon vertex list (max 100 { lat, lng } objects) defining parish territory."
+        },
+        "config": {
+          "type": "object",
+          "description": "Planning configuration { priestCount, startTime, defaultVisitMinutes, travelMode, returnToParish }."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the parish was saved."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the parish was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "address",
+        "location",
+        "boundary",
+        "config",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VisitStop": {
+      "title": "VisitStop",
+      "description": "An individual house visit address belonging to a saved parish.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the parish owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "parishId": {
+          "type": "string",
+          "description": "Parent parish document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Display label (house address or custom label).",
+          "minLength": 1,
+          "maxLength": 250
+        },
+        "address": {
+          "type": "string",
+          "description": "Full street and house address.",
+          "minLength": 1,
+          "maxLength": 350
+        },
+        "placeId": {
+          "type": "string",
+          "description": "Optional Google Places ID.",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "location": {
+          "type": "object",
+          "description": "House coordinates { lat, lng }."
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "Planned visit duration in minutes (1 to 240)."
+        },
+        "priestId": {
+          "type": "number",
+          "description": "Assigned priest index (1 to 4)."
+        },
+        "inBoundary": {
+          "type": "boolean",
+          "description": "Whether the house lies inside the parish boundary."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional family name or visit notes.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the house stop was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the house stop was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "parishId",
+        "label",
+        "address",
+        "location",
+        "durationMinutes",
+        "priestId",
+        "inBoundary",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/parishes/{parishId}": {
+      "schema": {
+        "$ref": "#/entities/Parish"
+      },
+      "description": "Saved parishes, boundaries, and planner configurations owned by the signed-in user."
+    },
+    "/parishes/{parishId}/stops/{stopId}": {
+      "schema": {
+        "$ref": "#/entities/VisitStop"
+      },
+      "description": "House visit stops belonging to a specific saved parish."
+    }
+  }
+}

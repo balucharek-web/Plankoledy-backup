@@ -34,6 +34,7 @@ interface OverpassElement {
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
 
@@ -71,15 +72,23 @@ function formatPolishHouseAddress(
 
 async function runOverpassQuery(
   query: string,
-  timeoutMs = 18000
+  timeoutMs = 28000
 ): Promise<OverpassElement[]> {
   let lastError: Error | null = null;
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      try {
+        controller.abort('Overpass timeout');
+      } catch {
+        controller.abort();
+      }
+    }, timeoutMs);
 
+    try {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -89,17 +98,42 @@ async function runOverpassQuery(
         signal: controller.signal,
       });
 
-      window.clearTimeout(timeoutId);
-
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(`Serwer OpenStreetMap zwrócił kod HTTP ${response.status}.`);
       }
 
-      const data = (await response.json()) as { elements?: OverpassElement[] };
+      const data = (await response.json()) as {
+        elements?: OverpassElement[];
+        remark?: string;
+      };
+      if (
+        data.remark &&
+        data.remark.toLowerCase().includes('timed out') &&
+        (!data.elements || data.elements.length === 0)
+      ) {
+        throw new Error(
+          'Zapytanie do OpenStreetMap przekroczyło limit czasu. Spróbuj zmniejszyć obszar parafii.'
+        );
+      }
       return data.elements ?? [];
     } catch (err) {
-      lastError =
-        err instanceof Error ? err : new Error('Błąd połączenia z Overpass API');
+      const msg = err instanceof Error ? err.message : String(err ?? '');
+      if (
+        timedOut ||
+        msg.toLowerCase().includes('aborted') ||
+        (err instanceof DOMException && err.name === 'AbortError')
+      ) {
+        lastError = new Error(
+          'Serwer OpenStreetMap nie odpowiedział na czas (zbyt duży obszar lub słabsze połączenie). Spróbuj ponownie lub zmniejsz obrys.'
+        );
+      } else {
+        lastError =
+          err instanceof Error
+            ? err
+            : new Error('Błąd połączenia z OpenStreetMap Overpass API.');
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
@@ -115,19 +149,19 @@ export async function fetchParishStreetsFromOsm(params: {
   const hasBoundary = boundary.length >= 3;
 
   const areaFilter = hasBoundary
-    ? `(poly:"${boundary.map((p) => `${p.lat.toFixed(6)} ${p.lng.toFixed(6)}`).join(' ')}")`
-    : `(around:${Math.round(radiusMeters)},${center.lat.toFixed(6)},${center.lng.toFixed(6)})`;
+    ? `(poly:"${boundary.map((p) => `${p.lat.toFixed(5)} ${p.lng.toFixed(5)}`).join(' ')}")`
+    : `(around:${Math.round(radiusMeters)},${center.lat.toFixed(5)},${center.lng.toFixed(5)})`;
 
   const query = `
-[out:json][timeout:18];
+[out:json][timeout:25];
 (
   way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${areaFilter};
   nwr["addr:street"]["addr:housenumber"]${areaFilter};
 );
-out center tags;
+out center tags qt;
 `.trim();
 
-  const elements = await runOverpassQuery(query, 18000);
+  const elements = await runOverpassQuery(query, 28000);
 
   const streetMap: Record<
     string,

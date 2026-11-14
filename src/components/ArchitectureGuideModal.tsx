@@ -17,24 +17,24 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="guide-title"
-      className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-slate-950/50 flex items-end sm:items-center justify-center p-2 sm:p-4"
     >
-      <div className="bg-white border border-slate-200 rounded-xl shadow-xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-          <h2 id="guide-title" className="text-base font-semibold text-slate-900">
+      <div className="bg-white border border-slate-200 rounded-xl shadow-xl max-w-2xl w-full max-h-[92dvh] sm:max-h-[85vh] flex flex-col overflow-hidden">
+        <div className="px-4 py-3.5 sm:px-6 sm:py-4 border-b border-slate-200 flex items-center justify-between gap-2">
+          <h2 id="guide-title" className="text-sm sm:text-base font-semibold text-slate-900">
             Jak działa i jak zbudowana jest ta aplikacja
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Zamknij"
-            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
+            className="p-2 text-slate-400 hover:text-slate-700 rounded-lg shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto space-y-5 text-sm text-slate-700 leading-relaxed">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-sm text-slate-700 leading-relaxed">
           <div>
             <h3 className="text-sm font-semibold text-slate-900 mb-1">
               1. Stos technologiczny (Frontend + Google Maps Platform)

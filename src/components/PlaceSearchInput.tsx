@@ -120,7 +120,7 @@ export const PlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
             if (suggestions.length > 0) setIsOpen(true);
           }}
           placeholder={placeholder}
-          className="w-full pl-9 pr-9 py-2.5 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
+          className="w-full pl-9 pr-9 py-2.5 text-base sm:text-sm bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-600/20 focus:border-amber-600 transition-colors"
         />
         {(isLoading || fetchingDetails) && (
           <Loader2 className="w-4 h-4 text-amber-700 animate-spin absolute right-3" />

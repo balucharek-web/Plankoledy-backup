@@ -131,7 +131,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   return (
     <div className="flex flex-col h-full">
       {/* Add controls */}
-      <div className="p-5 border-b border-slate-200 space-y-3">
+      <div className="p-4 sm:p-5 border-b border-slate-200 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-900">
             Punkty odwiedzin ({stops.length})
@@ -163,7 +163,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
             type="button"
             disabled={!parish}
             onClick={onToggleMapAddMode}
-            className={`py-2 px-3 text-xs font-medium rounded-lg border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
               interactionMode === 'add_stop'
                 ? 'bg-amber-700 border-amber-700 text-white'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50'
@@ -179,7 +179,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
             type="button"
             disabled={!parish}
             onClick={() => setShowBatch((v) => !v)}
-            className="py-2 px-3 text-xs font-medium rounded-lg border bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+            className="min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border bg-white border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <ListPlus className="w-3.5 h-3.5" />
             Wklej listę ulic
@@ -190,10 +190,12 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           type="button"
           disabled={!parish}
           onClick={() => setOsmModalOpen(true)}
-          className="w-full py-2 px-3 text-xs font-medium rounded-lg border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+          className="w-full min-h-[40px] py-2 px-3 text-xs font-medium rounded-lg border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 inline-flex items-center justify-center gap-1.5 transition-colors"
         >
-          <Route className="w-3.5 h-3.5" />
-          Pobierz ulice z terenu parafii (OpenStreetMap)
+          <Route className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">
+            Pobierz ulice z terenu parafii (OpenStreetMap)
+          </span>
         </button>
 
         {showBatch && (
@@ -331,7 +333,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     }
                     aria-label="Adres domu"
                     placeholder="Adres domu (np. ul. Lipowa 12)"
-                    className="flex-1 min-w-[160px] px-2 py-1 text-xs bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-amber-600"
+                    className="flex-1 min-w-[140px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-amber-600"
                   />
 
                   <input
@@ -342,7 +344,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     }
                     aria-label="Rodzina lub uwagi"
                     placeholder="Rodzina / uwagi"
-                    className="w-28 px-2 py-1 text-xs bg-white border border-slate-200 rounded text-slate-700 focus:outline-none focus:border-amber-600"
+                    className="w-32 sm:w-28 px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded text-slate-700 focus:outline-none focus:border-amber-600"
                   />
 
                   <div className="flex items-center gap-1">
@@ -360,7 +362,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         })
                       }
                       aria-label="Czas wizyty w minutach"
-                      className="w-14 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-slate-200 rounded text-slate-800 text-right focus:outline-none focus:border-amber-600"
+                      className="w-14 px-2 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded text-slate-800 text-right focus:outline-none focus:border-amber-600"
                     />
                     <span className="text-xs text-slate-500">min</span>
                   </div>

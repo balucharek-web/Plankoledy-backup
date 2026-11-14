@@ -1,0 +1,153 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (default deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidLatLng(loc) {
+      return loc is map
+        && loc.keys().hasAll(['lat', 'lng'])
+        && loc.keys().hasOnly(['lat', 'lng'])
+        && loc.lat is number && loc.lat >= -90 && loc.lat <= 90
+        && loc.lng is number && loc.lng >= -180 && loc.lng <= 180;
+    }
+
+    function isValidBoundary(boundary) {
+      return boundary is list
+        && boundary.size() <= 100
+        && (boundary.size() == 0 || isValidLatLng(boundary[0]));
+    }
+
+    function isValidPlanConfig(cfg) {
+      return cfg is map
+        && cfg.keys().hasAll(['priestCount', 'startTime', 'defaultVisitMinutes', 'travelMode', 'returnToParish'])
+        && cfg.keys().hasOnly(['priestCount', 'startTime', 'defaultVisitMinutes', 'travelMode', 'returnToParish'])
+        && cfg.priestCount is number && cfg.priestCount >= 1 && cfg.priestCount <= 4
+        && cfg.startTime is string && cfg.startTime.size() >= 4 && cfg.startTime.size() <= 10
+        && cfg.defaultVisitMinutes is number && cfg.defaultVisitMinutes >= 1 && cfg.defaultVisitMinutes <= 240
+        && cfg.travelMode in ['WALKING', 'DRIVING']
+        && cfg.returnToParish is bool;
+    }
+
+    function isValidParish(data) {
+      return data.keys().hasAll(['ownerId', 'name', 'address', 'location', 'boundary', 'config', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'name', 'address', 'placeId', 'location', 'boundary', 'config', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+        && data.address is string && data.address.size() <= 350
+        && (!('placeId' in data) || (data.placeId is string && data.placeId.size() <= 250))
+        && isValidLatLng(data.location)
+        && isValidBoundary(data.boundary)
+        && isValidPlanConfig(data.config)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVisitStop(data, parishId) {
+      return data.keys().hasAll(['ownerId', 'parishId', 'label', 'address', 'location', 'durationMinutes', 'priestId', 'inBoundary', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'parishId', 'label', 'address', 'placeId', 'location', 'durationMinutes', 'priestId', 'inBoundary', 'notes', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid
+        && data.parishId is string && data.parishId.size() >= 1 && data.parishId.size() <= 128 && data.parishId == parishId
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 250
+        && data.address is string && data.address.size() >= 1 && data.address.size() <= 350
+        && (!('placeId' in data) || (data.placeId is string && data.placeId.size() <= 250))
+        && isValidLatLng(data.location)
+        && data.durationMinutes is number && data.durationMinutes >= 1 && data.durationMinutes <= 240
+        && data.priestId is number && data.priestId >= 1 && data.priestId <= 4
+        && data.inBoundary is bool
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 500))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isParishOwner(parishId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/parishes/$(parishId))
+        && get(/databases/$(database)/documents/parishes/$(parishId)).data.ownerId == request.auth.uid;
+    }
+
+    match /parishes/{parishId} {
+      allow get: if isSignedIn() && isValidId(parishId) && (resource == null || existing().ownerId == request.auth.uid);
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(parishId)
+        && isValidParish(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(parishId)
+        && isValidParish(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['boundary', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['config', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['name', 'address', 'placeId', 'location', 'boundary', 'config', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(parishId) && existing().ownerId == request.auth.uid;
+
+      match /stops/{stopId} {
+        allow get: if isSignedIn()
+          && isValidId(parishId)
+          && isValidId(stopId)
+          && (resource == null || existing().ownerId == request.auth.uid)
+          && isParishOwner(parishId);
+        allow list: if isSignedIn()
+          && isValidId(parishId)
+          && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(parishId)
+          && isValidId(stopId)
+          && isValidVisitStop(incoming(), parishId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isParishOwner(parishId);
+        allow update: if isVerifiedUser()
+          && isValidId(parishId)
+          && isValidId(stopId)
+          && isValidVisitStop(incoming(), parishId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().parishId == existing().parishId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isParishOwner(parishId)
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['priestId', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['inBoundary', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['label', 'address', 'durationMinutes', 'priestId', 'inBoundary', 'notes', 'updatedAt'])
+          );
+        allow delete: if isVerifiedUser()
+          && isValidId(parishId)
+          && isValidId(stopId)
+          && existing().ownerId == request.auth.uid
+          && isParishOwner(parishId);
+      }
+    }
+  }
+}

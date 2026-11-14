@@ -159,13 +159,14 @@ export function useParishPolygonDrawer({
       if (!AdvancedMarker) return;
 
       const dot = document.createElement('div');
-      dot.style.width = isFirst ? '16px' : '11px';
-      dot.style.height = isFirst ? '16px' : '11px';
+      dot.style.width = isFirst ? '24px' : '15px';
+      dot.style.height = isFirst ? '24px' : '15px';
       dot.style.borderRadius = '9999px';
       dot.style.background = isFirst ? '#B45309' : '#FFFFFF';
       dot.style.border = isFirst ? '3px solid #FEF3C7' : '2.5px solid #B45309';
-      dot.style.boxShadow = '0 1px 4px rgba(0,0,0,0.3)';
+      dot.style.boxShadow = '0 2px 6px rgba(0,0,0,0.32)';
       dot.style.cursor = isFirst ? 'pointer' : 'crosshair';
+      dot.style.touchAction = 'none';
       if (isFirst) {
         dot.title = 'Kliknij, aby zamknąć obrys parafii';
       }
