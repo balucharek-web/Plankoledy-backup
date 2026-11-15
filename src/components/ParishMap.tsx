@@ -119,25 +119,50 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         zIndex={appearance.zIndexPriority}
         onClick={onSelect}
       >
-        <div
-          className={`flex items-center justify-center font-mono font-bold transition-transform hover:scale-110 cursor-pointer select-none ${
-            isBlock ? 'rounded-md' : 'rounded-full'
-          }`}
-          style={{
-            width: appearance.size,
-            height: appearance.size,
-            fontSize: appearance.fontSize,
-            lineHeight: 1,
-            backgroundColor: bgColor,
-            border: `${appearance.borderWidth}px solid ${borderCol}`,
-            boxShadow: appearance.showLabel
-              ? '0 2px 6px rgba(15,23,42,0.28)'
-              : '0 1px 3px rgba(15,23,42,0.25)',
-            color: '#FFFFFF',
-            opacity: appearance.opacity,
-          }}
-        >
-          {appearance.showLabel ? appearance.labelText : ''}
+        <div className="relative flex items-center justify-center">
+          {appearance.isStartPoint && (
+            <div
+              className="pointer-events-none select-none whitespace-nowrap"
+              style={{
+                position: 'absolute',
+                bottom: '100%',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                marginBottom: 3,
+                backgroundColor: '#15803D',
+                color: '#FFFFFF',
+                fontSize: 9,
+                fontWeight: 800,
+                letterSpacing: '0.04em',
+                padding: '1px 5px',
+                borderRadius: 4,
+                border: '1.5px solid #FFFFFF',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.28)',
+              }}
+            >
+              START
+            </div>
+          )}
+          <div
+            className={`flex items-center justify-center font-mono font-bold transition-transform hover:scale-110 cursor-pointer select-none ${
+              isBlock ? 'rounded-md' : 'rounded-full'
+            }`}
+            style={{
+              width: appearance.size,
+              height: appearance.size,
+              fontSize: appearance.fontSize,
+              lineHeight: 1,
+              backgroundColor: bgColor,
+              border: `${appearance.borderWidth}px solid ${borderCol}`,
+              boxShadow: appearance.showLabel
+                ? '0 2px 6px rgba(15,23,42,0.28)'
+                : '0 1px 3px rgba(15,23,42,0.25)',
+              color: '#FFFFFF',
+              opacity: appearance.opacity,
+            }}
+          >
+            {appearance.showLabel ? appearance.labelText : ''}
+          </div>
         </div>
       </AdvancedMarker>
 

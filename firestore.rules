@@ -55,12 +55,13 @@ service cloud.firestore {
     function isValidSeasonConfig(sc) {
       return sc is map
         && sc.keys().hasAll(['startDate', 'weekdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask'])
-        && sc.keys().hasOnly(['startDate', 'weekdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask'])
+        && sc.keys().hasOnly(['startDate', 'weekdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask', 'dayTimeOverrides'])
         && sc.startDate is string && sc.startDate.size() == 10 && sc.startDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
         && sc.weekdayStartTime is string && sc.weekdayStartTime.size() >= 4 && sc.weekdayStartTime.size() <= 5
         && sc.weekendStartTime is string && sc.weekendStartTime.size() >= 4 && sc.weekendStartTime.size() <= 5
         && sc.dailyEndTime is string && sc.dailyEndTime.size() >= 4 && sc.dailyEndTime.size() <= 5
-        && sc.weekdaysMask is string && sc.weekdaysMask.size() <= 20 && sc.weekdaysMask.matches('^[0-6,]*$');
+        && sc.weekdaysMask is string && sc.weekdaysMask.size() <= 20 && sc.weekdaysMask.matches('^[0-6,]*$')
+        && (!('dayTimeOverrides' in sc) || (sc.dayTimeOverrides is map && sc.dayTimeOverrides.size() <= 120));
     }
 
     function isValidParish(data) {

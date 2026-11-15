@@ -44,7 +44,7 @@
         },
         "seasonConfig": {
           "type": "object",
-          "description": "Multi-day season scheduling configuration { startDate, weekdayStartTime, weekendStartTime, dailyEndTime, weekdaysMask }."
+          "description": "Multi-day season scheduling configuration { startDate, weekdayStartTime, weekendStartTime, dailyEndTime, weekdaysMask, dayTimeOverrides }."
         },
         "createdAt": {
           "type": "string",

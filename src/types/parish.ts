@@ -103,12 +103,18 @@ export interface PlanConfig {
   returnToParish: boolean;
 }
 
+export interface DayTimeWindow {
+  startTime: string; // HH:MM
+  endTime: string; // HH:MM
+}
+
 export interface SeasonPlanConfig {
   startDate: string; // YYYY-MM-DD
   weekdayStartTime: string; // HH:MM
   weekendStartTime: string; // HH:MM
   dailyEndTime: string; // HH:MM
   weekdaysMask: string; // comma-separated JS day indices 0..6 (e.g. '1,2,3,4,5,6')
+  dayTimeOverrides?: Record<string, DayTimeWindow>;
 }
 
 export interface DayPlanSummary {
@@ -116,6 +122,7 @@ export interface DayPlanSummary {
   weekdayLabel: string;
   shortDateLabel: string;
   startTime: string;
+  plannedEndTime?: string;
   estimatedEndTime: string;
   stops: VisitStop[];
   streetNames: string[];

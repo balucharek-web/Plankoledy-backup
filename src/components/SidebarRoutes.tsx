@@ -36,6 +36,7 @@ import {
 import {
   buildGoogleMapsStageUrls,
   exportScheduleToCsv,
+  extractStreetName,
   formatDistance,
   formatDurationMillis,
   formatMinutesLabel,
@@ -66,6 +67,7 @@ interface SidebarRoutesProps {
     stopId: string,
     direction: 'up' | 'down'
   ) => void;
+  onSetRouteStartStop?: (priestId: number, stopId: string) => void;
 }
 
 const STATUS_BADGE: Record<
@@ -126,10 +128,14 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
   onOpenSchedule,
   onUpdateStopStatus,
   onMoveStopOrder,
+  onSetRouteStartStop,
 }) => {
   const [viewSubMode, setViewSubMode] = useState<'list' | 'field'>('list');
   const [fieldPriestId, setFieldPriestId] = useState<number>(1);
   const [activeFieldStopId, setActiveFieldStopId] = useState<string | null>(
+    null
+  );
+  const [openGmapsMenuPriest, setOpenGmapsMenuPriest] = useState<number | null>(
     null
   );
 
@@ -714,11 +720,16 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                     config.travelMode
                   )
                 : [];
+            const firstItem = route.orderedStops[0];
+            const routeStreets = Array.from(
+              new Set(route.orderedStops.map((s) => extractStreetName(s.stop)))
+            );
+            const gmapsOpen = openGmapsMenuPriest === route.priestId;
 
             return (
               <section key={route.priestId} className="p-4 sm:p-5 space-y-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="min-w-0">
+                  <div className="min-w-0 space-y-1">
                     <div className="flex items-center gap-2">
                       <span
                         className="w-3 h-3 rounded-full shrink-0"
@@ -728,13 +739,31 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                         {route.priestName}
                       </h3>
                     </div>
-                    <div className="mt-1 text-xs text-slate-500 tabular-nums">
+                    {firstItem && (
+                      <div className="text-xs text-slate-700">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-bold mr-1.5">
+                          START
+                        </span>
+                        <span className="font-semibold text-slate-900">
+                          {firstItem.stop.address || firstItem.stop.label}
+                        </span>
+                      </div>
+                    )}
+                    {routeStreets.length > 0 && (
+                      <div className="text-[11px] text-slate-500">
+                        Ulice:{' '}
+                        <span className="text-slate-700 font-medium">
+                          {routeStreets.join(', ')}
+                        </span>
+                      </div>
+                    )}
+                    <div className="text-xs text-slate-500 tabular-nums">
                       {route.orderedStops.length}{' '}
                       {route.orderedStops.length === 1
-                        ? 'wizyta'
+                        ? 'punkt'
                         : route.orderedStops.length < 5
-                          ? 'wizyty'
-                          : 'wizyt'}{' '}
+                          ? 'punkty'
+                          : 'punktów'}{' '}
                       · {formatDistance(route.totalDistanceMeters)} · Przejście:{' '}
                       {formatDurationMillis(route.totalTravelDurationMillis)} ·
                       Koniec ok. {route.endTime}
@@ -759,7 +788,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                       Na mapie
                     </button>
 
-                    {stages.length === 1 && (
+                    {stages.length === 1 ? (
                       <a
                         href={stages[0].url}
                         target="_blank"
@@ -769,28 +798,45 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                         Nawiguj
                         <ExternalLink className="w-3 h-3" />
                       </a>
-                    )}
+                    ) : stages.length > 1 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenGmapsMenuPriest(gmapsOpen ? null : route.priestId)
+                        }
+                        className="min-h-[34px] px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                      >
+                        <Navigation className="w-3 h-3" />
+                        Nawiguj
+                      </button>
+                    ) : null}
                   </div>
                 </div>
 
-                {stages.length > 1 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {stages.map((st) => (
-                      <a
-                        key={st.stageIndex}
-                        href={st.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="min-h-[32px] px-2.5 py-1 text-[11px] font-medium text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
-                      >
-                        <span>
-                          {st.isReturnLeg
-                            ? 'Powrót pod kościół'
-                            : `Etap ${st.stageIndex} (${st.startStopNumber}–${st.endStopNumber})`}
-                        </span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    ))}
+                {gmapsOpen && stages.length > 1 && (
+                  <div className="p-2.5 bg-amber-50/70 border border-amber-200 rounded-xl space-y-1.5">
+                    <p className="text-[11px] text-amber-900 leading-snug">
+                      Zewnętrzna aplikacja Google Maps przyjmuje maks. 10 punktów
+                      na jeden link (w Planerze cała ulica jest jedną ciągłą trasą):
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {stages.map((st) => (
+                        <a
+                          key={st.stageIndex}
+                          href={st.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-h-[30px] px-2.5 py-1 text-[11px] font-medium text-amber-900 bg-white hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <span>
+                            {st.isReturnLeg
+                              ? 'Powrót pod kościół'
+                              : `Nawiguj: pkt ${st.startStopNumber}–${st.endStopNumber}`}
+                          </span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -803,6 +849,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                 {route.orderedStops.length > 0 && (
                   <ol className="divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white overflow-hidden">
                     {route.orderedStops.map((item, idx) => {
+                      const isFirst = idx === 0;
                       const isBlock = Boolean(
                         item.stop.isMultiUnit ||
                           (item.stop.units && item.stop.units.length > 0)
@@ -814,7 +861,9 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                       return (
                         <li
                           key={item.stop.id}
-                          className="flex items-start justify-between gap-2 px-3 py-2.5 hover:bg-slate-50 transition-colors"
+                          className={`flex items-start justify-between gap-2 px-3 py-2.5 transition-colors ${
+                            isFirst ? 'bg-emerald-50/40' : 'hover:bg-slate-50'
+                          }`}
                         >
                           <button
                             type="button"
@@ -825,13 +874,20 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                               className={`w-5 h-5 text-[11px] font-mono font-semibold text-white flex items-center justify-center shrink-0 mt-0.5 tabular-nums ${
                                 isBlock ? 'rounded-md' : 'rounded-full'
                               }`}
-                              style={{ backgroundColor: route.color }}
+                              style={{
+                                backgroundColor: isFirst ? '#15803D' : route.color,
+                              }}
                             >
                               {item.orderIndex}
                             </span>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-baseline justify-between gap-2">
                                 <span className="text-xs font-semibold text-slate-900 truncate inline-flex items-center gap-1.5">
+                                  {isFirst && (
+                                    <span className="px-1 py-0.5 rounded bg-emerald-700 text-white text-[9px] font-extrabold shrink-0">
+                                      START
+                                    </span>
+                                  )}
                                   <span className="truncate">
                                     {item.stop.address || item.stop.label}
                                   </span>
@@ -869,6 +925,18 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                           </button>
 
                           <div className="flex items-center gap-1 shrink-0 self-center">
+                            {onSetRouteStartStop && !isFirst && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onSetRouteStartStop(route.priestId, item.stop.id)
+                                }
+                                title="Zacznij trasę od tego domu (ustaw jako START)"
+                                className="px-1.5 py-1 text-[10px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                              >
+                                Start
+                              </button>
+                            )}
                             {isBlock && (
                               <button
                                 type="button"
@@ -959,7 +1027,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
             className="min-h-[40px] py-2 px-3 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <Printer className="w-3.5 h-3.5" />
-            Drukuj dzień
+            Drukuj mapę i listę
           </button>
         </div>
       )}

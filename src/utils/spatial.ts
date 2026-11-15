@@ -478,6 +478,7 @@ export interface StopMarkerAppearance {
   borderColorOverride?: string;
   fillColorOverride?: string;
   zIndexPriority: number;
+  isStartPoint?: boolean;
 }
 
 export function computeStopMarkerAppearance({
@@ -518,6 +519,7 @@ export function computeStopMarkerAppearance({
   }
 
   const orderNumber = routeMeta?.orderNumber;
+  const isStartPoint = Boolean(routeMeta?.isFirstInRoute) && !isDimmedByPriest;
   const opacity = isDimmedByPriest ? 0.28 : 1;
 
   if (markerLabelMode === 'dots') {
@@ -525,122 +527,92 @@ export function computeStopMarkerAppearance({
       isSelected ||
       Boolean(routeMeta?.isFirstInRoute) ||
       Boolean(routeMeta?.isLastInRoute);
-    const size = showKeyBadge ? (isSelected ? 24 : 20) : isBlock ? 15 : 12;
+    const size = showKeyBadge ? (isSelected ? 26 : isStartPoint ? 26 : 20) : isBlock ? 15 : 12;
     return {
       size,
       showLabel: showKeyBadge && Boolean(orderNumber),
       labelText: showKeyBadge ? (orderNumber ? String(orderNumber) : isBlock ? 'B' : '') : '',
       fontSize: 10,
       opacity,
-      borderWidth: showKeyBadge ? 2 : 1.5,
+      borderWidth: isStartPoint ? 3 : showKeyBadge ? 2 : 1.5,
+      fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
-      zIndexPriority: isSelected ? 400 : showKeyBadge ? 250 : isBlock ? 140 : 80,
+      zIndexPriority: isSelected ? 400 : isStartPoint ? 360 : showKeyBadge ? 250 : isBlock ? 140 : 80,
+      isStartPoint,
     };
   }
 
-  if (markerLabelMode === 'numbers') {
-    const size = isSelected ? 26 : orderNumber ? 24 : isBlock ? 22 : 19;
+  // In 'numbers' mode or whenever viewing a day/street (<= 140 houses or zoom >= 14),
+  // display every single point sequentially (1, 2, 3...) without dropping houses into unlabeled dots.
+  const showEveryHouseNumber =
+    markerLabelMode === 'numbers' ||
+    hasFocusedStreet ||
+    activeVisibleCount <= 140 ||
+    zoom >= 15;
+
+  if (showEveryHouseNumber) {
+    const size = isSelected
+      ? 28
+      : isStartPoint
+        ? 27
+        : orderNumber
+          ? 24
+          : isBlock
+            ? 22
+            : 19;
     return {
       size,
       showLabel: Boolean(orderNumber) || isBlock,
       labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
       fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
       opacity,
-      borderWidth: 2,
+      borderWidth: isStartPoint ? 3 : 2,
+      fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
-        ? 400
-        : isDimmedByPriest
-          ? 40
-          : orderNumber
-            ? 240 - Math.min(140, orderNumber)
-            : 100,
+        ? 450
+        : isStartPoint
+          ? 390
+          : isDimmedByPriest
+            ? 40
+            : orderNumber
+              ? 300 - Math.min(200, orderNumber)
+              : 100,
+      isStartPoint,
     };
   }
 
-  // 'auto': Smart zoom & density adaptation
-  const sparseOrDetailedZoom =
-    hasFocusedStreet || activeVisibleCount <= 18 || zoom >= 17;
-
-  if (sparseOrDetailedZoom) {
-    const size = isSelected ? 26 : orderNumber ? 24 : isBlock ? 22 : 18;
-    return {
-      size,
-      showLabel: Boolean(orderNumber) || isBlock,
-      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
-      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
-      opacity,
-      borderWidth: 2,
-      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
-      zIndexPriority: isSelected
-        ? 400
-        : isDimmedByPriest
-          ? 40
-          : orderNumber
-            ? 260 - Math.min(150, orderNumber)
-            : 110,
-    };
-  }
-
-  if (zoom >= 16) {
-    const showMediumAnchor =
-      isSelected ||
-      isBlock ||
-      Boolean(routeMeta?.isFirstInRoute) ||
-      Boolean(routeMeta?.isLastInRoute) ||
-      Boolean(routeMeta?.isStreetEntry) ||
-      Boolean(orderNumber && orderNumber % 4 === 0);
-
-    if (showMediumAnchor) {
-      return {
-        size: isSelected ? 25 : 22,
-        showLabel: Boolean(orderNumber) || isBlock,
-        labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
-        fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
-        opacity,
-        borderWidth: 2,
-        borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
-        zIndexPriority: isSelected ? 400 : 280,
-      };
-    }
-
-    return {
-      size: 13,
-      showLabel: false,
-      labelText: '',
-      fontSize: 9,
-      opacity,
-      borderWidth: 1.5,
-      borderColorOverride: '#FFFFFF',
-      zIndexPriority: 100,
-    };
-  }
-
-  // Overview zoom (zoom <= 15) with dense stops (> 18): clean dots + key milestone badges
+  // Extreme overview with >140 houses zoomed way out: still highlight START, end & street entries
   const showOverviewAnchor =
     isSelected ||
+    isStartPoint ||
     isBlock ||
-    Boolean(routeMeta?.isOverviewMilestone);
+    Boolean(routeMeta?.isLastInRoute) ||
+    Boolean(routeMeta?.isStreetEntry);
 
   if (showOverviewAnchor) {
     return {
-      size: isSelected ? 25 : 21,
+      size: isSelected ? 26 : isStartPoint ? 26 : 21,
       showLabel: Boolean(orderNumber) || isBlock,
       labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
       fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
       opacity,
-      borderWidth: 2,
+      borderWidth: isStartPoint ? 3 : 2,
+      fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
-        ? 400
-        : routeMeta?.isFirstInRoute || routeMeta?.isLastInRoute
-          ? 340
-          : 290,
+        ? 450
+        : isStartPoint
+          ? 390
+          : routeMeta?.isLastInRoute
+            ? 340
+            : 290,
+      isStartPoint,
     };
   }
 
   return {
-    size: 11,
+    size: 12,
     showLabel: false,
     labelText: '',
     fontSize: 9,

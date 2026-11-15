@@ -848,7 +848,10 @@ export async function computeOsmParishRoutes(
     if (priestStops.length === 0) continue;
 
     const hasManualOrder = priestStops.some(
-      (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
+      (s) =>
+        typeof s.manualOrder === 'number' &&
+        !Number.isNaN(s.manualOrder) &&
+        s.manualOrder > 0
     );
 
     const orderedStops = hasManualOrder

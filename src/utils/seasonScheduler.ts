@@ -11,6 +11,8 @@ import {
 } from '../types/parish';
 import {
   addMinutesToHHMM,
+  extractHouseNumberLabel,
+  extractHouseNumberSortKey,
   extractStreetName,
   formatStreetHouseRange,
   partitionStopsBySector,
@@ -159,9 +161,27 @@ export function getDayStartTime(
   fallbackStartTime: string
 ): string {
   if (!dateStr) return fallbackStartTime;
+  const override = seasonConfig.dayTimeOverrides?.[dateStr]?.startTime;
+  if (override && /^\d{1,2}:\d{2}$/.test(override.trim())) {
+    return override.trim();
+  }
   return isWeekendDate(dateStr)
     ? seasonConfig.weekendStartTime || fallbackStartTime
     : seasonConfig.weekdayStartTime || fallbackStartTime;
+}
+
+export function getDayEndTime(
+  dateStr: string | null | undefined,
+  seasonConfig: SeasonPlanConfig,
+  fallbackEndTime = '20:30'
+): string {
+  if (dateStr) {
+    const override = seasonConfig.dayTimeOverrides?.[dateStr]?.endTime;
+    if (override && /^\d{1,2}:\d{2}$/.test(override.trim())) {
+      return override.trim();
+    }
+  }
+  return seasonConfig.dailyEndTime || fallbackEndTime;
 }
 
 export function haversineMeters(a: LatLng, b: LatLng): number {
@@ -252,7 +272,10 @@ export function estimateDayRoutes(
     if (pool.length === 0) continue;
 
     const hasManualOrder = pool.some(
-      (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
+      (s) =>
+        typeof s.manualOrder === 'number' &&
+        !Number.isNaN(s.manualOrder) &&
+        s.manualOrder > 0
     );
 
     const ordered: VisitStop[] = [];
@@ -411,6 +434,7 @@ export function buildSeasonDaySummaries(
   const days: DayPlanSummary[] = sortedDates.map((date) => {
     const dayStops = byDate[date];
     const startTime = getDayStartTime(date, seasonConfig, config.startTime);
+    const plannedEndTime = getDayEndTime(date, seasonConfig);
 
     const streetCountMap: Record<string, number> = {};
     for (const s of dayStops) {
@@ -446,6 +470,7 @@ export function buildSeasonDaySummaries(
         weekdayLabel: formatPolishWeekdayShort(date),
         shortDateLabel: formatPolishDateShort(date),
         startTime,
+        plannedEndTime,
         estimatedEndTime,
         stops: dayStops,
         streetNames,
@@ -469,6 +494,7 @@ export function buildSeasonDaySummaries(
         weekdayLabel: formatPolishWeekdayShort(date),
         shortDateLabel: formatPolishDateShort(date),
         startTime,
+        plannedEndTime,
         estimatedEndTime: addMinutesToHHMM(startTime, avgPerPriest),
         stops: dayStops,
         streetNames,
@@ -485,6 +511,7 @@ export function buildSeasonDaySummaries(
       weekdayLabel: formatPolishWeekdayShort(date),
       shortDateLabel: formatPolishDateShort(date),
       startTime,
+      plannedEndTime,
       estimatedEndTime: est.endTime,
       stops: dayStops,
       streetNames,
@@ -634,8 +661,10 @@ export function autoScheduleSeason({
       seasonConfig,
       config.startTime
     );
+    const dayEndTime = getDayEndTime(currentDate, seasonConfig);
     const dayStartMinutes = parseHHMMToMinutes(dayStartTime, 15 * 60 + 30);
-    let rawBudgetPerPriest = dailyEndMinutes - dayStartMinutes;
+    const dayEndMinutes = parseHHMMToMinutes(dayEndTime, dailyEndMinutes);
+    let rawBudgetPerPriest = dayEndMinutes - dayStartMinutes;
     if (rawBudgetPerPriest <= 30) rawBudgetPerPriest += 24 * 60;
     rawBudgetPerPriest = Math.max(60, rawBudgetPerPriest);
 
@@ -890,4 +919,83 @@ export function collectReturnVisitCandidates(
   }
   return out;
 }
+
+export type StreetStartDirection = 'auto' | 'asc' | 'desc' | 'from_stop';
+
+/**
+ * Computes manualOrder map for stops based on desired street direction or explicit starting house.
+ * Returns manualOrder = 0 for 'auto' mode so automatic shortest-path from church takes effect.
+ */
+export function computeManualOrderForStops(
+  targetStops: VisitStop[],
+  mode: StreetStartDirection,
+  startingStopId?: string
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (targetStops.length === 0) return result;
+
+  if (mode === 'auto') {
+    for (const s of targetStops) {
+      result.set(s.id, 0);
+    }
+    return result;
+  }
+
+  if (mode === 'from_stop' && startingStopId) {
+    const startStop = targetStops.find((s) => s.id === startingStopId);
+    if (startStop) {
+      const pool = targetStops.filter((s) => s.id !== startStop.id);
+      const ordered: VisitStop[] = [startStop];
+      let cursor = startStop.location;
+      let currentStreet = extractStreetName(startStop);
+
+      while (pool.length > 0) {
+        let bestIdx = 0;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < pool.length; i++) {
+          const cand = pool[i];
+          const d = haversineMeters(cursor, cand.location);
+          const sameStreet = extractStreetName(cand) === currentStreet && d < 450;
+          const score = sameStreet ? d * 0.42 : d;
+          if (score < bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        }
+        const chosen = pool.splice(bestIdx, 1)[0];
+        ordered.push(chosen);
+        cursor = chosen.location;
+        currentStreet = extractStreetName(chosen);
+      }
+
+      ordered.forEach((s, idx) => result.set(s.id, idx + 1));
+      return result;
+    }
+  }
+
+  const sorted = [...targetStops].sort((a, b) => {
+    const streetCmp = extractStreetName(a).localeCompare(
+      extractStreetName(b),
+      'pl'
+    );
+    if (streetCmp !== 0) return streetCmp;
+
+    const numA = extractHouseNumberSortKey(extractHouseNumberLabel(a));
+    const numB = extractHouseNumberSortKey(extractHouseNumberLabel(b));
+    if (numA !== numB) {
+      return mode === 'desc' ? numB - numA : numA - numB;
+    }
+
+    const cmp = (a.address || a.label).localeCompare(
+      b.address || b.label,
+      'pl',
+      { numeric: true }
+    );
+    return mode === 'desc' ? -cmp : cmp;
+  });
+
+  sorted.forEach((s, idx) => result.set(s.id, idx + 1));
+  return result;
+}
+
 

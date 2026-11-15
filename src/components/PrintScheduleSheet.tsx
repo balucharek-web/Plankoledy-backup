@@ -8,15 +8,18 @@ import {
   ExternalLink,
   Map as MapIcon,
   Megaphone,
+  Navigation,
   Printer,
   Route,
 } from 'lucide-react';
 import {
   DayPlanSummary,
+  LatLng,
   ParishCenter,
   PlanConfig,
   PriestRouteResult,
 } from '../types/parish';
+import { PrintableRouteMap } from './PrintableRouteMap';
 import {
   buildAnnouncementDays,
   exportFullSeasonToCsv,
@@ -28,6 +31,7 @@ import {
 import {
   buildGoogleMapsStageUrls,
   exportScheduleToCsv,
+  extractStreetName,
   formatDistance,
   formatDurationMillis,
   formatMinutesLabel,
@@ -35,6 +39,7 @@ import {
 
 interface PrintScheduleSheetProps {
   parish: ParishCenter | null;
+  boundary?: LatLng[];
   config: PlanConfig;
   routes: PriestRouteResult[];
   isExactRoute: boolean;
@@ -42,6 +47,7 @@ interface PrintScheduleSheetProps {
   unscheduledCount: number;
   selectedDate: string | null;
   effectiveStartTime: string;
+  effectiveEndTime?: string;
   exactDayKeys: Record<string, boolean>;
   onSelectDate: (date: string | null) => void;
   onInspectDay: (date: string) => void;
@@ -53,6 +59,7 @@ interface PrintScheduleSheetProps {
 
 export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   parish,
+  boundary = [],
   config,
   routes,
   isExactRoute,
@@ -60,6 +67,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   unscheduledCount,
   selectedDate,
   effectiveStartTime,
+  effectiveEndTime,
   exactDayKeys,
   onSelectDate,
   onInspectDay,
@@ -69,9 +77,12 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   forcedViewMode,
 }) => {
   const [viewMode, setViewMode] = useState<'season' | 'day' | 'announcements'>(
-    plannedDays.length > 0 ? 'season' : 'day'
+    plannedDays.length > 1 ? 'season' : 'day'
   );
   const [copiedAnnouncements, setCopiedAnnouncements] = useState(false);
+  const [openGmapsMenuPriest, setOpenGmapsMenuPriest] = useState<number | null>(
+    null
+  );
 
   const effectiveViewMode = forcedViewMode ?? viewMode;
 
@@ -546,22 +557,41 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
       ) : (
         <div className="space-y-6">
           <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
-            <div className="text-xs sm:text-sm text-slate-700 tabular-nums">
-              <strong>
-                {selectedDate
-                  ? formatPolishDateFull(selectedDate)
-                  : 'Bieżący wybór ulic'}
-              </strong>{' '}
-              · Start: {effectiveStartTime} ·{' '}
-              <span
-                className={
-                  isExactRoute
-                    ? 'text-emerald-700 font-medium'
-                    : 'text-amber-700 font-medium'
-                }
-              >
-                {isExactRoute ? 'Dokładna trasa drogowa' : 'Szacowany rozkład'}
-              </span>
+            <div className="text-xs sm:text-sm text-slate-700 tabular-nums space-y-0.5">
+              <div>
+                <strong className="text-slate-900">
+                  {selectedDate
+                    ? formatPolishDateFull(selectedDate)
+                    : 'Bieżący wybór ulic'}
+                </strong>{' '}
+                · Godziny:{' '}
+                <strong className="font-mono text-slate-900">
+                  {effectiveStartTime}
+                  {effectiveEndTime ? `–${effectiveEndTime}` : ''}
+                </strong>
+              </div>
+              <div className="text-xs text-slate-500">
+                Ulice:{' '}
+                <strong className="text-slate-800">
+                  {Array.from(
+                    new Set(
+                      routes.flatMap((r) =>
+                        r.orderedStops.map((s) => extractStreetName(s.stop))
+                      )
+                    )
+                  ).join(', ') || '—'}
+                </strong>{' '}
+                ·{' '}
+                <span
+                  className={
+                    isExactRoute
+                      ? 'text-emerald-700 font-medium'
+                      : 'text-amber-700 font-medium'
+                  }
+                >
+                  {isExactRoute ? 'Dokładna trasa drogowa' : 'Trasa kolędowa'}
+                </span>
+              </div>
             </div>
 
             <div className="flex items-center gap-2 no-print">
@@ -571,7 +601,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1.5"
               >
                 <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-                Pokaż trasę na mapie
+                Pokaż na mapie
               </button>
               {!isExactRoute && (
                 <button
@@ -579,164 +609,279 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                   onClick={() => onComputeDayRoute(selectedDate)}
                   className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg"
                 >
-                  Wyznacz trasę drogową
+                  Wyznacz po ulicach
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="min-h-[36px] px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg inline-flex items-center gap-1.5"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Drukuj / PDF
+              </button>
             </div>
           </div>
 
-          {routes.map((route) => (
-            <section
-              key={route.priestId}
-              className="bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible"
-            >
-              <div className="px-4 sm:px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="w-3 h-3 rounded-full"
-                      style={{ backgroundColor: route.color }}
-                    />
-                    <h2 className="text-base font-semibold text-slate-900">
-                      {route.priestName}
-                    </h2>
-                  </div>
-                  <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
-                    {route.orderedStops.length} wizyt · Dystans:{' '}
-                    {formatDistance(route.totalDistanceMeters)} · Przejście:{' '}
-                    {formatDurationMillis(route.totalTravelDurationMillis)} ·
-                    Wizyty: {formatMinutesLabel(route.totalVisitMinutes)} ·
-                    Koniec ok. {route.endTime}
-                  </p>
-                </div>
+          {/* Printable Vector + OSM Tile Route Map */}
+          <PrintableRouteMap
+            parish={parish}
+            boundary={boundary}
+            routes={routes}
+            isExactRoute={isExactRoute}
+            title={
+              selectedDate
+                ? `Mapa trasy kolędy · ${formatPolishDateFull(selectedDate)}`
+                : 'Mapa trasy kolędy (START i kolejne domy)'
+            }
+          />
 
-                {parish && route.orderedStops.length > 0 && (() => {
-                  const stages = buildGoogleMapsStageUrls(
+          {routes.map((route) => {
+            const firstItem = route.orderedStops[0];
+            const routeStreets = Array.from(
+              new Set(route.orderedStops.map((s) => extractStreetName(s.stop)))
+            );
+            const gmapsStages =
+              parish && route.orderedStops.length > 0
+                ? buildGoogleMapsStageUrls(
                     parish,
                     route.orderedStops.map((s) => s.stop),
                     config.returnToParish,
                     config.travelMode
-                  );
-                  return (
-                    <div className="no-print flex flex-wrap items-center gap-1.5">
-                      {stages.map((st) => (
+                  )
+                : [];
+            const gmapsOpen = openGmapsMenuPriest === route.priestId;
+
+            return (
+              <section
+                key={route.priestId}
+                className="bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible"
+              >
+                <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
+                  <div className="space-y-0.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className="w-3 h-3 rounded-full shrink-0"
+                        style={{ backgroundColor: route.color }}
+                      />
+                      <h2 className="text-base font-semibold text-slate-900">
+                        Lista domów — {route.priestName}
+                      </h2>
+                      <span className="text-xs font-mono text-slate-600 tabular-nums">
+                        ({route.orderedStops.length}{' '}
+                        {route.orderedStops.length === 1
+                          ? 'punkt'
+                          : route.orderedStops.length < 5
+                            ? 'punkty'
+                            : 'punktów'}
+                        )
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-600 tabular-nums">
+                      {firstItem && (
+                        <>
+                          <span className="font-semibold text-emerald-800">
+                            START: {firstItem.stop.address || firstItem.stop.label}
+                          </span>{' '}
+                          ·{' '}
+                        </>
+                      )}
+                      Ulice: {routeStreets.join(', ')} · Dystans:{' '}
+                      {formatDistance(route.totalDistanceMeters)} · Przejście:{' '}
+                      {formatDurationMillis(route.totalTravelDurationMillis)} ·
+                      Wizyty: {formatMinutesLabel(route.totalVisitMinutes)} ·
+                      Koniec ok. {route.endTime}
+                    </p>
+                  </div>
+
+                  {gmapsStages.length > 0 && (
+                    <div className="no-print">
+                      {gmapsStages.length === 1 ? (
+                        <a
+                          href={gmapsStages[0].url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1"
+                        >
+                          <Navigation className="w-3 h-3" />
+                          <span>Nawiguj w Google Maps</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenGmapsMenuPriest(gmapsOpen ? null : route.priestId)
+                          }
+                          className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1"
+                        >
+                          <Navigation className="w-3 h-3" />
+                          <span>Nawiguj w Google Maps</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {gmapsOpen && gmapsStages.length > 1 && (
+                  <div className="no-print px-4 sm:px-5 py-2.5 bg-amber-50/70 border-b border-amber-200 space-y-1.5">
+                    <p className="text-[11px] text-amber-900">
+                      Zewnętrzna aplikacja Google Maps przyjmuje maksymalnie 10
+                      punktów na jeden link nawigacji (tutaj na mapie i liście masz
+                      jedną pełną trasę bez podziału):
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {gmapsStages.map((st) => (
                         <a
                           key={st.stageIndex}
                           href={st.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1"
+                          className="px-2.5 py-1 text-xs font-medium text-amber-900 bg-white hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1"
                         >
                           <span>
-                            {stages.length === 1
-                              ? 'Otwórz w Google Maps'
-                              : st.isReturnLeg
-                                ? 'Powrót'
-                                : `Etap ${st.stageIndex} (${st.startStopNumber}–${st.endStopNumber})`}
+                            {st.isReturnLeg
+                              ? 'Powrót pod kościół'
+                              : `Odcinek nawigacji ${st.startStopNumber}–${st.endStopNumber}`}
                           </span>
                           <ExternalLink className="w-3 h-3" />
                         </a>
                       ))}
                     </div>
-                  );
-                })()}
-              </div>
+                  </div>
+                )}
 
-              <div className="overflow-x-auto print:overflow-visible">
-                <table className="w-full text-left border-collapse text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
-                      <th className="py-2.5 px-3 sm:px-4 w-12">Lp.</th>
-                      <th className="py-2.5 px-3 sm:px-4">Godziny</th>
-                      <th className="py-2.5 px-3 sm:px-4">Adres domu</th>
-                      <th className="py-2.5 px-3 sm:px-4 hidden sm:table-cell print:table-cell">
-                        Rodzina / Uwagi
-                      </th>
-                      <th className="py-2.5 px-3 sm:px-4 text-right hidden sm:table-cell print:table-cell">
-                        Dojazd
-                      </th>
-                      <th className="py-2.5 px-3 sm:px-4 text-right">Wizyta</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {route.orderedStops.map((item) => {
-                      const houseAddress = item.stop.address || item.stop.label;
-                      const isBlock = Boolean(
-                        item.stop.isMultiUnit ||
-                          (item.stop.units && item.stop.units.length > 0)
-                      );
-                      const unitsTotal =
-                        item.stop.units?.length || item.stop.unitsCount || 0;
-                      const blockLabel = isBlock
-                        ? `Blok${unitsTotal > 0 ? ` (${unitsTotal} lok.)` : ''}`
-                        : '';
-                      const secondaryParts = [
-                        blockLabel,
-                        item.stop.label && item.stop.label !== houseAddress
-                          ? item.stop.label
-                          : '',
-                        item.stop.notes || '',
-                      ].filter(Boolean);
-
-                      const unitsSummary =
-                        item.stop.units && item.stop.units.length > 0
-                          ? item.stop.units
-                              .map(
-                                (u) =>
-                                  `${u.staircase ? `kl. ${u.staircase} ` : ''}m. ${u.unitNumber}${
-                                    u.familyName ? ` (${u.familyName})` : ''
-                                  }`
-                              )
-                              .join(', ')
+                <div className="overflow-x-auto print:overflow-visible">
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50/50 text-xs font-semibold text-slate-600">
+                        <th className="py-2.5 px-2.5 sm:px-3 w-8 text-center">
+                          ✓
+                        </th>
+                        <th className="py-2.5 px-2 sm:px-3 w-14">Nr</th>
+                        <th className="py-2.5 px-2.5 sm:px-3 w-24">Godz.</th>
+                        <th className="py-2.5 px-2.5 sm:px-3">Adres domu</th>
+                        <th className="py-2.5 px-2.5 sm:px-3 hidden sm:table-cell print:table-cell">
+                          Rodzina / Notatki w terenie
+                        </th>
+                        <th className="py-2.5 px-2.5 sm:px-3 text-right w-20">
+                          Czas
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {route.orderedStops.map((item, idx) => {
+                        const houseAddress = item.stop.address || item.stop.label;
+                        const isStart = idx === 0;
+                        const isBlock = Boolean(
+                          item.stop.isMultiUnit ||
+                            (item.stop.units && item.stop.units.length > 0)
+                        );
+                        const unitsTotal =
+                          item.stop.units?.length || item.stop.unitsCount || 0;
+                        const blockLabel = isBlock
+                          ? `Blok${unitsTotal > 0 ? ` (${unitsTotal} lok.)` : ''}`
                           : '';
+                        const secondaryParts = [
+                          blockLabel,
+                          item.stop.label && item.stop.label !== houseAddress
+                            ? item.stop.label
+                            : '',
+                          item.stop.notes || '',
+                        ].filter(Boolean);
 
-                      return (
-                        <tr key={item.stop.id} className="hover:bg-slate-50/60">
-                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs text-slate-500 tabular-nums align-top">
-                            {item.orderIndex}.
-                          </td>
-                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs font-medium text-slate-900 tabular-nums whitespace-nowrap align-top">
-                            {item.arrivalTime}–{item.departureTime}
-                          </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-xs sm:text-sm font-medium text-slate-900 align-top">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span>{houseAddress}</span>
-                              {isBlock && (
-                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold tabular-nums">
-                                  {blockLabel}
+                        const unitsSummary =
+                          item.stop.units && item.stop.units.length > 0
+                            ? item.stop.units
+                                .map(
+                                  (u) =>
+                                    `${u.staircase ? `kl. ${u.staircase} ` : ''}m. ${u.unitNumber}${
+                                      u.familyName ? ` (${u.familyName})` : ''
+                                    }`
+                                )
+                                .join(', ')
+                            : '';
+
+                        return (
+                          <tr
+                            key={item.stop.id}
+                            className={
+                              isStart
+                                ? 'bg-emerald-50/40'
+                                : 'hover:bg-slate-50/60'
+                            }
+                          >
+                            <td className="py-2.5 px-2.5 sm:px-3 text-center align-top">
+                              <span
+                                aria-hidden="true"
+                                className="inline-block w-4 h-4 mt-0.5 rounded border border-slate-400 bg-white"
+                              />
+                            </td>
+                            <td className="py-2.5 px-2 sm:px-3 align-top">
+                              <div className="inline-flex items-center gap-1">
+                                <span
+                                  className={`w-5 h-5 text-[11px] font-mono font-bold text-white inline-flex items-center justify-center shrink-0 tabular-nums ${
+                                    isBlock ? 'rounded-md' : 'rounded-full'
+                                  }`}
+                                  style={{
+                                    backgroundColor: isStart
+                                      ? '#15803D'
+                                      : route.color,
+                                  }}
+                                >
+                                  {item.orderIndex}
+                                </span>
+                                {isStart && (
+                                  <span className="px-1 py-0.5 rounded bg-emerald-700 text-white text-[9px] font-extrabold uppercase tracking-wide">
+                                    START
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2.5 sm:px-3 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap align-top">
+                              {item.arrivalTime}
+                            </td>
+                            <td className="py-2.5 px-2.5 sm:px-3 text-xs sm:text-sm font-semibold text-slate-900 align-top">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span>{houseAddress}</span>
+                                {isBlock && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold tabular-nums">
+                                    {blockLabel}
+                                  </span>
+                                )}
+                              </div>
+                              {unitsSummary && (
+                                <div className="text-[11px] font-normal text-slate-600 mt-1 leading-relaxed">
+                                  Lokale: {unitsSummary}
+                                </div>
+                              )}
+                              {secondaryParts.length > 0 && (
+                                <div className="sm:hidden print:hidden text-[11px] font-normal text-slate-500 mt-0.5">
+                                  {secondaryParts.join(' · ')}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2.5 sm:px-3 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top">
+                              {secondaryParts.length > 0 ? (
+                                secondaryParts.join(' · ')
+                              ) : (
+                                <span className="text-slate-300 select-none">
+                                  _________________________
                                 </span>
                               )}
-                            </div>
-                            {unitsSummary && (
-                              <div className="text-[11px] font-normal text-slate-600 mt-1 leading-relaxed">
-                                Lokale: {unitsSummary}
-                              </div>
-                            )}
-                            {secondaryParts.length > 0 && (
-                              <div className="sm:hidden text-[11px] font-normal text-slate-500 mt-0.5">
-                                {secondaryParts.join(' · ')}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top">
-                            {secondaryParts.length > 0
-                              ? secondaryParts.join(' · ')
-                              : '—'}
-                          </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-500 tabular-nums whitespace-nowrap hidden sm:table-cell print:table-cell align-top">
-                            {formatDistance(item.legDistanceMeters)}
-                          </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap align-top">
-                            {item.stop.durationMinutes} min
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ))}
+                            </td>
+                            <td className="py-2.5 px-2.5 sm:px-3 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap align-top">
+                              {item.stop.durationMinutes} min
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
     </div>

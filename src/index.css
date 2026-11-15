@@ -70,7 +70,8 @@
     display: table-header-group;
   }
 
-  tr {
+  tr,
+  .print-break-avoid {
     break-inside: avoid;
     page-break-inside: avoid;
   }

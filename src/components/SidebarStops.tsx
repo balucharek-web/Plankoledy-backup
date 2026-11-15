@@ -41,9 +41,27 @@ import {
 } from '../utils/seasonScheduler';
 import {
   extractHouseNumberLabel,
+  extractHouseNumberSortKey,
   extractStreetName,
   isEvenHouseNumberStr,
 } from '../utils/spatial';
+import {
+  StreetStartDirection,
+  estimateDayRoutes,
+  getDayEndTime,
+  getDayStartTime,
+  parseHHMMToMinutes,
+} from '../utils/seasonScheduler';
+
+export interface CustomDayPlanPayload {
+  date: string;
+  startTime: string;
+  endTime: string;
+  stopIds: string[];
+  assignmentMode: 'split' | number;
+  startDirection: StreetStartDirection;
+  startingStopId?: string;
+}
 
 interface SidebarStopsProps {
   parish: ParishCenter | null;
@@ -71,12 +89,18 @@ interface SidebarStopsProps {
   onViewDayOnMap: (date: string) => void;
   onComputeDayRoute: (date: string | null) => void;
   onScheduleReturnVisits: (targetDate: string) => void;
+  onPlanCustomDay: (payload: CustomDayPlanPayload) => void;
+  onUpdateDayTimeWindow: (
+    date: string,
+    startTime: string,
+    endTime: string
+  ) => void;
   onGoToSetup: () => void;
   isComputing: boolean;
   progressLabel?: string | null;
 }
 
-type StopsViewTab = 'days' | 'streets';
+type StopsViewTab = 'single' | 'days' | 'streets';
 
 export const SidebarStops: React.FC<SidebarStopsProps> = ({
   parish,
@@ -104,11 +128,15 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   onViewDayOnMap,
   onComputeDayRoute,
   onScheduleReturnVisits,
+  onPlanCustomDay,
+  onUpdateDayTimeWindow,
   onGoToSetup,
   isComputing,
   progressLabel,
 }) => {
-  const [activeTab, setActiveTab] = useState<StopsViewTab>('days');
+  const [activeTab, setActiveTab] = useState<StopsViewTab>(() =>
+    plannedDays.length === 0 ? 'single' : 'days'
+  );
   const [showSchedulerSettings, setShowSchedulerSettings] = useState(
     plannedDays.length === 0
   );
@@ -121,6 +149,37 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   >({});
   const [visibleStreetsLimit, setVisibleStreetsLimit] = useState<number>(30);
   const [houseLimits, setHouseLimits] = useState<Record<string, number>>({});
+  const [editingHoursDate, setEditingHoursDate] = useState<string | null>(null);
+  const [editingHoursStart, setEditingHoursStart] = useState<string>('15:30');
+  const [editingHoursEnd, setEditingHoursEnd] = useState<string>('20:30');
+
+  // Single-Day + Specific Street Quick Planner state
+  const [singleDayDate, setSingleDayDate] = useState<string>(
+    () => selectedDate || seasonConfig.startDate || '2026-12-28'
+  );
+  const [singleStartTime, setSingleStartTime] = useState<string>(() =>
+    getDayStartTime(
+      selectedDate || seasonConfig.startDate,
+      seasonConfig,
+      config.startTime
+    )
+  );
+  const [singleEndTime, setSingleEndTime] = useState<string>(() =>
+    getDayEndTime(selectedDate || seasonConfig.startDate, seasonConfig)
+  );
+  const [singleSelectedStreets, setSingleSelectedStreets] = useState<string[]>(
+    []
+  );
+  const [singleStreetQuery, setSingleStreetQuery] = useState<string>('');
+  const [singleParity, setSingleParity] = useState<'all' | 'even' | 'odd'>(
+    'all'
+  );
+  const [singleAssignmentMode, setSingleAssignmentMode] = useState<
+    'split' | number
+  >(() => (config.priestCount > 1 ? 'split' : 1));
+  const [singleStartDirection, setSingleStartDirection] =
+    useState<StreetStartDirection>('asc');
+  const [singleStartStopId, setSingleStartStopId] = useState<string>('');
 
   const defaultReturnDate = useMemo(() => {
     const lastPlanned = plannedDays[plannedDays.length - 1]?.date;
@@ -201,6 +260,118 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
       .filter((g) => g.visibleStops.length > 0)
       .sort((a, b) => a.streetName.localeCompare(b.streetName, 'pl'));
   }, [stops, filterText, streetDateFilter]);
+
+  // Streets index for Quick Single-Day Planner
+  const allStreetsSummary = useMemo(() => {
+    const map = new Map<string, VisitStop[]>();
+    for (const stop of stops) {
+      const name = extractStreetName(stop);
+      const list = map.get(name);
+      if (list) list.push(stop);
+      else map.set(name, [stop]);
+    }
+    return Array.from(map.entries())
+      .map(([streetName, list]) => {
+        const assignedDates = Array.from(
+          new Set(
+            list.map((s) => (s.visitDate ?? '').trim()).filter(Boolean)
+          )
+        ).sort();
+        return {
+          streetName,
+          stops: list,
+          assignedDates,
+        };
+      })
+      .sort((a, b) => a.streetName.localeCompare(b.streetName, 'pl'));
+  }, [stops]);
+
+  const filteredSingleStreets = useMemo(() => {
+    const q = singleStreetQuery.trim().toLowerCase();
+    if (!q) return allStreetsSummary;
+    return allStreetsSummary.filter((s) =>
+      s.streetName.toLowerCase().includes(q)
+    );
+  }, [allStreetsSummary, singleStreetQuery]);
+
+  // Effective selected streets (if only 1 street in parish and nothing chosen yet, auto-preselect it)
+  const effectiveSingleStreets = useMemo(() => {
+    if (singleSelectedStreets.length > 0) {
+      const existing = new Set(allStreetsSummary.map((s) => s.streetName));
+      return singleSelectedStreets.filter((n) => existing.has(n));
+    }
+    if (allStreetsSummary.length === 1) {
+      return [allStreetsSummary[0].streetName];
+    }
+    return [];
+  }, [allStreetsSummary, singleSelectedStreets]);
+
+  const singleMatchingStops = useMemo(() => {
+    const streetSet = new Set(effectiveSingleStreets);
+    if (streetSet.size === 0) return [];
+    const matching = stops.filter((s) => {
+      if (!streetSet.has(extractStreetName(s))) return false;
+      if (singleParity === 'all') return true;
+      const isEven = isEvenHouseNumberStr(extractHouseNumberLabel(s));
+      if (singleParity === 'even') return isEven === true;
+      return isEven === false;
+    });
+    return [...matching].sort((a, b) => {
+      const stCmp = extractStreetName(a).localeCompare(
+        extractStreetName(b),
+        'pl'
+      );
+      if (stCmp !== 0) return stCmp;
+      const numA = extractHouseNumberSortKey(extractHouseNumberLabel(a));
+      const numB = extractHouseNumberSortKey(extractHouseNumberLabel(b));
+      if (numA !== numB) return numA - numB;
+      return (a.address || a.label).localeCompare(b.address || b.label, 'pl', {
+        numeric: true,
+      });
+    });
+  }, [effectiveSingleStreets, singleParity, stops]);
+
+  const singlePreviewEstimate = useMemo(() => {
+    if (!parish || singleMatchingStops.length === 0) return null;
+    const effectiveConfig: PlanConfig = {
+      ...config,
+      startTime: singleStartTime || config.startTime,
+      priestCount:
+        singleAssignmentMode === 'split' ? config.priestCount : 1,
+    };
+    const est = estimateDayRoutes(
+      parish,
+      singleMatchingStops.map((s) => ({
+        ...s,
+        priestId:
+          singleAssignmentMode === 'split'
+            ? s.priestId
+            : typeof singleAssignmentMode === 'number'
+              ? singleAssignmentMode
+              : 1,
+      })),
+      effectiveConfig,
+      singleStartTime
+    );
+    const estEndMins = parseHHMMToMinutes(est.endTime);
+    const limitEndMins = parseHHMMToMinutes(singleEndTime);
+    const overLimit =
+      singleEndTime &&
+      estEndMins > limitEndMins &&
+      estEndMins - limitEndMins < 720;
+    return {
+      endTime: est.endTime,
+      overLimit,
+      totalDistanceMeters: est.totalDistanceMeters,
+    };
+  }, [
+    config,
+    parish,
+    singleAssignmentMode,
+    singleEndTime,
+    singleMatchingStops,
+    singleStartTime,
+  ]);
 
   const toggleExpand = (streetName: string) => {
     setExpandedStreets((prev) => ({
@@ -311,38 +482,415 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           </button>
         </div>
 
-        {/* Mode switch: Okres kolędowy (dni) vs Ulice i wybór */}
-        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
+        {/* Mode switch: Konkretny dzień & ulica vs Okres kolędowy vs Ulice i ręcznie */}
+        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl">
+          <button
+            type="button"
+            onClick={() => setActiveTab('single')}
+            className={`min-h-[38px] px-2 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg inline-flex items-center justify-center gap-1 transition-colors ${
+              activeTab === 'single'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            <span className="truncate">Konkretny dzień</span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveTab('days')}
-            className={`min-h-[38px] px-3 py-1.5 text-xs font-medium rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors ${
+            className={`min-h-[38px] px-2 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg inline-flex items-center justify-center gap-1 transition-colors ${
               activeTab === 'days'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Calendar className="w-3.5 h-3.5 text-amber-700" />
-            <span className="truncate">Okres kolędowy ({plannedDays.length})</span>
+            <Calendar className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+            <span className="truncate">Okres ({plannedDays.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('streets')}
-            className={`min-h-[38px] px-3 py-1.5 text-xs font-medium rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors ${
+            className={`min-h-[38px] px-2 py-1.5 text-[11px] sm:text-xs font-medium rounded-lg inline-flex items-center justify-center gap-1 transition-colors ${
               activeTab === 'streets'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <MapPin className="w-3.5 h-3.5 text-slate-600" />
-            <span className="truncate">Ulice i ręcznie</span>
+            <MapPin className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+            <span className="truncate">Ulice</span>
           </button>
         </div>
       </div>
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto">
-        {activeTab === 'days' ? (
+        {activeTab === 'single' ? (
+          /* TAB 0: QUICK SINGLE-DAY & SPECIFIC STREET PLANNER */
+          <div className="p-4 sm:p-5 space-y-4">
+            <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-1">
+              <h3 className="text-xs font-semibold text-amber-950">
+                Zaplanuj wybrany dzień i konkretną ulicę
+              </h3>
+              <p className="text-[11px] text-amber-900 leading-relaxed">
+                Wybierz datę (np. piątek), godziny kolędy (np. 10:00–16:00),
+                ulicę oraz dom startowy. Wszystkie numery zobaczysz razem na
+                mapie bez dzielenia na etapy.
+              </p>
+            </div>
+
+            {/* Date & Custom Hours */}
+            <div className="space-y-2.5 bg-slate-50/80 border border-slate-200 rounded-xl p-3.5">
+              <div>
+                <label
+                  htmlFor="single-day-date"
+                  className="block text-[11px] font-medium text-slate-600 mb-1"
+                >
+                  Data kolędy{' '}
+                  {singleDayDate && (
+                    <span className="text-amber-800 font-semibold">
+                      ({formatPolishDateFull(singleDayDate)})
+                    </span>
+                  )}
+                </label>
+                <input
+                  id="single-day-date"
+                  type="date"
+                  value={singleDayDate}
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    setSingleDayDate(nextDate);
+                    if (nextDate && seasonConfig.dayTimeOverrides?.[nextDate]) {
+                      setSingleStartTime(
+                        seasonConfig.dayTimeOverrides[nextDate].startTime
+                      );
+                      setSingleEndTime(
+                        seasonConfig.dayTimeOverrides[nextDate].endTime
+                      );
+                    }
+                  }}
+                  className="w-full min-h-[40px] px-3 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label
+                    htmlFor="single-start-time"
+                    className="block text-[11px] font-medium text-slate-600 mb-1"
+                  >
+                    Godzina od
+                  </label>
+                  <input
+                    id="single-start-time"
+                    type="time"
+                    value={singleStartTime}
+                    onChange={(e) => setSingleStartTime(e.target.value)}
+                    className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="single-end-time"
+                    className="block text-[11px] font-medium text-slate-600 mb-1"
+                  >
+                    Godzina do
+                  </label>
+                  <input
+                    id="single-end-time"
+                    type="time"
+                    value={singleEndTime}
+                    onChange={(e) => setSingleEndTime(e.target.value)}
+                    className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                  />
+                </div>
+              </div>
+
+              {config.priestCount > 1 && (
+                <div>
+                  <label
+                    htmlFor="single-priest-assign"
+                    className="block text-[11px] font-medium text-slate-600 mb-1"
+                  >
+                    Przydział księży
+                  </label>
+                  <select
+                    id="single-priest-assign"
+                    value={String(singleAssignmentMode)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSingleAssignmentMode(
+                        val === 'split' ? 'split' : Number.parseInt(val, 10)
+                      );
+                    }}
+                    className="w-full min-h-[38px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                  >
+                    <option value="split">
+                      Podziel po równo na {config.priestCount} księży
+                    </option>
+                    {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
+                      <option key={p.id} value={String(p.id)}>
+                        Całość idzie {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Street Selector */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-900">
+                  Wybierz ulice ({effectiveSingleStreets.length}/
+                  {allStreetsSummary.length})
+                </span>
+                {effectiveSingleStreets.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSingleSelectedStreets([])}
+                    className="text-[11px] text-slate-500 hover:text-slate-900"
+                  >
+                    Wyczyść wybór
+                  </button>
+                )}
+              </div>
+
+              {allStreetsSummary.length > 5 && (
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={singleStreetQuery}
+                    onChange={(e) => setSingleStreetQuery(e.target.value)}
+                    placeholder="Szukaj ulicy z bazy parafii..."
+                    className="w-full pl-8 pr-8 py-2 text-base sm:text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
+                  />
+                  {singleStreetQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSingleStreetQuery('')}
+                      aria-label="Wyczyść szukanie ulicy"
+                      className="p-1 text-slate-400 hover:text-slate-700 absolute right-2 top-1/2 -translate-y-1/2"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100 bg-white">
+                {filteredSingleStreets.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-slate-500">
+                    Brak pasujących ulic.
+                  </div>
+                ) : (
+                  filteredSingleStreets.map((st) => {
+                    const checked = effectiveSingleStreets.includes(
+                      st.streetName
+                    );
+                    return (
+                      <label
+                        key={st.streetName}
+                        className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors ${
+                          checked ? 'bg-amber-50/70' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setSingleSelectedStreets((prev) => {
+                              const base =
+                                prev.length === 0 &&
+                                effectiveSingleStreets.length === 1 &&
+                                st.streetName === effectiveSingleStreets[0]
+                                  ? effectiveSingleStreets
+                                  : prev;
+                              return base.includes(st.streetName)
+                                ? base.filter((x) => x !== st.streetName)
+                                : [...base, st.streetName];
+                            });
+                            setSingleStartStopId('');
+                          }}
+                          className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 shrink-0"
+                        />
+                        <span className="flex-1 min-w-0 text-xs font-medium text-slate-900 truncate">
+                          {st.streetName}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-500 tabular-nums shrink-0">
+                          {st.stops.length}{' '}
+                          {st.stops.length === 1 ? 'dom' : 'domów'}
+                        </span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Parity Filter & Start Direction */}
+            {effectiveSingleStreets.length > 0 && (
+              <div className="space-y-3 bg-slate-50/80 border border-slate-200 rounded-xl p-3.5">
+                <div>
+                  <span className="block text-[11px] font-medium text-slate-600 mb-1.5">
+                    Numery domów na ulicy
+                  </span>
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-white border border-slate-200 rounded-xl">
+                    {(
+                      [
+                        { id: 'all', label: 'Wszystkie' },
+                        { id: 'even', label: 'Parzyste' },
+                        { id: 'odd', label: 'Nieparzyste' },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setSingleParity(opt.id);
+                          setSingleStartStopId('');
+                        }}
+                        className={`min-h-[32px] px-2 py-1 text-[11px] font-semibold rounded-lg transition-colors ${
+                          singleParity === opt.id
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="single-start-direction"
+                    className="block text-[11px] font-medium text-slate-600 mb-1"
+                  >
+                    Gdzie zaczynam trasę i w którą stronę
+                  </label>
+                  <select
+                    id="single-start-direction"
+                    value={singleStartDirection}
+                    onChange={(e) => {
+                      const nextDir = e.target.value as StreetStartDirection;
+                      setSingleStartDirection(nextDir);
+                      if (
+                        nextDir === 'from_stop' &&
+                        !singleStartStopId &&
+                        singleMatchingStops.length > 0
+                      ) {
+                        setSingleStartStopId(singleMatchingStops[0].id);
+                      }
+                    }}
+                    className="w-full min-h-[38px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                  >
+                    <option value="asc">
+                      Od najniższego numeru (rosnąco: 1, 2, 3...)
+                    </option>
+                    <option value="desc">
+                      Od najwyższego numeru (malejąco)
+                    </option>
+                    <option value="from_stop">
+                      Wskazuję konkretny dom jako START
+                    </option>
+                    <option value="auto">
+                      Automatycznie od strony kościoła
+                    </option>
+                  </select>
+                </div>
+
+                {singleStartDirection === 'from_stop' &&
+                  singleMatchingStops.length > 0 && (
+                    <div>
+                      <label
+                        htmlFor="single-start-house"
+                        className="block text-[11px] font-medium text-emerald-800 mb-1"
+                      >
+                        Dom początkowy (START #1)
+                      </label>
+                      <select
+                        id="single-start-house"
+                        value={
+                          singleStartStopId || singleMatchingStops[0].id
+                        }
+                        onChange={(e) => setSingleStartStopId(e.target.value)}
+                        className="w-full min-h-[38px] px-2.5 py-1.5 text-xs bg-emerald-50/70 border border-emerald-300 rounded-xl text-slate-900 focus:outline-none focus:border-emerald-600"
+                      >
+                        {singleMatchingStops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.address || s.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+              </div>
+            )}
+
+            {/* Live summary & Save CTA */}
+            <div className="space-y-2.5">
+              {singleMatchingStops.length > 0 && singlePreviewEstimate && (
+                <div
+                  className={`p-3 rounded-xl border text-xs tabular-nums space-y-1 ${
+                    singlePreviewEstimate.overLimit
+                      ? 'bg-amber-50 border-amber-300 text-amber-950'
+                      : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 font-semibold">
+                    <span>
+                      Wybrano {singleMatchingStops.length}{' '}
+                      {singleMatchingStops.length === 1
+                        ? 'dom'
+                        : singleMatchingStops.length < 5
+                          ? 'domy'
+                          : 'domów'}
+                    </span>
+                    <span className="font-mono">
+                      {singleStartTime} → ok. {singlePreviewEstimate.endTime}
+                    </span>
+                  </div>
+                  {singlePreviewEstimate.overLimit && (
+                    <div className="text-[11px] text-amber-800">
+                      Uwaga: przy {config.defaultVisitMinutes} min/dom czas
+                      przekracza zaplanowaną godz. {singleEndTime} (możesz
+                      zostawić lub skrócić listę np. do parzystych).
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                type="button"
+                disabled={
+                  !singleDayDate ||
+                  singleMatchingStops.length === 0 ||
+                  isComputing
+                }
+                onClick={() =>
+                  onPlanCustomDay({
+                    date: singleDayDate,
+                    startTime: singleStartTime,
+                    endTime: singleEndTime,
+                    stopIds: singleMatchingStops.map((s) => s.id),
+                    assignmentMode: singleAssignmentMode,
+                    startDirection: singleStartDirection,
+                    startingStopId:
+                      singleStartDirection === 'from_stop'
+                        ? singleStartStopId || singleMatchingStops[0]?.id
+                        : undefined,
+                  })
+                }
+                className="w-full min-h-[44px] py-2.5 px-4 text-xs sm:text-sm font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
+              >
+                <Route className="w-4 h-4" />
+                <span>Zapisz dzień i pokaż trasę na mapie</span>
+              </button>
+            </div>
+          </div>
+        ) : activeTab === 'days' ? (
           <div className="divide-y divide-slate-200">
             {/* Season Auto-Scheduler Config Card */}
             <section className="p-4 sm:p-5 bg-slate-50/70 space-y-3">
@@ -687,8 +1235,26 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         >
                           <Route className="w-3.5 h-3.5" />
                           <span>
-                            {isExact ? 'Dokładna trasa gotowa' : 'Wyznacz trasę dnia'}
+                            {isExact ? 'Dokładna trasa gotowa' : 'Wyznacz po ulicach'}
                           </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (editingHoursDate === day.date) {
+                              setEditingHoursDate(null);
+                            } else {
+                              setEditingHoursStart(day.startTime);
+                              setEditingHoursEnd(
+                                day.plannedEndTime || seasonConfig.dailyEndTime
+                              );
+                              setEditingHoursDate(day.date);
+                            }
+                          }}
+                          className="min-h-[36px] px-2 py-1.5 text-xs text-slate-600 hover:text-slate-900"
+                        >
+                          Godziny
                         </button>
 
                         <button
@@ -702,6 +1268,49 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                           Edytuj ulice
                         </button>
                       </div>
+
+                      {editingHoursDate === day.date && (
+                        <div className="mt-2.5 p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-end gap-2">
+                          <div className="flex-1 min-w-[90px]">
+                            <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
+                              Od
+                            </label>
+                            <input
+                              type="time"
+                              value={editingHoursStart}
+                              onChange={(e) =>
+                                setEditingHoursStart(e.target.value)
+                              }
+                              className="w-full min-h-[34px] px-2 py-1 text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                            />
+                          </div>
+                          <div className="flex-1 min-w-[90px]">
+                            <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
+                              Do
+                            </label>
+                            <input
+                              type="time"
+                              value={editingHoursEnd}
+                              onChange={(e) => setEditingHoursEnd(e.target.value)}
+                              className="w-full min-h-[34px] px-2 py-1 text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onUpdateDayTimeWindow(
+                                day.date,
+                                editingHoursStart,
+                                editingHoursEnd
+                              );
+                              setEditingHoursDate(null);
+                            }}
+                            className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg"
+                          >
+                            Zapisz
+                          </button>
+                        </div>
+                      )}
 
                       {isSelected && day.estimatedRoutes.length > 0 && (
                         <div className="mt-3 pt-2.5 border-t border-amber-200/70 space-y-1">

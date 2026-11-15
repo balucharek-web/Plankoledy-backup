@@ -121,13 +121,34 @@ export function sanitizeSeasonConfig(
       ? cleanStr(sc?.dailyEndTime, 5)
       : DEFAULT_SEASON_CONFIG.dailyEndTime;
   const rawMask = cleanStr(sc?.weekdaysMask, 20).replace(/[^0-6,]/g, '');
-  return {
+
+  const sanitizedOverrides: Record<string, { startTime: string; endTime: string }> = {};
+  if (sc?.dayTimeOverrides && typeof sc.dayTimeOverrides === 'object') {
+    for (const [dateKey, win] of Object.entries(sc.dayTimeOverrides)) {
+      if (Object.keys(sanitizedOverrides).length >= 120) break;
+      const cleanDate = cleanStr(dateKey, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate) || !win || typeof win !== 'object') {
+        continue;
+      }
+      const st = cleanStr(win.startTime, 5);
+      const et = cleanStr(win.endTime, 5);
+      if (/^\d{1,2}:\d{2}$/.test(st) && /^\d{1,2}:\d{2}$/.test(et)) {
+        sanitizedOverrides[cleanDate] = { startTime: st, endTime: et };
+      }
+    }
+  }
+
+  const result: SeasonPlanConfig = {
     startDate,
     weekdayStartTime,
     weekendStartTime,
     dailyEndTime,
     weekdaysMask: rawMask || DEFAULT_SEASON_CONFIG.weekdaysMask,
   };
+  if (Object.keys(sanitizedOverrides).length > 0) {
+    result.dayTimeOverrides = sanitizedOverrides;
+  }
+  return result;
 }
 
 function cleanVisitDate(raw: string | undefined | null): string {

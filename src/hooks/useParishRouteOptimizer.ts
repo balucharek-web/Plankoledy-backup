@@ -77,7 +77,10 @@ export function useParishRouteOptimizer() {
         if (allPriestStops.length === 0) continue;
 
         const hasManualOrder = allPriestStops.some(
-          (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
+          (s) =>
+            typeof s.manualOrder === 'number' &&
+            !Number.isNaN(s.manualOrder) &&
+            s.manualOrder > 0
         );
         const orderedManualStops = hasManualOrder
           ? [...allPriestStops].sort(

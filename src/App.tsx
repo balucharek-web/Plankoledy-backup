@@ -35,7 +35,10 @@ import { PrintScheduleSheet } from './components/PrintScheduleSheet';
 import { SidebarRoutes } from './components/SidebarRoutes';
 import { SidebarSettings } from './components/SidebarSettings';
 import { SidebarSetup } from './components/SidebarSetup';
-import { SidebarStops } from './components/SidebarStops';
+import {
+  CustomDayPlanPayload,
+  SidebarStops,
+} from './components/SidebarStops';
 import { MapEngineProvider } from './contexts/MapEngineContext';
 import {
   FIREBASE_CONSOLE_UPGRADE_URL,
@@ -88,7 +91,11 @@ import {
   autoScheduleSeason,
   buildSeasonDaySummaries,
   collectReturnVisitCandidates,
+  computeManualOrderForStops,
+  estimateDayRoutes,
   formatPolishDateChip,
+  formatPolishDateFull,
+  getDayEndTime,
   getDayStartTime,
 } from './utils/seasonScheduler';
 import {
@@ -167,7 +174,7 @@ function ParishPlannerWorkspace({
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [focusedPriestId, setFocusedPriestId] = useState<number | null>(null);
   const [markerLabelMode, setMarkerLabelMode] =
-    useState<MarkerLabelMode>('auto');
+    useState<MarkerLabelMode>('numbers');
   const [showRouteLines, setShowRouteLines] = useState<boolean>(true);
   const [focusedStreet, setFocusedStreet] = useState<string | null>(null);
   const [exactRoutesCache, setExactRoutesCache] = useState<
@@ -1380,8 +1387,15 @@ function ParishPlannerWorkspace({
     if (selectedDaySummary) {
       return selectedDaySummary.estimatedRoutes;
     }
+    if (parish && !selectedDate) {
+      const activeOnly = stops.filter((s) => s.included !== false);
+      if (activeOnly.length > 0) {
+        return estimateDayRoutes(parish, activeOnly, config, config.startTime)
+          .routes;
+      }
+    }
     return [];
-  }, [cachedExact, selectedDaySummary]);
+  }, [cachedExact, config, parish, selectedDate, selectedDaySummary, stops]);
 
   const displayedRouteObjects = useMemo(
     () => (cachedExact ? cachedExact.routeObjects : []),
@@ -1399,6 +1413,11 @@ function ParishPlannerWorkspace({
   const effectiveStartTime = useMemo(
     () => getDayStartTime(selectedDate, seasonConfig, config.startTime),
     [selectedDate, seasonConfig, config.startTime]
+  );
+
+  const effectiveEndTime = useMemo(
+    () => getDayEndTime(selectedDate, seasonConfig),
+    [selectedDate, seasonConfig]
   );
 
   const availableMapStreets = useMemo(() => {
@@ -1499,6 +1518,189 @@ function ParishPlannerWorkspace({
       }
     },
     [activeRouteCacheKey, authUser, displayedRoutes]
+  );
+
+  const handleSetRouteStartStop = useCallback(
+    (priestId: number, stopId: string) => {
+      const route = displayedRoutes.find((r) => r.priestId === priestId);
+      if (!route || route.orderedStops.length === 0) return;
+
+      const orderMap = computeManualOrderForStops(
+        route.orderedStops.map((i) => i.stop),
+        'from_stop',
+        stopId
+      );
+      if (orderMap.size === 0) return;
+
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+      setStops((prev) =>
+        prev.map((s) => {
+          const nextOrder = orderMap.get(s.id);
+          if (nextOrder === undefined) return s;
+          const next = { ...s, manualOrder: nextOrder };
+          changed.push(next);
+          return next;
+        })
+      );
+
+      setExactRoutesCache((prev) => {
+        if (!prev[activeRouteCacheKey]) return prev;
+        const copy = { ...prev };
+        delete copy[activeRouteCacheKey];
+        return copy;
+      });
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'manualOrder'
+        ).catch(() => {});
+      }
+    },
+    [activeRouteCacheKey, authUser, displayedRoutes]
+  );
+
+  const handleUpdateDayTimeWindow = useCallback(
+    (date: string, startTime: string, endTime: string) => {
+      if (!date) return;
+      const nextSeason: SeasonPlanConfig = {
+        ...seasonConfig,
+        dayTimeOverrides: {
+          ...(seasonConfig.dayTimeOverrides ?? {}),
+          [date]: { startTime, endTime },
+        },
+      };
+      handleChangeSeasonConfig(nextSeason);
+      setExactRoutesCache((prev) => {
+        if (!prev[date]) return prev;
+        const copy = { ...prev };
+        delete copy[date];
+        return copy;
+      });
+    },
+    [handleChangeSeasonConfig, seasonConfig]
+  );
+
+  const handlePlanCustomDay = useCallback(
+    (payload: CustomDayPlanPayload) => {
+      if (!payload.date || payload.stopIds.length === 0) return;
+      const nextSeason: SeasonPlanConfig = {
+        ...seasonConfig,
+        dayTimeOverrides: {
+          ...(seasonConfig.dayTimeOverrides ?? {}),
+          [payload.date]: {
+            startTime: payload.startTime,
+            endTime: payload.endTime,
+          },
+        },
+      };
+      handleChangeSeasonConfig(nextSeason);
+
+      const idSet = new Set(payload.stopIds);
+      const targetStops = stopsRef.current.filter((s) => idSet.has(s.id));
+      if (targetStops.length === 0) return;
+
+      let assignedWithPriest: VisitStop[];
+      if (
+        payload.assignmentMode === 'split' &&
+        parish &&
+        config.priestCount > 1
+      ) {
+        assignedWithPriest = partitionStopsBySector(
+          parish.location,
+          targetStops,
+          config.priestCount
+        );
+      } else {
+        const singlePriestId =
+          typeof payload.assignmentMode === 'number'
+            ? payload.assignmentMode
+            : 1;
+        assignedWithPriest = targetStops.map((s) => ({
+          ...s,
+          priestId: singlePriestId,
+        }));
+      }
+
+      const byPriest = new Map<number, VisitStop[]>();
+      for (const s of assignedWithPriest) {
+        const list = byPriest.get(s.priestId);
+        if (list) list.push(s);
+        else byPriest.set(s.priestId, [s]);
+      }
+
+      const orderMap = new Map<string, number>();
+      const priestMap = new Map<string, number>();
+      for (const [pId, list] of byPriest.entries()) {
+        const localOrders = computeManualOrderForStops(
+          list,
+          payload.startDirection,
+          payload.startingStopId
+        );
+        for (const s of list) {
+          priestMap.set(s.id, pId);
+          orderMap.set(s.id, localOrders.get(s.id) ?? 0);
+        }
+      }
+
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+      setStops((prev) =>
+        prev.map((s) => {
+          if (!idSet.has(s.id)) return s;
+          const next: VisitStop = {
+            ...s,
+            visitDate: payload.date,
+            included: true,
+            priestId: priestMap.get(s.id) ?? s.priestId,
+            manualOrder: orderMap.get(s.id) ?? 0,
+          };
+          changed.push(next);
+          return next;
+        })
+      );
+
+      setExactRoutesCache((prev) => {
+        const copy = { ...prev };
+        delete copy[payload.date];
+        delete copy.current;
+        return copy;
+      });
+
+      setSelectedDate(payload.date);
+      setFocusedPriestId(null);
+      setFocusedStreet(null);
+      setMarkerLabelMode('numbers');
+      setInteractionMode('pan');
+      setActiveSection('routes');
+      setMobilePane('map');
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'manualOrder_schedule'
+        ).catch(() => {});
+      }
+
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Zaplanowano ${formatPolishDateFull(payload.date)} (${payload.startTime}–${payload.endTime}) dla ${changed.length} domów.`,
+        },
+        5500
+      );
+    },
+    [
+      authUser,
+      config.priestCount,
+      handleChangeSeasonConfig,
+      parish,
+      seasonConfig,
+      showStreetFeedback,
+    ]
   );
 
   const handleScheduleReturnVisits = useCallback(
@@ -1849,6 +2051,7 @@ function ParishPlannerWorkspace({
           <main className="flex-1 min-h-0 overflow-y-auto bg-slate-50 print-reset">
             <PrintScheduleSheet
               parish={parish}
+              boundary={boundary}
               config={config}
               routes={displayedRoutes}
               isExactRoute={isExactRoute}
@@ -1856,6 +2059,7 @@ function ParishPlannerWorkspace({
               unscheduledCount={unscheduledStops.length}
               selectedDate={selectedDate}
               effectiveStartTime={effectiveStartTime}
+              effectiveEndTime={effectiveEndTime}
               exactDayKeys={exactDayKeys}
               onSelectDate={setSelectedDate}
               onInspectDay={(date) => {
@@ -1999,7 +2203,7 @@ function ParishPlannerWorkspace({
                     onDeleteStop={handleDeleteStop}
                     onClearStops={handleClearStops}
                     onAutoPartition={handleAutoPartition}
-                      onSelectStop={(id) => {
+                    onSelectStop={(id) => {
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
@@ -2009,6 +2213,8 @@ function ParishPlannerWorkspace({
                       void handleComputeRoutesForDate(d)
                     }
                     onScheduleReturnVisits={handleScheduleReturnVisits}
+                    onPlanCustomDay={handlePlanCustomDay}
+                    onUpdateDayTimeWindow={handleUpdateDayTimeWindow}
                     onGoToSetup={() => navigateToSection('parish')}
                     isComputing={isComputing}
                     progressLabel={progressLabel}
@@ -2047,6 +2253,7 @@ function ParishPlannerWorkspace({
                     onOpenSchedule={() => navigateToSection('schedule')}
                     onUpdateStopStatus={handleUpdateStopStatus}
                     onMoveStopOrder={handleMoveStopOrder}
+                    onSetRouteStartStop={handleSetRouteStartStop}
                   />
                 )}
 
@@ -2321,24 +2528,89 @@ function ParishPlannerWorkspace({
                   </div>
                 )}
 
-              {activeStopsCount > 0 && config.priestCount > 1 && (
-                <div className="no-print absolute top-14 left-3 sm:top-auto sm:bottom-5 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
-                  {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
-                    <span key={p.id} className="inline-flex items-center gap-1.5">
+              {/* Top-left Map Route Info Pill (START + Streets) & Priest Legend */}
+              <div className="no-print absolute top-3 left-3 z-[450] flex flex-col items-start gap-1.5 max-w-[calc(100%-24px)] sm:max-w-[420px] pointer-events-none">
+                {interactionMode === 'pan' &&
+                  !streetPickFeedback &&
+                  displayedRoutes.length > 0 && (() => {
+                    const visibleRoutesForPill =
+                      focusedPriestId !== null
+                        ? displayedRoutes.filter(
+                            (r) => r.priestId === focusedPriestId
+                          )
+                        : displayedRoutes;
+                    const primaryStart =
+                      visibleRoutesForPill[0]?.orderedStops[0];
+                    const coveredStreets = Array.from(
+                      new Set(
+                        visibleRoutesForPill.flatMap((r) =>
+                          r.orderedStops.map((i) => extractStreetName(i.stop))
+                        )
+                      )
+                    );
+                    const totalPoints = visibleRoutesForPill.reduce(
+                      (acc, r) => acc + r.orderedStops.length,
+                      0
+                    );
+                    if (!primaryStart) return null;
+                    return (
+                      <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl px-3 py-2 shadow-md text-[11px] text-slate-800 space-y-0.5 pointer-events-auto">
+                        <div className="flex flex-wrap items-center gap-1.5 font-semibold">
+                          {selectedDate && (
+                            <span className="text-slate-900 tabular-nums">
+                              {formatPolishDateChip(selectedDate)} ·{' '}
+                              {effectiveStartTime}–{effectiveEndTime}
+                            </span>
+                          )}
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-extrabold uppercase tracking-wide">
+                            START
+                          </span>
+                          <span className="text-emerald-900 truncate max-w-[200px]">
+                            {primaryStart.stop.address ||
+                              primaryStart.stop.label}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 truncate">
+                          <span className="font-medium text-slate-800">
+                            Ulice:
+                          </span>{' '}
+                          {coveredStreets.join(', ')} ·{' '}
+                          <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                            {totalPoints}{' '}
+                            {totalPoints === 1
+                              ? 'dom'
+                              : totalPoints < 5
+                                ? 'domy'
+                                : 'domów'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                {activeStopsCount > 0 && config.priestCount > 1 && (
+                  <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700">
+                    {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                       <span
-                        className="w-2.5 h-2.5 rounded-full"
-                        style={{ backgroundColor: p.color }}
-                      />
-                      Ks. {p.id}
-                    </span>
-                  ))}
-                </div>
-              )}
+                        key={p.id}
+                        className="inline-flex items-center gap-1.5"
+                      >
+                        <span
+                          className="w-2.5 h-2.5 rounded-full"
+                          style={{ backgroundColor: p.color }}
+                        />
+                        Ks. {p.id}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </section>
           </main>
           <div className="hidden print-only print-reset bg-white w-full">
             <PrintScheduleSheet
               parish={parish}
+              boundary={boundary}
               config={config}
               routes={displayedRoutes}
               isExactRoute={isExactRoute}
@@ -2346,9 +2618,12 @@ function ParishPlannerWorkspace({
               unscheduledCount={unscheduledStops.length}
               selectedDate={selectedDate}
               effectiveStartTime={effectiveStartTime}
+              effectiveEndTime={effectiveEndTime}
               exactDayKeys={exactDayKeys}
               forcedViewMode={
-                activeSection === 'routes' || plannedDays.length === 0
+                activeSection === 'routes' ||
+                (activeSection === 'stops' && selectedDate !== null) ||
+                plannedDays.length <= 1
                   ? 'day'
                   : 'season'
               }
