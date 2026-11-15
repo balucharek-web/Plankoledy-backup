@@ -39,7 +39,7 @@
 
 @page {
   size: A4 portrait;
-  margin: 14mm 14mm 15mm 14mm;
+  margin: 12mm 13mm 14mm 13mm;
 }
 
 @media print {
@@ -110,8 +110,8 @@
 
   th,
   td {
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    overflow-wrap: break-word;
+    word-break: normal;
   }
 
   thead {
@@ -131,5 +131,10 @@
   .print-break-after-avoid {
     break-after: avoid;
     page-break-after: avoid;
+  }
+
+  .print-break-before-page {
+    break-before: page;
+    page-break-before: always;
   }
 }

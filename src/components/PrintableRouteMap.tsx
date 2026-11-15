@@ -4,7 +4,7 @@ import {
   ParishCenter,
   PriestRouteResult,
 } from '../types/parish';
-import { extractHouseNumberLabel, extractStreetName } from '../utils/spatial';
+import { extractStreetName } from '../utils/spatial';
 
 interface PrintableRouteMapProps {
   parish: ParishCenter | null;
@@ -14,8 +14,7 @@ interface PrintableRouteMapProps {
   title?: string;
 }
 
-const VIEW_W = 860;
-const VIEW_H = 380;
+const VIEW_W = 800;
 const TILE_SIZE = 256;
 
 function projectToWorldPx(pt: LatLng, zoom: number): { x: number; y: number } {
@@ -28,41 +27,83 @@ function projectToWorldPx(pt: LatLng, zoom: number): { x: number; y: number } {
   return { x, y };
 }
 
-function chooseBestZoom(
-  points: LatLng[],
-  width: number,
-  height: number
-): { zoom: number; centerX: number; centerY: number } {
-  const padX = width * 0.82;
-  const padY = height * 0.76;
+interface PositionedMarker {
+  item: PriestRouteResult['orderedStops'][number];
+  trueX: number;
+  trueY: number;
+  x: number;
+  y: number;
+  isFirst: boolean;
+  isLast: boolean;
+  isBlock: boolean;
+}
 
-  for (let z = 18; z >= 12; z--) {
-    let minX = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
+/**
+ * Gently separates markers that sit very close together on dense streets
+ * so stop numbers remain legible on paper printouts without hiding true house positions.
+ */
+function separateDenseMarkers(
+  raw: PositionedMarker[],
+  viewW: number,
+  viewH: number
+): PositionedMarker[] {
+  const pts = raw.map((m) => ({ ...m }));
+  const n = pts.length;
+  if (n <= 1) return pts;
 
-    for (const pt of points) {
-      const p = projectToWorldPx(pt, z);
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
+  const minDist = 23;
+  const maxAnchorShift = 28;
+  const marginX = 24;
+  const marginTop = 34;
+  const marginBottom = 26;
+
+  for (let iter = 0; iter < 32; iter++) {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = pts[j].x - pts[i].x;
+        const dy = pts[j].y - pts[i].y;
+        let dist = Math.hypot(dx, dy);
+        if (dist < minDist) {
+          if (dist < 0.01) {
+            // Deterministic micro-offset when coordinates coincide
+            const angle = ((i + j) % 8) * (Math.PI / 4);
+            pts[i].x -= Math.cos(angle) * 2;
+            pts[i].y -= Math.sin(angle) * 2;
+            pts[j].x += Math.cos(angle) * 2;
+            pts[j].y += Math.sin(angle) * 2;
+            dist = 4;
+          }
+          const ux = (pts[j].x - pts[i].x) / dist;
+          const uy = (pts[j].y - pts[i].y) / dist;
+          const push = (minDist - dist) * 0.42;
+          pts[i].x -= ux * push;
+          pts[i].y -= uy * push;
+          pts[j].x += ux * push;
+          pts[j].y += uy * push;
+        }
+      }
     }
 
-    const spanX = maxX - minX;
-    const spanY = maxY - minY;
-    if ((spanX <= padX && spanY <= padY) || z === 12) {
-      return {
-        zoom: z,
-        centerX: (minX + maxX) / 2,
-        centerY: (minY + maxY) / 2,
-      };
+    // Softly tether to true house location & keep inside safe SVG bounds
+    for (let i = 0; i < n; i++) {
+      const m = pts[i];
+      m.x += (m.trueX - m.x) * 0.08;
+      m.y += (m.trueY - m.y) * 0.08;
+
+      const offX = m.x - m.trueX;
+      const offY = m.y - m.trueY;
+      const offLen = Math.hypot(offX, offY);
+      if (offLen > maxAnchorShift) {
+        m.x = m.trueX + (offX / offLen) * maxAnchorShift;
+        m.y = m.trueY + (offY / offLen) * maxAnchorShift;
+      }
+
+      m.x = Math.max(marginX, Math.min(viewW - marginX, m.x));
+      m.y = Math.max(marginTop, Math.min(viewH - marginBottom, m.y));
     }
   }
 
-  const fallback = projectToWorldPx(points[0], 15);
-  return { zoom: 15, centerX: fallback.x, centerY: fallback.y };
+  return pts;
 }
 
 export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
@@ -91,42 +132,87 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
 
     if (stopPoints.length === 0 && !parish) return null;
 
-    // Fit tightly around the route stops first so street layout and numbers are legible;
-    // include church anchor when it is reasonably close.
+    // Fit tightly ONLY around actual scheduled stops (and road path points if close)
+    // so street outlines and house numbers fill ~80% of the A4 map.
     const fitPoints: LatLng[] =
       stopPoints.length > 0 ? [...stopPoints] : parish ? [parish.location] : [];
 
-    if (parish && stopPoints.length > 0) {
-      const stopsZoom = chooseBestZoom(stopPoints, VIEW_W, VIEW_H).zoom;
-      const withChurch = chooseBestZoom(
-        [...stopPoints, parish.location],
-        VIEW_W,
-        VIEW_H
-      );
-      if (withChurch.zoom >= stopsZoom - 1) {
-        fitPoints.push(parish.location);
-      }
+    // Measure geographic span at reference zoom 16 to pick optimal A4 map aspect ratio
+    const refZoom = 16;
+    let refMinX = Number.POSITIVE_INFINITY;
+    let refMaxX = Number.NEGATIVE_INFINITY;
+    let refMinY = Number.POSITIVE_INFINITY;
+    let refMaxY = Number.NEGATIVE_INFINITY;
+
+    for (const pt of fitPoints) {
+      const p = projectToWorldPx(pt, refZoom);
+      if (p.x < refMinX) refMinX = p.x;
+      if (p.x > refMaxX) refMaxX = p.x;
+      if (p.y < refMinY) refMinY = p.y;
+      if (p.y > refMaxY) refMaxY = p.y;
     }
 
-    const { zoom, centerX, centerY } = chooseBestZoom(
-      fitPoints,
-      VIEW_W,
-      VIEW_H
+    const refSpanX = Math.max(12, refMaxX - refMinX);
+    const refSpanY = Math.max(12, refMaxY - refMinY);
+    const geoRatio = refSpanY / refSpanX;
+
+    // Adaptive height for A4 portrait: tall streets get up to 840px height, wide streets ~580px
+    const viewW = VIEW_W;
+    const viewH =
+      fitPoints.length <= 1
+        ? 560
+        : Math.round(Math.max(580, Math.min(840, viewW * Math.max(0.72, Math.min(1.05, geoRatio * 1.05)))));
+
+    // Continuous zoom calculation so the route spans ~78% of the map viewport
+    const usableW = viewW * 0.78;
+    const usableH = viewH * 0.76;
+    const idealScaleFactorFromRef =
+      fitPoints.length <= 1
+        ? 2.0 // Zoom 17 equivalent
+        : Math.min(usableW / refSpanX, usableH / refSpanY);
+
+    const exactZoom = Math.max(
+      13.5,
+      Math.min(18.0, refZoom + Math.log2(idealScaleFactorFromRef))
     );
 
-    const originX = centerX - VIEW_W / 2;
-    const originY = centerY - VIEW_H / 2;
+    // Prefer zoom 17/18 raster tiles for sharp house footprints and street names
+    const tileZoom = Math.max(14, Math.min(18, Math.round(exactZoom)));
+    const scaleRatio = Math.pow(2, exactZoom - tileZoom);
+
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    for (const pt of fitPoints) {
+      const p = projectToWorldPx(pt, tileZoom);
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    const centerWorldX = (minX + maxX) / 2;
+    const centerWorldY = (minY + maxY) / 2;
+    const worldViewW = viewW / scaleRatio;
+    const worldViewH = viewH / scaleRatio;
+    const originX = centerWorldX - worldViewW / 2;
+    const originY = centerWorldY - worldViewH / 2;
 
     const toView = (pt: LatLng) => {
-      const wp = projectToWorldPx(pt, zoom);
-      return { x: wp.x - originX, y: wp.y - originY };
+      const wp = projectToWorldPx(pt, tileZoom);
+      return {
+        x: (wp.x - originX) * scaleRatio,
+        y: (wp.y - originY) * scaleRatio,
+      };
     };
 
-    const maxTile = Math.pow(2, zoom);
+    const maxTile = Math.pow(2, tileZoom);
     const minTx = Math.floor(originX / TILE_SIZE);
-    const maxTx = Math.floor((originX + VIEW_W) / TILE_SIZE);
+    const maxTx = Math.floor((originX + worldViewW) / TILE_SIZE);
     const minTy = Math.floor(originY / TILE_SIZE);
-    const maxTy = Math.floor((originY + VIEW_H) / TILE_SIZE);
+    const maxTy = Math.floor((originY + worldViewH) / TILE_SIZE);
 
     const tiles: Array<{
       key: string;
@@ -143,16 +229,17 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
       for (let tx = minTx; tx <= maxTx; tx++) {
         const wrappedTx = ((tx % maxTile) + maxTile) % maxTile;
         const osmSub = ['a', 'b', 'c'][Math.abs(tx + ty) % 3];
-        const leftPx = tx * TILE_SIZE - originX;
-        const topPx = ty * TILE_SIZE - originY;
+        const leftPx = (tx * TILE_SIZE - originX) * scaleRatio;
+        const topPx = (ty * TILE_SIZE - originY) * scaleRatio;
+        const tileScaledPx = TILE_SIZE * scaleRatio;
         tiles.push({
-          key: `${zoom}_${tx}_${ty}`,
-          primaryUrl: `https://${osmSub}.tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
-          fallbackUrl: `https://tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
-          leftPct: (leftPx / VIEW_W) * 100,
-          topPct: (topPx / VIEW_H) * 100,
-          widthPct: (TILE_SIZE / VIEW_W) * 100,
-          heightPct: (TILE_SIZE / VIEW_H) * 100,
+          key: `${tileZoom}_${tx}_${ty}`,
+          primaryUrl: `https://${osmSub}.tile.openstreetmap.org/${tileZoom}/${wrappedTx}/${ty}.png`,
+          fallbackUrl: `https://tile.openstreetmap.org/${tileZoom}/${wrappedTx}/${ty}.png`,
+          leftPct: (leftPx / viewW) * 100,
+          topPct: (topPx / viewH) * 100,
+          widthPct: (tileScaledPx / viewW) * 100,
+          heightPct: (tileScaledPx / viewH) * 100,
         });
       }
     }
@@ -170,10 +257,10 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
     const parishPos = parish ? toView(parish.location) : null;
     const parishInView = Boolean(
       parishPos &&
-        parishPos.x >= 12 &&
-        parishPos.x <= VIEW_W - 12 &&
-        parishPos.y >= 12 &&
-        parishPos.y <= VIEW_H - 12
+        parishPos.x >= 16 &&
+        parishPos.x <= viewW - 16 &&
+        parishPos.y >= 16 &&
+        parishPos.y <= viewH - 16
     );
 
     const projectedRoutes = activeRoutes.map((route) => {
@@ -181,7 +268,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         route.encodedPathPoints.length >= 2
           ? route.encodedPathPoints
           : [
-              ...(parish ? [parish.location] : []),
+              ...(parish && parishInView ? [parish.location] : []),
               ...route.orderedStops.map((s) => s.stop.location),
             ];
       const viewPathPts = pathPts.map(toView);
@@ -189,7 +276,6 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         .map((v) => `${v.x.toFixed(1)},${v.y.toFixed(1)}`)
         .join(' ');
 
-      // Build subtle directional chevrons along the route so print shows walking direction
       const arrows: Array<{ x: number; y: number; angleDeg: number }> = [];
       let accumDist = 0;
       for (let i = 1; i < viewPathPts.length; i++) {
@@ -199,7 +285,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         const dy = b.y - a.y;
         const segLen = Math.hypot(dx, dy);
         accumDist += segLen;
-        if (segLen >= 34 && accumDist >= 65) {
+        if (segLen >= 30 && accumDist >= 64) {
           accumDist = 0;
           arrows.push({
             x: (a.x + b.x) / 2,
@@ -209,26 +295,33 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         }
       }
 
-      const markers = route.orderedStops.map((item, idx) => {
-        const v = toView(item.stop.location);
-        const isFirst = idx === 0;
-        const isLast = idx === route.orderedStops.length - 1;
-        const isBlock = Boolean(
-          item.stop.isMultiUnit ||
-            (item.stop.units && item.stop.units.length > 0)
-        );
-        return {
-          item,
-          x: v.x,
-          y: v.y,
-          isFirst,
-          isLast,
-          isBlock,
-          houseNum: extractHouseNumberLabel(item.stop),
-        };
-      });
+      const rawMarkers: PositionedMarker[] = route.orderedStops.map(
+        (item, idx) => {
+          const v = toView(item.stop.location);
+          const isFirst = idx === 0;
+          const isLast = idx === route.orderedStops.length - 1;
+          const isBlock = Boolean(
+            item.stop.isMultiUnit ||
+              (item.stop.units && item.stop.units.length > 0)
+          );
+          return {
+            item,
+            trueX: v.x,
+            trueY: v.y,
+            x: v.x,
+            y: v.y,
+            isFirst,
+            isLast,
+            isBlock,
+          };
+        }
+      );
+
+      const markers = separateDenseMarkers(rawMarkers, viewW, viewH);
 
       const firstStop = route.orderedStops[0]?.stop;
+      const lastStop =
+        route.orderedStops[route.orderedStops.length - 1]?.stop;
       const streets = Array.from(
         new Set(route.orderedStops.map((s) => extractStreetName(s.stop)))
       );
@@ -241,12 +334,15 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         firstStopAddress: firstStop
           ? firstStop.address || firstStop.label
           : '',
+        lastStopAddress: lastStop ? lastStop.address || lastStop.label : '',
         streets,
       };
     });
 
     return {
-      zoom,
+      viewW,
+      viewH,
+      tileZoom,
       tiles,
       boundaryPointsStr,
       parishPos,
@@ -255,7 +351,6 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
     };
   }, [activeRoutes, boundary, parish]);
 
-  // Preload raster map tiles into browser cache even when rendered offscreen before window.print()
   useEffect(() => {
     if (!mapData) return;
     mapData.tiles.forEach((tile) => {
@@ -271,7 +366,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
     <div className="w-full max-w-full bg-white border border-slate-200 rounded-xl overflow-hidden print:rounded-lg print:border-slate-300 print-break-avoid">
       <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2 print:py-1.5 print:px-3">
         <div className="text-xs font-bold text-slate-900">
-          {title || 'Mapa trasy kolędy (START i wszystkie punkty do odwiedzenia)'}
+          {title || 'Mapa trasy kolędy (START i kolejne domy)'}
         </div>
         <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-3">
           <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -295,12 +390,11 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         </div>
       </div>
 
-      {/* Map Viewport — explicit intrinsic SVG dimensions guarantee height in all print engines */}
+      {/* High-Resolution Vector + OSM Tile Viewport sized for A4 readability */}
       <div className="relative w-full overflow-hidden bg-slate-50">
-        {/* Subtle fallback grid if offline or tiles blocked */}
         <div
           aria-hidden="true"
-          className="absolute inset-0 z-0 opacity-35"
+          className="absolute inset-0 z-0 opacity-30"
           style={{
             backgroundImage:
               'linear-gradient(to right, #CBD5E1 1px, transparent 1px), linear-gradient(to bottom, #CBD5E1 1px, transparent 1px)',
@@ -308,7 +402,6 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
           }}
         />
 
-        {/* Raster street map tiles aligned to exact Web-Mercator viewport */}
         <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
           {mapData.tiles.map((tile) => {
             const useFallback = Boolean(fallbackTiles[tile.key]);
@@ -339,51 +432,50 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
                   height: `${tile.heightPct}%`,
                   maxWidth: 'none',
                   maxHeight: 'none',
-                  opacity: 0.92,
+                  opacity: 0.9,
+                  filter: 'contrast(1.06) brightness(1.02)',
                 }}
               />
             );
           })}
         </div>
 
-        {/* Crisp Vector Route & Numbered Points Overlay */}
         <svg
-          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+          viewBox={`0 0 ${mapData.viewW} ${mapData.viewH}`}
           className="relative z-10 block w-full h-auto"
           preserveAspectRatio="xMidYMid meet"
         >
-          {/* Subtle parish boundary */}
           {mapData.boundaryPointsStr && (
             <polygon
               points={mapData.boundaryPointsStr}
-              fill="rgba(245, 158, 11, 0.06)"
+              fill="rgba(245, 158, 11, 0.04)"
               stroke="#B45309"
               strokeWidth="1.5"
               strokeDasharray="6 4"
             />
           )}
 
-          {/* White halo under routes + colored path lines + direction chevrons */}
+          {/* Route path lines + direction arrows */}
           {mapData.projectedRoutes.map(({ route, polylineStr, arrows }) => (
             <g key={`path-${route.priestId}`}>
               <polyline
                 points={polylineStr}
                 fill="none"
                 stroke="#FFFFFF"
-                strokeWidth="6"
+                strokeWidth="7"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                opacity="0.92"
+                opacity="0.94"
               />
               <polyline
                 points={polylineStr}
                 fill="none"
                 stroke={route.color}
-                strokeWidth="3.2"
+                strokeWidth="3.6"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                strokeDasharray={isExactRoute ? undefined : '7 5'}
-                opacity="0.95"
+                strokeDasharray={isExactRoute ? undefined : '8 5'}
+                opacity="0.96"
               />
               {arrows.map((arr, aIdx) => (
                 <g
@@ -391,33 +483,33 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
                   transform={`translate(${arr.x.toFixed(1)}, ${arr.y.toFixed(1)}) rotate(${arr.angleDeg.toFixed(1)})`}
                 >
                   <polygon
-                    points="-4,-3.5 5,0 -4,3.5"
+                    points="-4.5,-4 6,0 -4.5,4"
                     fill={route.color}
                     stroke="#FFFFFF"
-                    strokeWidth="1"
+                    strokeWidth="1.2"
                   />
                 </g>
               ))}
             </g>
           ))}
 
-          {/* Parish Church Anchor */}
+          {/* Parish Church Anchor (shown only if naturally inside the route viewport) */}
           {mapData.parishPos && mapData.parishInView && (
             <g
               transform={`translate(${mapData.parishPos.x.toFixed(1)}, ${mapData.parishPos.y.toFixed(1)})`}
             >
               <circle
-                r="12"
+                r="13"
                 fill="#B45309"
                 stroke="#FEF3C7"
                 strokeWidth="2.5"
               />
               <text
                 x="0"
-                y="4.2"
+                y="4.5"
                 textAnchor="middle"
                 fill="#FEF3C7"
-                fontSize="12"
+                fontSize="13"
                 fontWeight="700"
               >
                 ✝
@@ -425,107 +517,181 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
             </g>
           )}
 
-          {/* Every Single House Point (drawn highest-index first so #1 / START sits cleanly on top) */}
+          {/* Subtle leader lines for nudged dense markers */}
           {mapData.projectedRoutes.map(({ route, markers }) =>
-            [...markers].reverse().map(({ item, x, y, isFirst, isBlock }) => {
-              const fill = isFirst ? '#15803D' : route.color;
-              const r = isFirst ? 11.5 : 9;
-              const fontSize =
-                item.orderIndex >= 100 ? 7 : item.orderIndex >= 10 ? 8 : 9;
-              const labelStr = String(item.orderIndex);
-
+            markers.map(({ item, trueX, trueY, x, y, isFirst }) => {
+              const distMoved = Math.hypot(x - trueX, y - trueY);
+              if (distMoved <= 4.5) return null;
+              const col = isFirst ? '#15803D' : route.color;
               return (
-                <g
-                  key={item.stop.id}
-                  transform={`translate(${x.toFixed(1)}, ${y.toFixed(1)})`}
-                >
-                  {isFirst && (
-                    <g transform="translate(0, -18)">
-                      <rect
-                        x="-20"
-                        y="-10"
-                        width="40"
-                        height="14"
-                        rx="4"
-                        fill="#15803D"
-                        stroke="#FFFFFF"
-                        strokeWidth="1.5"
-                      />
-                      <text
-                        x="0"
-                        y="0"
-                        textAnchor="middle"
-                        fill="#FFFFFF"
-                        fontSize="8.5"
-                        fontWeight="800"
-                        fontFamily="system-ui, sans-serif"
-                      >
-                        START
-                      </text>
-                    </g>
-                  )}
-
-                  {isBlock ? (
-                    <rect
-                      x={-r}
-                      y={-r}
-                      width={r * 2}
-                      height={r * 2}
-                      rx="4"
-                      fill={fill}
-                      stroke="#FFFFFF"
-                      strokeWidth={isFirst ? 2.5 : 1.6}
-                    />
-                  ) : (
-                    <circle
-                      r={r}
-                      fill={fill}
-                      stroke="#FFFFFF"
-                      strokeWidth={isFirst ? 2.5 : 1.6}
-                    />
-                  )}
-
-                  <text
-                    x="0"
-                    y="3"
-                    textAnchor="middle"
-                    fill="#FFFFFF"
-                    fontSize={fontSize}
-                    fontWeight="700"
-                    fontFamily="ui-monospace, monospace"
-                  >
-                    {labelStr}
-                  </text>
+                <g key={`tether-${item.stop.id}`}>
+                  <line
+                    x1={trueX.toFixed(1)}
+                    y1={trueY.toFixed(1)}
+                    x2={x.toFixed(1)}
+                    y2={y.toFixed(1)}
+                    stroke="#FFFFFF"
+                    strokeWidth="2.8"
+                  />
+                  <line
+                    x1={trueX.toFixed(1)}
+                    y1={trueY.toFixed(1)}
+                    x2={x.toFixed(1)}
+                    y2={y.toFixed(1)}
+                    stroke={col}
+                    strokeWidth="1.3"
+                  />
+                  <circle
+                    cx={trueX.toFixed(1)}
+                    cy={trueY.toFixed(1)}
+                    r="2.8"
+                    fill={col}
+                    stroke="#FFFFFF"
+                    strokeWidth="1"
+                  />
                 </g>
               );
             })
           )}
+
+          {/* Stop Markers (drawn in reverse so #1 START sits cleanly on top) */}
+          {mapData.projectedRoutes.map(({ route, markers }) =>
+            [...markers]
+              .reverse()
+              .map(({ item, x, y, isFirst, isLast, isBlock }) => {
+                const fill = isFirst ? '#15803D' : route.color;
+                const r = isFirst ? 12 : 9.8;
+                const fontSize =
+                  item.orderIndex >= 100 ? 7.5 : item.orderIndex >= 10 ? 8.5 : 9.5;
+                const labelStr = String(item.orderIndex);
+
+                return (
+                  <g
+                    key={item.stop.id}
+                    transform={`translate(${x.toFixed(1)}, ${y.toFixed(1)})`}
+                  >
+                    {isFirst && (
+                      <g transform="translate(0, -19)">
+                        <rect
+                          x="-21"
+                          y="-10.5"
+                          width="42"
+                          height="14.5"
+                          rx="4"
+                          fill="#15803D"
+                          stroke="#FFFFFF"
+                          strokeWidth="1.6"
+                        />
+                        <text
+                          x="0"
+                          y="-0.2"
+                          textAnchor="middle"
+                          fill="#FFFFFF"
+                          fontSize="9"
+                          fontWeight="800"
+                          fontFamily="system-ui, sans-serif"
+                        >
+                          START
+                        </text>
+                      </g>
+                    )}
+
+                    {isLast && !isFirst && markers.length > 2 && (
+                      <g transform="translate(0, 18)">
+                        <rect
+                          x="-22"
+                          y="-6"
+                          width="44"
+                          height="13.5"
+                          rx="3.5"
+                          fill="#0F172A"
+                          stroke="#FFFFFF"
+                          strokeWidth="1.4"
+                        />
+                        <text
+                          x="0"
+                          y="3.6"
+                          textAnchor="middle"
+                          fill="#FFFFFF"
+                          fontSize="8"
+                          fontWeight="800"
+                          fontFamily="system-ui, sans-serif"
+                        >
+                          KONIEC
+                        </text>
+                      </g>
+                    )}
+
+                    {isBlock ? (
+                      <rect
+                        x={-r}
+                        y={-r}
+                        width={r * 2}
+                        height={r * 2}
+                        rx="4.5"
+                        fill={fill}
+                        stroke="#FFFFFF"
+                        strokeWidth={isFirst ? 2.6 : 1.8}
+                      />
+                    ) : (
+                      <circle
+                        r={r}
+                        fill={fill}
+                        stroke="#FFFFFF"
+                        strokeWidth={isFirst ? 2.6 : 1.8}
+                      />
+                    )}
+
+                    <text
+                      x="0"
+                      y="3.3"
+                      textAnchor="middle"
+                      fill="#FFFFFF"
+                      fontSize={fontSize}
+                      fontWeight="800"
+                      fontFamily="ui-monospace, monospace"
+                    >
+                      {labelStr}
+                    </text>
+                  </g>
+                );
+              })
+          )}
         </svg>
 
-        {/* Map attribution */}
         <div className="absolute bottom-1.5 right-2 z-20 px-1.5 py-0.5 bg-white/90 rounded text-[9px] text-slate-600">
           © OpenStreetMap
         </div>
       </div>
 
-      {/* Clear Street & Start Point Legend Footer */}
+      {/* Clear Start, End & Streets Footer */}
       <div className="px-4 py-2 border-t border-slate-200 bg-slate-50/60 space-y-1 text-xs print:px-3 print:py-1.5">
-        {mapData.projectedRoutes.map(({ route, firstStopAddress, streets }) => (
-          <div
-            key={`legend-${route.priestId}`}
-            className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-700"
-          >
-            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-800">
-              <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-bold">
-                START
+        {mapData.projectedRoutes.map(
+          ({ route, firstStopAddress, lastStopAddress, streets }) => (
+            <div
+              key={`legend-${route.priestId}`}
+              className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-700"
+            >
+              <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-800">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-bold">
+                  START
+                </span>
+                <span>{firstStopAddress}</span>
               </span>
-              <span>{firstStopAddress}</span>
-            </span>
-            <span className="text-slate-600">
-              Ulice: <strong className="text-slate-900">{streets.join(', ')}</strong>
-            </span>
-          </div>
-        ))}
+              {route.orderedStops.length > 1 && lastStopAddress && (
+                <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
+                  <span className="px-1.5 py-0.5 rounded bg-slate-900 text-white text-[10px] font-bold">
+                    KONIEC
+                  </span>
+                  <span>{lastStopAddress}</span>
+                </span>
+              )}
+              <span className="text-slate-600">
+                Ulice: <strong className="text-slate-900">{streets.join(', ')}</strong>
+              </span>
+            </div>
+          )
+        )}
       </div>
     </div>
   );

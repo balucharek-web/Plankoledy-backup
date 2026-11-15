@@ -1243,7 +1243,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             return (
               <section
                 key={route.priestId}
-                className="bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible print:border-slate-300"
+                className="print-break-before-page bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible print:border-slate-300"
               >
                 <div className="px-4 sm:px-5 py-3.5 print:px-3 print:py-2.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70 print-break-after-avoid">
                   <div className="space-y-0.5">
@@ -1254,6 +1254,9 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                       />
                       <h2 className="text-base print:text-sm font-semibold text-slate-900">
                         Lista domów — {route.priestName}
+                        {selectedDate
+                          ? ` · ${formatPolishDateFull(selectedDate)}`
+                          : ''}
                       </h2>
                       <span className="text-xs font-mono text-slate-600 tabular-nums">
                         ({route.orderedStops.length}{' '}
@@ -1343,11 +1346,11 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                   <table className="w-full text-left border-collapse text-sm print:text-xs print:table-fixed">
                     <colgroup>
                       <col className="w-[30px] print:w-[24px]" />
-                      <col className="w-[76px] print:w-[68px]" />
+                      <col className="w-[42px] print:w-[34px]" />
                       <col className="w-[54px] print:w-[46px]" />
                       <col />
-                      <col className="hidden sm:table-cell print:table-cell w-[28%] print:w-[26%]" />
-                      <col className="w-[56px] print:w-[48px]" />
+                      <col className="hidden sm:table-cell print:table-cell w-[28%] print:w-[27%]" />
+                      <col className="w-[56px] print:w-[46px]" />
                     </colgroup>
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50/50 text-xs font-semibold text-slate-600">
@@ -1384,11 +1387,18 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                         const blockLabel = isBlock
                           ? `Blok${unitsTotal > 0 ? ` (${unitsTotal} lok.)` : ''}`
                           : '';
+                        const normalizedAddr = houseAddress
+                          .trim()
+                          .toLowerCase();
+                        const normalizedLabel = (item.stop.label ?? '')
+                          .trim()
+                          .toLowerCase();
+                        const labelDuplicatesAddress =
+                          !normalizedLabel ||
+                          normalizedLabel === normalizedAddr ||
+                          normalizedAddr.startsWith(normalizedLabel);
                         const secondaryParts = [
-                          blockLabel,
-                          item.stop.label && item.stop.label !== houseAddress
-                            ? item.stop.label
-                            : '',
+                          !labelDuplicatesAddress ? item.stop.label : '',
                           item.stop.notes || '',
                         ].filter(Boolean);
 
@@ -1420,31 +1430,29 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                               />
                             </td>
                             <td className="py-2 print:py-1.5 px-2 print:px-1 align-top whitespace-nowrap">
-                              <div className="inline-flex items-center gap-1 whitespace-nowrap">
-                                <span
-                                  className={`w-5 h-5 text-[11px] font-mono font-bold text-white inline-flex items-center justify-center shrink-0 tabular-nums ${
-                                    isBlock ? 'rounded-md' : 'rounded-full'
-                                  }`}
-                                  style={{
-                                    backgroundColor: isStart
-                                      ? '#15803D'
-                                      : route.color,
-                                  }}
-                                >
-                                  {item.orderIndex}
-                                </span>
+                              <span
+                                className={`w-5 h-5 text-[11px] font-mono font-bold text-white inline-flex items-center justify-center shrink-0 tabular-nums ${
+                                  isBlock ? 'rounded-md' : 'rounded-full'
+                                }`}
+                                style={{
+                                  backgroundColor: isStart
+                                    ? '#15803D'
+                                    : route.color,
+                                }}
+                              >
+                                {item.orderIndex}
+                              </span>
+                            </td>
+                            <td className="py-2 print:py-1.5 px-2 print:px-1 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap align-top">
+                              {item.arrivalTime}
+                            </td>
+                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs sm:text-sm print:text-xs font-semibold text-slate-900 align-top leading-snug">
+                              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 {isStart && (
                                   <span className="px-1 py-0.5 rounded bg-emerald-700 text-white text-[9px] font-extrabold uppercase tracking-wide whitespace-nowrap">
                                     START
                                   </span>
                                 )}
-                              </div>
-                            </td>
-                            <td className="py-2 print:py-1.5 px-2 print:px-1 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap align-top">
-                              {item.arrivalTime}
-                            </td>
-                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs sm:text-sm print:text-xs font-semibold text-slate-900 align-top leading-snug break-words">
-                              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 <span>{houseAddress}</span>
                                 {isBlock && (
                                   <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold tabular-nums whitespace-nowrap">
@@ -1463,7 +1471,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 </div>
                               )}
                             </td>
-                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top leading-snug break-words">
+                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top leading-snug">
                               {secondaryParts.length > 0 ? (
                                 <span>{secondaryParts.join(' · ')}</span>
                               ) : (
