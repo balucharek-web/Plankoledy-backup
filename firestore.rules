@@ -99,7 +99,7 @@ service cloud.firestore {
 
     function isValidVisitStop(data, parishId) {
       return data.keys().hasAll(['ownerId', 'parishId', 'label', 'address', 'location', 'durationMinutes', 'priestId', 'inBoundary', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'parishId', 'label', 'address', 'placeId', 'location', 'durationMinutes', 'priestId', 'inBoundary', 'included', 'visitDate', 'notes', 'isMultiUnit', 'unitsCount', 'minutesPerUnit', 'units', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'parishId', 'label', 'address', 'placeId', 'location', 'durationMinutes', 'priestId', 'inBoundary', 'included', 'visitDate', 'notes', 'isMultiUnit', 'unitsCount', 'minutesPerUnit', 'units', 'visitStatus', 'manualOrder', 'createdAt', 'updatedAt'])
         && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid
         && data.parishId is string && data.parishId.size() >= 1 && data.parishId.size() <= 128 && data.parishId == parishId
         && data.label is string && data.label.size() >= 1 && data.label.size() <= 250
@@ -116,6 +116,8 @@ service cloud.firestore {
         && (!('unitsCount' in data) || (data.unitsCount is number && data.unitsCount >= 0 && data.unitsCount <= 500))
         && (!('minutesPerUnit' in data) || (data.minutesPerUnit is number && data.minutesPerUnit >= 1 && data.minutesPerUnit <= 60))
         && (!('units' in data) || isValidUnitsList(data.units))
+        && (!('visitStatus' in data) || (data.visitStatus in ['pending', 'accepted', 'absent', 'declined', 'invited']))
+        && (!('manualOrder' in data) || (data.manualOrder is number && data.manualOrder >= 0 && data.manualOrder <= 10000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -180,9 +182,12 @@ service cloud.firestore {
             || incoming().diff(existing()).affectedKeys().hasOnly(['inBoundary', 'updatedAt'])
             || incoming().diff(existing()).affectedKeys().hasOnly(['included', 'updatedAt'])
             || incoming().diff(existing()).affectedKeys().hasOnly(['visitDate', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['visitStatus', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['manualOrder', 'updatedAt'])
             || incoming().diff(existing()).affectedKeys().hasOnly(['visitDate', 'priestId', 'updatedAt'])
             || incoming().diff(existing()).affectedKeys().hasOnly(['visitDate', 'priestId', 'included', 'updatedAt'])
-            || incoming().diff(existing()).affectedKeys().hasOnly(['label', 'address', 'durationMinutes', 'priestId', 'inBoundary', 'included', 'visitDate', 'notes', 'isMultiUnit', 'unitsCount', 'minutesPerUnit', 'units', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['visitDate', 'priestId', 'included', 'manualOrder', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['label', 'address', 'durationMinutes', 'priestId', 'inBoundary', 'included', 'visitDate', 'notes', 'isMultiUnit', 'unitsCount', 'minutesPerUnit', 'units', 'visitStatus', 'manualOrder', 'updatedAt'])
           );
         allow delete: if isVerifiedUser()
           && isValidId(parishId)

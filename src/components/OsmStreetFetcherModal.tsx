@@ -83,6 +83,18 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
     }
   }, [open, parish?.location.lat, parish?.location.lng]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   const filteredStreets = useMemo(() => {
     if (!streets) return [];
     const q = filterText.trim().toLowerCase();

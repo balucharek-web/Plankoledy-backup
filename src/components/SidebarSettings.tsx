@@ -1,5 +1,6 @@
 import React from 'react';
-import { Calendar, Car, Footprints, HelpCircle } from 'lucide-react';
+import { Calendar, Car, Footprints, HelpCircle, Smartphone } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 import {
   PRIEST_PALETTE,
   PlanConfig,
@@ -301,6 +302,22 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
             })}
           </div>
         </div>
+      </section>
+
+      <section className="p-4 sm:p-5 space-y-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Smartphone className="w-4 h-4 text-amber-700" />
+            <h3 className="text-sm font-semibold text-slate-900">
+              Aplikacja na telefon i komputer
+            </h3>
+          </div>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Zainstaluj Planer Kolędy na ekranie głównym (PWA), aby szybko
+            otwierać listy wizyt i bloki także w trybie offline w terenie.
+          </p>
+        </div>
+        <PWAInstallButton tone="light" />
       </section>
 
       <section className="p-4 sm:p-5">

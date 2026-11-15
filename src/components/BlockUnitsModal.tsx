@@ -132,6 +132,18 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
     setLimitNotice(null);
   }, [stop, defaultVisitMinutes]);
 
+  useEffect(() => {
+    if (!stop) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [stop, onClose]);
+
   const effectiveUnitsCount = useMemo(() => {
     if (!isMultiUnit) return 1;
     if (units.length > 0) return units.length;

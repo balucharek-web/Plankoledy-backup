@@ -16,12 +16,14 @@ import {
   CheckCircle2,
   Church,
   Loader2,
+  LocateFixed,
   MapPinPlus,
   Route,
   Undo2,
   X,
 } from 'lucide-react';
 import { useParishPolygonDrawer } from '../hooks/useParishPolygonDrawer';
+import { useUserGpsLocation } from '../hooks/useUserGpsLocation';
 import {
   LatLng,
   MapInteractionMode,
@@ -564,6 +566,117 @@ const MapControllerLayer: React.FC<{
   );
 };
 
+const UserGpsMarkerLayer: React.FC = () => {
+  const map = useMap();
+  const gps = useUserGpsLocation();
+  const circleRef = useRef<google.maps.Circle | null>(null);
+  const hasCenteredRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!map) return;
+    if (circleRef.current) {
+      circleRef.current.setMap(null);
+      circleRef.current = null;
+    }
+
+    if (!gps.active || !gps.position) {
+      if (!gps.active) hasCenteredRef.current = false;
+      return;
+    }
+
+    if (gps.accuracyMeters && gps.accuracyMeters > 0) {
+      circleRef.current = new google.maps.Circle({
+        map,
+        center: gps.position,
+        radius: Math.min(gps.accuracyMeters, 250),
+        strokeColor: '#2563EB',
+        strokeOpacity: 0.45,
+        strokeWeight: 1,
+        fillColor: '#3B82F6',
+        fillOpacity: 0.14,
+        clickable: false,
+      });
+    }
+
+    if (!hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      map.panTo(gps.position);
+      const currentZoom = map.getZoom() ?? 15;
+      if (currentZoom < 16) map.setZoom(16);
+    }
+
+    return () => {
+      if (circleRef.current) {
+        circleRef.current.setMap(null);
+        circleRef.current = null;
+      }
+    };
+  }, [map, gps.active, gps.position, gps.accuracyMeters]);
+
+  return (
+    <>
+      {gps.active && gps.position && (
+        <AdvancedMarker position={gps.position} zIndex={950}>
+          <div
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: '9999px',
+              backgroundColor: '#2563EB',
+              border: '3px solid #FFFFFF',
+              boxShadow: '0 2px 8px rgba(37,99,235,0.55)',
+            }}
+          />
+        </AdvancedMarker>
+      )}
+
+      <MapControl position={ControlPosition.RIGHT_TOP}>
+        <div className="no-print mr-2.5 mt-1 flex flex-col items-end gap-1.5">
+          <div className="flex items-center gap-1.5">
+            {gps.active && gps.position && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (map && gps.position) {
+                    map.panTo(gps.position);
+                    if ((map.getZoom() ?? 15) < 17) map.setZoom(17);
+                  }
+                }}
+                className="min-h-[36px] px-2.5 py-1.5 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-800 hover:bg-slate-50"
+              >
+                Wyśrodkuj
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={gps.toggle}
+              aria-pressed={gps.active}
+              title={
+                gps.active
+                  ? 'Wyłącz pokazywanie mojej pozycji GPS'
+                  : 'Pokaż moją pozycję GPS na mapie'
+              }
+              className={`min-h-[36px] px-3 py-1.5 rounded-xl shadow-md border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                gps.active
+                  ? 'bg-blue-600 border-blue-700 text-white hover:bg-blue-700'
+                  : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800 hover:bg-slate-50'
+              }`}
+            >
+              <LocateFixed className="w-3.5 h-3.5" />
+              <span>{gps.active ? 'GPS włączony' : 'Moja pozycja'}</span>
+            </button>
+          </div>
+          {gps.error && (
+            <div className="max-w-[230px] px-2.5 py-1.5 bg-red-50/95 border border-red-200 rounded-lg shadow text-[11px] font-medium text-red-800">
+              {gps.error}
+            </div>
+          )}
+        </div>
+      </MapControl>
+    </>
+  );
+};
+
 export const ParishMap: React.FC<ParishMapProps> = ({
   parish,
   boundary,
@@ -653,6 +766,8 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           focusedPriestId={focusedPriestId}
           showRouteLines={showRouteLines}
         />
+
+        <UserGpsMarkerLayer />
 
         {parish && <ParishChurchMarker parish={parish} />}
 

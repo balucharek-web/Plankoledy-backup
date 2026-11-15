@@ -53,6 +53,16 @@ export interface VisitStop {
   unitsCount?: number;
   minutesPerUnit?: number;
   units?: BuildingUnit[];
+  visitStatus?: UnitVisitStatus;
+  manualOrder?: number;
+}
+
+export interface RouteStageLink {
+  stageIndex: number;
+  startStopNumber: number;
+  endStopNumber: number;
+  isReturnLeg?: boolean;
+  url: string;
 }
 
 export interface ScheduledStopItem {

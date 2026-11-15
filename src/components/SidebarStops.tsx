@@ -12,6 +12,7 @@ import {
   Map as MapIcon,
   MapPin,
   Plus,
+  RotateCcw,
   Route,
   Search,
   Sparkles,
@@ -31,6 +32,8 @@ import {
 } from '../types/parish';
 import {
   WEEKDAY_OPTIONS,
+  addDaysToIsoDate,
+  collectReturnVisitCandidates,
   formatPolishDateChip,
   formatPolishDateFull,
   parseWeekdaysMask,
@@ -67,8 +70,10 @@ interface SidebarStopsProps {
   onOpenBlockUnits: (id: string) => void;
   onViewDayOnMap: (date: string) => void;
   onComputeDayRoute: (date: string | null) => void;
+  onScheduleReturnVisits: (targetDate: string) => void;
   onGoToSetup: () => void;
   isComputing: boolean;
+  progressLabel?: string | null;
 }
 
 type StopsViewTab = 'days' | 'streets';
@@ -98,8 +103,10 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   onOpenBlockUnits,
   onViewDayOnMap,
   onComputeDayRoute,
+  onScheduleReturnVisits,
   onGoToSetup,
   isComputing,
+  progressLabel,
 }) => {
   const [activeTab, setActiveTab] = useState<StopsViewTab>('days');
   const [showSchedulerSettings, setShowSchedulerSettings] = useState(
@@ -112,6 +119,20 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   const [expandedStreets, setExpandedStreets] = useState<
     Record<string, boolean>
   >({});
+  const [visibleStreetsLimit, setVisibleStreetsLimit] = useState<number>(30);
+  const [houseLimits, setHouseLimits] = useState<Record<string, number>>({});
+
+  const defaultReturnDate = useMemo(() => {
+    const lastPlanned = plannedDays[plannedDays.length - 1]?.date;
+    return addDaysToIsoDate(lastPlanned || seasonConfig.startDate, 1);
+  }, [plannedDays, seasonConfig.startDate]);
+  const [returnVisitDate, setReturnVisitDate] = useState<string>('');
+  const effectiveReturnDate = returnVisitDate || defaultReturnDate;
+
+  const returnCandidates = useMemo(
+    () => collectReturnVisitCandidates(stops),
+    [stops]
+  );
 
   const activeStops = useMemo(
     () => stops.filter((s) => s.included !== false),
@@ -515,6 +536,44 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
               )}
             </section>
 
+            {/* Return Visits / Invited Panel */}
+            {returnCandidates.length > 0 && (
+              <section className="p-4 bg-amber-50/60 space-y-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <RotateCcw className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+                    <div>
+                      <h3 className="text-xs font-semibold text-amber-950">
+                        Powroty i kolęda na zaproszenie ({returnCandidates.length})
+                      </h3>
+                      <p className="text-[11px] text-amber-800 mt-0.5 leading-snug">
+                        Oznaczone domy/lokale jako „Nieobecni” lub „Zaproszenie” —
+                        wyznacz dla nich osobny dzień dodatkowy.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="date"
+                    value={effectiveReturnDate}
+                    onChange={(e) => setReturnVisitDate(e.target.value)}
+                    aria-label="Data dnia powrotów"
+                    className="min-h-[38px] px-2.5 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-amber-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                  />
+                  <button
+                    type="button"
+                    disabled={!effectiveReturnDate}
+                    onClick={() => onScheduleReturnVisits(effectiveReturnDate)}
+                    className="flex-1 min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Zaplanuj dzień powrotów</span>
+                  </button>
+                </div>
+              </section>
+            )}
+
             {/* Unassigned alert banner */}
             {unassignedStops.length > 0 && plannedDays.length > 0 && (
               <div className="px-4 py-3 bg-amber-50/70 flex items-center justify-between gap-2 text-xs text-amber-900">
@@ -799,7 +858,9 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                 Brak zapisanych ulic pasujących do wybranego filtra.
               </div>
             ) : (
-              streetGroups.map(({ streetName, allStops, visibleStops }) => {
+              streetGroups
+                .slice(0, visibleStreetsLimit)
+                .map(({ streetName, allStops, visibleStops }) => {
                 const includedCount = allStops.filter(
                   (s) => s.included !== false
                 ).length;
@@ -938,11 +999,35 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         </button>
                       </div>
 
-                      {/* Quick Date Picker for the entire street */}
-                      <div className="pl-6 flex items-center gap-2">
+                      {/* Quick Date Picker & Day Dropdown for the entire street */}
+                      <div className="pl-6 flex flex-wrap items-center gap-1.5">
                         <label className="text-[11px] text-slate-500 whitespace-nowrap">
                           Dzień kolędy:
                         </label>
+                        {plannedDays.length > 0 && (
+                          <select
+                            value={commonDate}
+                            onChange={(e) =>
+                              onAssignStopsDate(
+                                allStops.map((s) => s.id),
+                                e.target.value
+                              )
+                            }
+                            aria-label={`Przenieś ulicę ${streetName} na zaplanowany dzień`}
+                            className="min-h-[32px] max-w-[160px] px-2 py-0.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:bg-white focus:outline-none focus:border-amber-600"
+                          >
+                            <option value="">
+                              {streetDates.length > 1
+                                ? 'Różne dni...'
+                                : 'Przenieś na dzień...'}
+                            </option>
+                            {plannedDays.map((d) => (
+                              <option key={d.date} value={d.date}>
+                                {formatPolishDateChip(d.date)} ({d.stops.length})
+                              </option>
+                            ))}
+                          </select>
+                        )}
                         <input
                           type="date"
                           value={commonDate}
@@ -1018,7 +1103,9 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                           </div>
                         )}
 
-                        {visibleStops.map((stop) => {
+                        {visibleStops
+                          .slice(0, houseLimits[streetName] ?? 40)
+                          .map((stop) => {
                           const isIncluded = stop.included !== false;
                           const palette =
                             PRIEST_PALETTE.find(
@@ -1195,11 +1282,44 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                             </div>
                           );
                         })}
+
+                        {visibleStops.length > (houseLimits[streetName] ?? 40) && (
+                          <div className="px-4 py-2.5 text-center bg-white">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setHouseLimits((prev) => ({
+                                  ...prev,
+                                  [streetName]: (prev[streetName] ?? 40) + 50,
+                                }))
+                              }
+                              className="text-xs font-semibold text-amber-800 hover:underline tabular-nums"
+                            >
+                              Pokaż kolejne domy (pozostało{' '}
+                              {visibleStops.length -
+                                (houseLimits[streetName] ?? 40)}
+                              )
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
                 );
               })
+            )}
+
+            {streetGroups.length > visibleStreetsLimit && (
+              <div className="p-4 text-center bg-slate-50">
+                <button
+                  type="button"
+                  onClick={() => setVisibleStreetsLimit((v) => v + 30)}
+                  className="min-h-[38px] px-4 py-2 text-xs font-semibold text-amber-900 bg-white border border-amber-200 hover:bg-amber-50 rounded-xl tabular-nums"
+                >
+                  Pokaż więcej ulic (pozostało{' '}
+                  {streetGroups.length - visibleStreetsLimit})
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -1218,9 +1338,9 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
           ) : (
             <Clock className="w-4 h-4" />
           )}
-          <span>
+          <span className="truncate">
             {isComputing
-              ? 'Wyznaczanie optymalnych tras...'
+              ? progressLabel || 'Wyznaczanie optymalnych tras...'
               : selectedDaySummary
                 ? `Wyznacz trasę na ${formatPolishDateChip(
                     selectedDaySummary.date

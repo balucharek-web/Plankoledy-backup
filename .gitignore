@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .gmp_cache/
 public/assets/aistudio/
+dev-dist/

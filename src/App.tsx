@@ -18,11 +18,15 @@ import {
   Menu,
   Route,
   SlidersHorizontal,
+  Undo2,
   X,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
 import { BlockUnitsModal } from './components/BlockUnitsModal';
+import { ConfirmDialog } from './components/ConfirmDialog';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { OsmParishMap } from './components/OsmParishMap';
+import { PWAInstallButton } from './components/PWAInstallButton';
 import { ParishMap, RoutePolylineEntry } from './components/ParishMap';
 import { PlanDashboard, WorkspaceSection } from './components/PlanDashboard';
 import { SelectedPlaceData } from './components/PlaceSearchInput';
@@ -47,13 +51,16 @@ import {
   DEFAULT_PLAN_CONFIG,
   DEFAULT_SEASON_CONFIG,
   batchUpdateStopFieldInFirestore,
+  clearOfflineParishSnapshot,
   clearParishStopsInFirestore,
   createStopInFirestore,
   createStopsBatchInFirestore,
   deleteParishFromFirestore,
   deleteStopInFirestore,
+  loadOfflineParishSnapshot,
   makeParishDocId,
   sanitizeDocId,
+  saveOfflineParishSnapshot,
   saveParishToFirestore,
   subscribeParishStops,
   subscribeUserParishes,
@@ -73,11 +80,13 @@ import {
   SavedParishRecord,
   SeasonPlanConfig,
   StreetPickFeedback,
+  UnitVisitStatus,
   VisitStop,
 } from './types/parish';
 import {
   autoScheduleSeason,
   buildSeasonDaySummaries,
+  collectReturnVisitCandidates,
   formatPolishDateChip,
   getDayStartTime,
 } from './utils/seasonScheduler';
@@ -106,6 +115,7 @@ interface RouteOptimizerHandle {
   routes: PriestRouteResult[];
   routeObjects: RoutePolylineEntry[];
   isComputing: boolean;
+  progressLabel?: string | null;
   error: string | null;
   computeAllRoutes: (
     parish: ParishCenter,
@@ -179,9 +189,22 @@ function ParishPlannerWorkspace({
   const [editingBlockStopId, setEditingBlockStopId] = useState<string | null>(
     null
   );
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    description: string;
+    confirmLabel: string;
+    variant?: 'danger' | 'warning' | 'default';
+    onConfirm: () => void;
+  } | null>(null);
+  const [undoToast, setUndoToast] = useState<{
+    id: number;
+    message: string;
+    onUndo: () => void;
+  } | null>(null);
 
   const boundaryDebounceRef = useRef<number | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
+  const undoTimerRef = useRef<number | null>(null);
   const activeParishIdRef = useRef<string | null>(activeParishId);
   activeParishIdRef.current = activeParishId;
   const stopsRef = useRef<VisitStop[]>(stops);
@@ -191,6 +214,18 @@ function ParishPlannerWorkspace({
     setActiveSection(section);
     setMobilePane('panel');
     setMobileMenuOpen(false);
+  }, []);
+
+  const showUndoToast = useCallback((message: string, onUndo: () => void) => {
+    if (undoTimerRef.current) {
+      window.clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    const toastId = Date.now();
+    setUndoToast({ id: toastId, message, onUndo });
+    undoTimerRef.current = window.setTimeout(() => {
+      setUndoToast((curr) => (curr?.id === toastId ? null : curr));
+    }, 9000);
   }, []);
 
   const showStreetFeedback = useCallback(
@@ -211,6 +246,7 @@ function ParishPlannerWorkspace({
 
   const {
     isComputing,
+    progressLabel,
     error: routeError,
     computeAllRoutes,
     clearRoutes: clearOptimizerRoutes,
@@ -224,11 +260,15 @@ function ParishPlannerWorkspace({
   // Parishes must only be persisted for signed-in users: purge any old local cache
   useEffect(() => {
     clearLegacyLocalStorage();
+    return () => {
+      if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current);
+    };
   }, []);
 
-  // Subscribe to signed-in user's parishes in Firestore, and clear state on sign-out
+  // Subscribe to signed-in user's parishes in Firestore, and clear state + offline snapshot on sign-out
   useEffect(() => {
     if (!authUser) {
+      clearOfflineParishSnapshot();
       setSavedParishes([]);
       setActiveParishId(null);
       setParish(null);
@@ -240,6 +280,18 @@ function ParishPlannerWorkspace({
       setFocusedPriestId(null);
       clearRoutes();
       return;
+    }
+
+    // Immediate offline-first hydration for signed-in user while Firestore connects
+    const cachedOffline = loadOfflineParishSnapshot(authUser.uid);
+    if (cachedOffline && !activeParishIdRef.current) {
+      activeParishIdRef.current = cachedOffline.parishId;
+      setActiveParishId(cachedOffline.parishId);
+      setParish(cachedOffline.parish);
+      setBoundary(cachedOffline.boundary);
+      setConfig(cachedOffline.config);
+      setSeasonConfig(cachedOffline.seasonConfig);
+      setStops(cachedOffline.stops);
     }
 
     let cancelled = false;
@@ -319,6 +371,20 @@ function ParishPlannerWorkspace({
 
     return () => unsubscribeStops();
   }, [authUser, activeParishId]);
+
+  // Save lightweight offline snapshot for signed-in user so field checklist works offline
+  useEffect(() => {
+    if (!authUser || !activeParishId || !parish) return;
+    saveOfflineParishSnapshot(authUser.uid, {
+      parishId: activeParishId,
+      parish,
+      boundary,
+      config,
+      seasonConfig,
+      stops,
+      savedAtMs: Date.now(),
+    });
+  }, [authUser, activeParishId, parish, boundary, config, seasonConfig, stops]);
 
   const handleSelectParish = useCallback(
     (place: SelectedPlaceData) => {
@@ -408,23 +474,36 @@ function ParishPlannerWorkspace({
   const handleDeleteSavedParish = useCallback(
     (parishId: string) => {
       if (!authUser) return;
-      const remaining = savedParishes.filter((r) => r.id !== parishId);
-      setSavedParishes(remaining);
+      const target = savedParishes.find((r) => r.id === parishId);
+      setConfirmState({
+        title: 'Usunąć zapisaną parafię?',
+        description: `Wszystkie zapamiętane adresy, granice i harmonogramy dla „${
+          target?.parish.name || 'wybranej parafii'
+        }” zostaną trwale usunięte z Twojego konta.`,
+        confirmLabel: 'Usuń parafię',
+        variant: 'danger',
+        onConfirm: () => {
+          const remaining = savedParishes.filter((r) => r.id !== parishId);
+          setSavedParishes(remaining);
 
-      if (activeParishId === parishId) {
-        clearRoutes();
-        const fallback = remaining[0] ?? null;
-        setActiveParishId(fallback?.id ?? null);
-        setParish(fallback?.parish ?? null);
-        setBoundary(fallback?.boundary ?? []);
-        setConfig(fallback?.config ?? DEFAULT_PLAN_CONFIG);
-        setSeasonConfig(fallback?.seasonConfig ?? DEFAULT_SEASON_CONFIG);
-        setStops([]);
-        setSelectedDate(null);
-        setFocusedPriestId(null);
-      }
+          if (activeParishId === parishId) {
+            clearRoutes();
+            const fallback = remaining[0] ?? null;
+            setActiveParishId(fallback?.id ?? null);
+            setParish(fallback?.parish ?? null);
+            setBoundary(fallback?.boundary ?? []);
+            setConfig(fallback?.config ?? DEFAULT_PLAN_CONFIG);
+            setSeasonConfig(fallback?.seasonConfig ?? DEFAULT_SEASON_CONFIG);
+            setStops([]);
+            setSelectedDate(null);
+            setFocusedPriestId(null);
+          }
 
-      void deleteParishFromFirestore(authUser.uid, parishId).catch(() => {});
+          void deleteParishFromFirestore(authUser.uid, parishId).catch(
+            () => {}
+          );
+        },
+      });
     },
     [activeParishId, authUser, clearRoutes, savedParishes]
   );
@@ -519,8 +598,22 @@ function ParishPlannerWorkspace({
   );
 
   const handleClearBoundary = useCallback(() => {
-    updateBoundaryAndRecheckStops([], false);
-  }, [updateBoundaryAndRecheckStops]);
+    if (boundary.length === 0) return;
+    const prevBoundary = [...boundary];
+    setConfirmState({
+      title: 'Wyczyścić obrys granic parafii?',
+      description:
+        'Narysowany obszar na mapie zostanie usunięty. Będziesz móc narysować nowy obrys lub cofnąć operację przez chwilę po zatwierdzeniu.',
+      confirmLabel: 'Wyczyść obrys',
+      variant: 'warning',
+      onConfirm: () => {
+        updateBoundaryAndRecheckStops([], false);
+        showUndoToast('Usunięto obrys granic parafii.', () => {
+          updateBoundaryAndRecheckStops(prevBoundary, false);
+        });
+      },
+    });
+  }, [boundary, showUndoToast, updateBoundaryAndRecheckStops]);
 
   const handleChangeConfig = useCallback(
     (nextConfig: PlanConfig) => {
@@ -889,31 +982,73 @@ function ParishPlannerWorkspace({
   const handleDeleteStop = useCallback(
     (id: string) => {
       const currentId = activeParishIdRef.current;
+      const removed = stopsRef.current.find((s) => s.id === id);
       setStops((prev) => prev.filter((s) => s.id !== id));
       clearRoutes();
 
       if (authUser && currentId) {
         void deleteStopInFirestore(currentId, id).catch(() => {});
       }
+
+      if (removed) {
+        showUndoToast(`Usunięto adres: ${removed.address}`, () => {
+          setStops((prev) =>
+            prev.some((s) => s.id === removed.id) ? prev : [...prev, removed]
+          );
+          if (authUser && currentId) {
+            void createStopInFirestore(authUser.uid, currentId, removed).catch(
+              () => {}
+            );
+          }
+        });
+      }
     },
-    [authUser, clearRoutes]
+    [authUser, clearRoutes, showUndoToast]
   );
 
   const handleClearStops = useCallback(() => {
+    if (stops.length === 0) return;
+    const snapshot = [...stops];
     const currentId = activeParishIdRef.current;
-    const idsToDelete = stops.map((s) => s.id);
-    setStops([]);
-    clearRoutes();
+    const idsToDelete = snapshot.map((s) => s.id);
 
-    if (authUser && currentId && idsToDelete.length > 0) {
-      void clearParishStopsInFirestore(currentId, idsToDelete).catch(() => {});
-    }
-  }, [authUser, clearRoutes, stops]);
+    setConfirmState({
+      title: 'Usunąć całą bazę domów?',
+      description: `Wszystkie zapamiętane budynki (${snapshot.length}) oraz przypisane daty i lokale w blokach dla tej parafii zostaną usunięte.`,
+      confirmLabel: `Usuń wszystkie (${snapshot.length})`,
+      variant: 'danger',
+      onConfirm: () => {
+        setStops([]);
+        clearRoutes();
+
+        if (authUser && currentId && idsToDelete.length > 0) {
+          void clearParishStopsInFirestore(currentId, idsToDelete).catch(
+            () => {}
+          );
+        }
+
+        showUndoToast(
+          `Usunięto bazę ${snapshot.length} domów.`,
+          () => {
+            setStops(snapshot);
+            if (authUser && currentId) {
+              void createStopsBatchInFirestore(
+                authUser.uid,
+                currentId,
+                snapshot
+              ).catch(() => {});
+            }
+          }
+        );
+      },
+    });
+  }, [authUser, clearRoutes, showUndoToast, stops]);
 
   const handleDeleteStreetStops = useCallback(
     (stopIds: string[]) => {
       if (stopIds.length === 0) return;
       const idSet = new Set(stopIds);
+      const removedList = stopsRef.current.filter((s) => idSet.has(s.id));
       const currentId = activeParishIdRef.current;
       setStops((prev) => prev.filter((s) => !idSet.has(s.id)));
       clearRoutes();
@@ -921,8 +1056,32 @@ function ParishPlannerWorkspace({
       if (authUser && currentId) {
         void clearParishStopsInFirestore(currentId, stopIds).catch(() => {});
       }
+
+      if (removedList.length > 0) {
+        showUndoToast(
+          `Usunięto ${removedList.length} ${
+            removedList.length === 1 ? 'adres' : 'adresów'
+          }.`,
+          () => {
+            setStops((prev) => {
+              const existingIds = new Set(prev.map((p) => p.id));
+              return [
+                ...prev,
+                ...removedList.filter((r) => !existingIds.has(r.id)),
+              ];
+            });
+            if (authUser && currentId) {
+              void createStopsBatchInFirestore(
+                authUser.uid,
+                currentId,
+                removedList
+              ).catch(() => {});
+            }
+          }
+        );
+      }
     },
-    [authUser, clearRoutes]
+    [authUser, clearRoutes, showUndoToast]
   );
 
   const handleToggleStreetIncluded = useCallback(
@@ -1073,28 +1232,65 @@ function ParishPlannerWorkspace({
   );
 
   const handleClearAllDates = useCallback(() => {
-    const currentId = activeParishIdRef.current;
-    const changed: VisitStop[] = [];
-    setStops((prev) =>
-      prev.map((s) => {
-        if (!(s.visitDate ?? '').trim()) return s;
-        const next = { ...s, visitDate: '' };
-        changed.push(next);
-        return next;
-      })
+    const withDates = stopsRef.current.filter((s) =>
+      Boolean((s.visitDate ?? '').trim())
     );
-    setSelectedDate(null);
-    setFocusedPriestId(null);
-    clearRoutes();
+    if (withDates.length === 0) return;
 
-    if (authUser && currentId && changed.length > 0) {
-      void batchUpdateStopFieldInFirestore(
-        currentId,
-        changed,
-        'visitDate'
-      ).catch(() => {});
-    }
-  }, [authUser, clearRoutes]);
+    const prevDateById = new Map(
+      withDates.map((s) => [s.id, s.visitDate ?? ''])
+    );
+    const currentId = activeParishIdRef.current;
+
+    setConfirmState({
+      title: 'Wyczyścić wszystkie daty z kalendarza?',
+      description: `Przypisania dni kolędy dla ${withDates.length} domów zostaną wyczyszczone. Lista samych domów i ulic pozostanie nienaruszona.`,
+      confirmLabel: 'Wyczyść daty',
+      variant: 'warning',
+      onConfirm: () => {
+        const changed: VisitStop[] = [];
+        setStops((prev) =>
+          prev.map((s) => {
+            if (!(s.visitDate ?? '').trim()) return s;
+            const next = { ...s, visitDate: '' };
+            changed.push(next);
+            return next;
+          })
+        );
+        setSelectedDate(null);
+        setFocusedPriestId(null);
+        clearRoutes();
+
+        if (authUser && currentId && changed.length > 0) {
+          void batchUpdateStopFieldInFirestore(
+            currentId,
+            changed,
+            'visitDate'
+          ).catch(() => {});
+        }
+
+        showUndoToast('Wyczyszczono przypisane daty kolędy.', () => {
+          const restored: VisitStop[] = [];
+          setStops((prev) =>
+            prev.map((s) => {
+              const oldDate = prevDateById.get(s.id);
+              if (!oldDate) return s;
+              const next = { ...s, visitDate: oldDate };
+              restored.push(next);
+              return next;
+            })
+          );
+          if (authUser && currentId && restored.length > 0) {
+            void batchUpdateStopFieldInFirestore(
+              currentId,
+              restored,
+              'visitDate'
+            ).catch(() => {});
+          }
+        });
+      },
+    });
+  }, [authUser, clearRoutes, showUndoToast]);
 
   const handleAssignStopsDate = useCallback(
     (stopIds: string[], visitDate: string) => {
@@ -1228,6 +1424,149 @@ function ParishPlannerWorkspace({
       setFocusedStreet(null);
     }
   }, [availableMapStreets, focusedStreet]);
+
+  const handleUpdateStopStatus = useCallback(
+    (stopId: string, status: UnitVisitStatus) => {
+      const currentId = activeParishIdRef.current;
+      let updatedStop: VisitStop | null = null;
+
+      setStops((prev) =>
+        prev.map((s) => {
+          if (s.id !== stopId) return s;
+          updatedStop = { ...s, visitStatus: status };
+          return updatedStop;
+        })
+      );
+
+      if (authUser && currentId && updatedStop) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          [updatedStop],
+          'visitStatus'
+        ).catch(() => {});
+      }
+    },
+    [authUser]
+  );
+
+  const handleMoveStopOrder = useCallback(
+    (priestId: number, stopId: string, direction: 'up' | 'down') => {
+      const route = displayedRoutes.find((r) => r.priestId === priestId);
+      if (!route || route.orderedStops.length < 2) return;
+
+      const idx = route.orderedStops.findIndex((i) => i.stop.id === stopId);
+      if (idx < 0) return;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= route.orderedStops.length) return;
+
+      const reorderedIds = route.orderedStops.map((i) => i.stop.id);
+      const temp = reorderedIds[idx];
+      reorderedIds[idx] = reorderedIds[targetIdx];
+      reorderedIds[targetIdx] = temp;
+
+      const orderMap = new Map<string, number>();
+      reorderedIds.forEach((id, i) => orderMap.set(id, i + 1));
+
+      const currentId = activeParishIdRef.current;
+      const changed: VisitStop[] = [];
+      setStops((prev) =>
+        prev.map((s) => {
+          const nextOrder = orderMap.get(s.id);
+          if (nextOrder === undefined) return s;
+          const next = { ...s, manualOrder: nextOrder };
+          changed.push(next);
+          return next;
+        })
+      );
+
+      // Invalidate only the currently viewed day's exact cache so estimateDayRoutes uses manualOrder immediately
+      setExactRoutesCache((prev) => {
+        if (!prev[activeRouteCacheKey]) return prev;
+        const copy = { ...prev };
+        delete copy[activeRouteCacheKey];
+        return copy;
+      });
+
+      if (authUser && currentId && changed.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          changed,
+          'manualOrder'
+        ).catch(() => {});
+      }
+    },
+    [activeRouteCacheKey, authUser, displayedRoutes]
+  );
+
+  const handleScheduleReturnVisits = useCallback(
+    (targetDate: string) => {
+      if (!parish || !targetDate) return;
+      const candidates = collectReturnVisitCandidates(stopsRef.current);
+      if (candidates.length === 0) return;
+
+      const candidateStops = candidates.map((c) => c.stop);
+      const partitioned = partitionStopsBySector(
+        parish.location,
+        candidateStops,
+        config.priestCount
+      );
+      const byId = new Map(partitioned.map((s) => [s.id, s]));
+      const currentId = activeParishIdRef.current;
+      const scheduleChanged: VisitStop[] = [];
+      const statusChanged: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          const p = byId.get(s.id);
+          if (!p) return s;
+          const isBlock = Boolean(
+            s.isMultiUnit || (s.units && s.units.length > 0)
+          );
+          const resetStatus =
+            !isBlock && s.visitStatus === 'absent' ? 'pending' : s.visitStatus;
+          const updated: VisitStop = {
+            ...p,
+            visitDate: targetDate,
+            included: true,
+            visitStatus: resetStatus,
+          };
+          scheduleChanged.push(updated);
+          if (resetStatus !== s.visitStatus) {
+            statusChanged.push(updated);
+          }
+          return updated;
+        })
+      );
+
+      clearRoutes();
+      setSelectedDate(targetDate);
+      setFocusedPriestId(null);
+
+      if (authUser && currentId && scheduleChanged.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          scheduleChanged,
+          'schedule'
+        ).catch(() => {});
+        if (statusChanged.length > 0) {
+          void batchUpdateStopFieldInFirestore(
+            currentId,
+            statusChanged,
+            'visitStatus'
+          ).catch(() => {});
+        }
+      }
+
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Zaplanowano dzień powrotów (${targetDate}) dla ${scheduleChanged.length} punktów.`,
+        },
+        5000
+      );
+    },
+    [authUser, clearRoutes, config.priestCount, parish, showStreetFeedback]
+  );
 
   const handleComputeRoutesForDate = useCallback(
     async (explicitDate?: string | null) => {
@@ -1386,6 +1725,23 @@ function ParishPlannerWorkspace({
         </div>
       </header>
 
+      {/* Guest Mode Warning Banner */}
+      {!authUser && parish && activeSection !== 'schedule' && (
+        <div className="no-print bg-amber-50 border-b border-amber-200 px-3 sm:px-5 py-2 flex items-center justify-between gap-2 text-xs text-amber-950 shrink-0">
+          <span className="truncate">
+            <strong>Tryb gościa</strong> — zmiany nie zapisują się na koncie
+            Google po odświeżeniu.
+          </span>
+          <button
+            type="button"
+            onClick={onSignInGoogle}
+            className="px-2.5 py-1 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg whitespace-nowrap shrink-0"
+          >
+            Zaloguj Google
+          </button>
+        </div>
+      )}
+
       {/* Main App Body: Desktop Left Menu Rail + Panel + Map */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Desktop App Sidebar Menu */}
@@ -1431,6 +1787,7 @@ function ParishPlannerWorkspace({
           </div>
 
           <div className="p-3 border-t border-slate-800/80 space-y-2">
+            <PWAInstallButton tone="dark" />
             <button
               type="button"
               onClick={() => setGuideOpen(true)}
@@ -1610,8 +1967,10 @@ function ParishPlannerWorkspace({
                     onComputeDayRoute={(d) =>
                       void handleComputeRoutesForDate(d)
                     }
+                    onScheduleReturnVisits={handleScheduleReturnVisits}
                     onGoToSetup={() => navigateToSection('parish')}
                     isComputing={isComputing}
+                    progressLabel={progressLabel}
                   />
                 )}
 
@@ -1626,6 +1985,7 @@ function ParishPlannerWorkspace({
                     effectiveStartTime={effectiveStartTime}
                     focusedPriestId={focusedPriestId}
                     isComputing={isComputing}
+                    progressLabel={progressLabel}
                     globalError={routeError}
                     onSelectDate={(d) => {
                       setSelectedDate(d);
@@ -1644,6 +2004,8 @@ function ParishPlannerWorkspace({
                       setMobilePane('map');
                     }}
                     onOpenSchedule={() => navigateToSection('schedule')}
+                    onUpdateStopStatus={handleUpdateStopStatus}
+                    onMoveStopOrder={handleMoveStopOrder}
                   />
                 )}
 
@@ -2107,6 +2469,7 @@ function ParishPlannerWorkspace({
             </div>
 
             <div className="p-4 border-t border-slate-200 bg-slate-50 space-y-2 shrink-0">
+              <PWAInstallButton tone="light" />
               {authUser ? (
                 <>
                   <div className="text-xs text-slate-600 truncate">
@@ -2141,6 +2504,51 @@ function ParishPlannerWorkspace({
           </div>
         </div>
       )}
+
+      {undoToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="no-print fixed bottom-20 lg:bottom-4 left-3 right-3 sm:left-auto sm:right-4 z-[960] bg-slate-900 text-white border border-slate-700 rounded-xl shadow-xl px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
+        >
+          <span className="truncate">{undoToast.message}</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                undoToast.onUndo();
+                setUndoToast(null);
+              }}
+              className="min-h-[30px] px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-lg inline-flex items-center gap-1 transition-colors"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              Cofnij
+            </button>
+            <button
+              type="button"
+              onClick={() => setUndoToast(null)}
+              aria-label="Zamknij"
+              className="p-1 text-slate-400 hover:text-white"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <OfflineIndicator />
+
+      <ConfirmDialog
+        open={Boolean(confirmState)}
+        title={confirmState?.title ?? ''}
+        description={confirmState?.description ?? ''}
+        confirmLabel={confirmState?.confirmLabel}
+        variant={confirmState?.variant}
+        onConfirm={() => {
+          confirmState?.onConfirm();
+        }}
+        onCancel={() => setConfirmState(null)}
+      />
 
       <ArchitectureGuideModal
         open={guideOpen}

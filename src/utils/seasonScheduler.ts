@@ -12,6 +12,7 @@ import {
 import {
   addMinutesToHHMM,
   extractStreetName,
+  formatStreetHouseRange,
   partitionStopsBySector,
 } from './spatial';
 
@@ -250,30 +251,43 @@ export function estimateDayRoutes(
     const pool = [...normalized.filter((s) => s.priestId === priestId)];
     if (pool.length === 0) continue;
 
-    // Street-coherent greedy nearest neighbor
-    const ordered: VisitStop[] = [];
-    let cursor = parish.location;
-    let currentStreet = '';
+    const hasManualOrder = pool.some(
+      (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
+    );
 
-    while (pool.length > 0) {
-      let bestIdx = 0;
-      let bestScore = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < pool.length; i++) {
-        const candidate = pool[i];
-        const dist = haversineMeters(cursor, candidate.location);
-        const street = extractStreetName(candidate);
-        const sameStreetBonus =
-          currentStreet && street === currentStreet && dist < 450 ? 0.42 : 1;
-        const score = dist * sameStreetBonus;
-        if (score < bestScore) {
-          bestScore = score;
-          bestIdx = i;
+    const ordered: VisitStop[] = [];
+    if (hasManualOrder) {
+      const sorted = [...pool].sort(
+        (a, b) =>
+          (a.manualOrder ?? Number.MAX_SAFE_INTEGER) -
+          (b.manualOrder ?? Number.MAX_SAFE_INTEGER)
+      );
+      ordered.push(...sorted);
+    } else {
+      // Street-coherent greedy nearest neighbor
+      let cursor = parish.location;
+      let currentStreet = '';
+
+      while (pool.length > 0) {
+        let bestIdx = 0;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < pool.length; i++) {
+          const candidate = pool[i];
+          const dist = haversineMeters(cursor, candidate.location);
+          const street = extractStreetName(candidate);
+          const sameStreetBonus =
+            currentStreet && street === currentStreet && dist < 450 ? 0.42 : 1;
+          const score = dist * sameStreetBonus;
+          if (score < bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
         }
+        const chosen = pool.splice(bestIdx, 1)[0];
+        ordered.push(chosen);
+        cursor = chosen.location;
+        currentStreet = extractStreetName(chosen);
       }
-      const chosen = pool.splice(bestIdx, 1)[0];
-      ordered.push(chosen);
-      cursor = chosen.location;
-      currentStreet = extractStreetName(chosen);
     }
 
     let elapsedMinutes = 0;
@@ -767,3 +781,113 @@ export function exportFullSeasonToCsv(
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+
+export interface AnnouncementStreetRange {
+  streetName: string;
+  rangeLabel: string;
+  stopsCount: number;
+}
+
+export interface AnnouncementDayItem {
+  date: string;
+  fullDateLabel: string;
+  startTime: string;
+  streets: AnnouncementStreetRange[];
+  priestCountUsed: number;
+}
+
+/**
+ * Generates RODO-compliant parish bulletin announcements (dates, start time, streets + house ranges, zero family names).
+ */
+export function buildAnnouncementDays(
+  days: DayPlanSummary[]
+): AnnouncementDayItem[] {
+  return days.map((day) => {
+    const byStreet = new Map<string, VisitStop[]>();
+    for (const stop of day.stops) {
+      const street = extractStreetName(stop);
+      const list = byStreet.get(street);
+      if (list) list.push(stop);
+      else byStreet.set(street, [stop]);
+    }
+
+    const streets: AnnouncementStreetRange[] = Array.from(byStreet.entries())
+      .map(([streetName, list]) => ({
+        streetName,
+        rangeLabel: formatStreetHouseRange(list),
+        stopsCount: list.length,
+      }))
+      .sort((a, b) => a.streetName.localeCompare(b.streetName, 'pl'));
+
+    return {
+      date: day.date,
+      fullDateLabel: formatPolishDateFull(day.date),
+      startTime: day.startTime,
+      streets,
+      priestCountUsed: day.estimatedRoutes.length || 1,
+    };
+  });
+}
+
+export function formatAnnouncementsPlainText(
+  parish: ParishCenter | null,
+  days: DayPlanSummary[]
+): string {
+  const items = buildAnnouncementDays(days);
+  if (items.length === 0) return '';
+
+  const header = parish
+    ? `PLAN ODWIEDZIN DUSZPASTERSKICH (KOLĘDA) — ${parish.name.toUpperCase()}`
+    : 'PLAN ODWIEDZIN DUSZPASTERSKICH (KOLĘDA)';
+
+  const lines: string[] = [header, ''];
+  for (const item of items) {
+    const streetsText = item.streets
+      .map((s) => (s.rangeLabel ? `${s.streetName} (${s.rangeLabel})` : s.streetName))
+      .join('; ');
+    lines.push(`• ${item.fullDateLabel}, godz. ${item.startTime} — ${streetsText}`);
+  }
+  return lines.join('\n');
+}
+
+export interface ReturnVisitCandidate {
+  stop: VisitStop;
+  reason: 'absent_house' | 'invited_house' | 'absent_or_invited_block';
+  pendingUnitsCount: number;
+}
+
+/**
+ * Collects all single houses marked 'absent' or 'invited', plus multi-unit blocks containing absent/invited units,
+ * so the parish can schedule a supplementary "kolęda na zaproszenie / powroty" day in one click.
+ */
+export function collectReturnVisitCandidates(
+  stops: VisitStop[]
+): ReturnVisitCandidate[] {
+  const out: ReturnVisitCandidate[] = [];
+  for (const stop of stops) {
+    const isBlock = Boolean(
+      stop.isMultiUnit || (stop.units && stop.units.length > 0)
+    );
+    if (isBlock && stop.units && stop.units.length > 0) {
+      const returnUnits = stop.units.filter(
+        (u) => u.status === 'absent' || u.status === 'invited'
+      );
+      if (returnUnits.length > 0) {
+        out.push({
+          stop,
+          reason: 'absent_or_invited_block',
+          pendingUnitsCount: returnUnits.length,
+        });
+      }
+      continue;
+    }
+
+    if (stop.visitStatus === 'absent') {
+      out.push({ stop, reason: 'absent_house', pendingUnitsCount: 1 });
+    } else if (stop.visitStatus === 'invited') {
+      out.push({ stop, reason: 'invited_house', pendingUnitsCount: 1 });
+    }
+  }
+  return out;
+}
+

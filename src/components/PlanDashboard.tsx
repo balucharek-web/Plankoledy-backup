@@ -15,6 +15,7 @@ import {
   MapPin,
   Pentagon,
   Plus,
+  RotateCcw,
   Route,
   SlidersHorizontal,
   Users,
@@ -33,7 +34,10 @@ import {
   SavedParishRecord,
   VisitStop,
 } from '../types/parish';
-import { formatPolishDateChip } from '../utils/seasonScheduler';
+import {
+  collectReturnVisitCandidates,
+  formatPolishDateChip,
+} from '../utils/seasonScheduler';
 import {
   extractStreetName,
   formatDistance,
@@ -125,6 +129,11 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
       .sort((a, b) => b[1] - a[1])
       .slice(0, 6);
   }, [activeStops]);
+
+  const returnCandidatesCount = useMemo(
+    () => collectReturnVisitCandidates(stops).length,
+    [stops]
+  );
 
   const routeMetrics = useMemo(() => {
     if (routes.length === 0) return null;
@@ -611,6 +620,27 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
           </div>
           <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
         </button>
+
+        {returnCandidatesCount > 0 && (
+          <button
+            type="button"
+            onClick={() => onNavigateSection('stops')}
+            className="w-full min-h-[46px] px-3.5 py-2 rounded-xl border border-amber-200 bg-amber-50/70 hover:bg-amber-100/70 text-left flex items-center justify-between gap-3 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <RotateCcw className="w-4 h-4 text-amber-800 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-amber-950 truncate tabular-nums">
+                  Powroty i zaproszenia ({returnCandidatesCount})
+                </div>
+                <div className="text-[11px] text-amber-800 truncate">
+                  Oznaczono nieobecnych lub na zaproszenie — zaplanuj dzień powrotów
+                </div>
+              </div>
+            </div>
+            <ArrowRight className="w-4 h-4 text-amber-700 shrink-0" />
+          </button>
+        )}
       </section>
 
       {/* Multi-day Season Schedule Preview */}

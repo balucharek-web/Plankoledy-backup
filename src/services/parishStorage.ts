@@ -196,7 +196,12 @@ function sanitizeStopPayload(
     : 0;
   const minutesPerUnit = clampInt(stop.minutesPerUnit, 1, 60, 10);
 
-  return {
+  const visitStatus: UnitVisitStatus =
+    stop.visitStatus && VALID_UNIT_STATUSES.has(stop.visitStatus)
+      ? stop.visitStatus
+      : 'pending';
+
+  const payload: Record<string, unknown> = {
     ownerId: uid,
     parishId,
     label,
@@ -216,7 +221,15 @@ function sanitizeStopPayload(
     unitsCount,
     minutesPerUnit,
     units,
+    visitStatus,
   };
+  if (
+    typeof stop.manualOrder === 'number' &&
+    !Number.isNaN(stop.manualOrder)
+  ) {
+    payload.manualOrder = clampInt(stop.manualOrder, 0, 10000, 0);
+  }
+  return payload;
 }
 
 function timestampToMs(val: unknown): number {
@@ -316,6 +329,13 @@ export function subscribeParishStops(
               units: Array.isArray(d.units)
                 ? sanitizeUnitsList(d.units as BuildingUnit[])
                 : undefined,
+              visitStatus:
+                typeof d.visitStatus === 'string' &&
+                VALID_UNIT_STATUSES.has(d.visitStatus as UnitVisitStatus)
+                  ? (d.visitStatus as UnitVisitStatus)
+                  : undefined,
+              manualOrder:
+                typeof d.manualOrder === 'number' ? d.manualOrder : undefined,
             },
           };
         });
@@ -520,7 +540,12 @@ export async function updateStopInFirestore(
       : 0;
     const minutesPerUnit = clampInt(stop.minutesPerUnit, 1, 60, 10);
 
-    await updateDoc(doc(db, 'parishes', safeParishId, 'stops', safeStopId), {
+    const visitStatus: UnitVisitStatus =
+      stop.visitStatus && VALID_UNIT_STATUSES.has(stop.visitStatus)
+        ? stop.visitStatus
+        : 'pending';
+
+    const updatePayload: Record<string, unknown> = {
       label,
       address,
       durationMinutes: clampInt(stop.durationMinutes, 1, 1440, 15),
@@ -533,8 +558,20 @@ export async function updateStopInFirestore(
       unitsCount,
       minutesPerUnit,
       units,
+      visitStatus,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (
+      typeof stop.manualOrder === 'number' &&
+      !Number.isNaN(stop.manualOrder)
+    ) {
+      updatePayload.manualOrder = clampInt(stop.manualOrder, 0, 10000, 0);
+    }
+
+    await updateDoc(
+      doc(db, 'parishes', safeParishId, 'stops', safeStopId),
+      updatePayload
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -543,7 +580,15 @@ export async function updateStopInFirestore(
 export async function batchUpdateStopFieldInFirestore(
   parishId: string,
   stops: VisitStop[],
-  mode: 'priestId' | 'inBoundary' | 'included' | 'visitDate' | 'schedule'
+  mode:
+    | 'priestId'
+    | 'inBoundary'
+    | 'included'
+    | 'visitDate'
+    | 'schedule'
+    | 'visitStatus'
+    | 'manualOrder'
+    | 'manualOrder_schedule'
 ): Promise<void> {
   if (stops.length === 0) return;
   const safeParishId = sanitizeDocId(parishId);
@@ -569,11 +614,33 @@ export async function batchUpdateStopFieldInFirestore(
             visitDate: cleanVisitDate(stop.visitDate),
             updatedAt: serverTimestamp(),
           });
+        } else if (mode === 'visitStatus') {
+          const visitStatus: UnitVisitStatus =
+            stop.visitStatus && VALID_UNIT_STATUSES.has(stop.visitStatus)
+              ? stop.visitStatus
+              : 'pending';
+          batch.update(ref, {
+            visitStatus,
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'manualOrder') {
+          batch.update(ref, {
+            manualOrder: clampInt(stop.manualOrder, 0, 10000, 0),
+            updatedAt: serverTimestamp(),
+          });
         } else if (mode === 'schedule') {
           batch.update(ref, {
             visitDate: cleanVisitDate(stop.visitDate),
             priestId: clampInt(stop.priestId, 1, 4, 1),
             included: stop.included !== false,
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'manualOrder_schedule') {
+          batch.update(ref, {
+            visitDate: cleanVisitDate(stop.visitDate),
+            priestId: clampInt(stop.priestId, 1, 4, 1),
+            included: stop.included !== false,
+            manualOrder: clampInt(stop.manualOrder, 0, 10000, 0),
             updatedAt: serverTimestamp(),
           });
         } else {
@@ -674,3 +741,67 @@ export async function syncLocalParishBundleToFirestore(
     if (rec.parish.placeId) existingPlaceIds.add(rec.parish.placeId);
   }
 }
+
+const OFFLINE_CACHE_KEY_PREFIX = 'planer_koledy_offline_v3_';
+
+export interface OfflineParishSnapshot {
+  parishId: string;
+  parish: ParishCenter;
+  boundary: LatLng[];
+  config: PlanConfig;
+  seasonConfig: SeasonPlanConfig;
+  stops: VisitStop[];
+  savedAtMs: number;
+}
+
+export function saveOfflineParishSnapshot(
+  uid: string,
+  snapshot: OfflineParishSnapshot
+): void {
+  try {
+    window.localStorage.setItem(
+      `${OFFLINE_CACHE_KEY_PREFIX}${sanitizeDocId(uid)}`,
+      JSON.stringify(snapshot)
+    );
+  } catch {
+    // Ignore storage quota / private mode issues
+  }
+}
+
+export function loadOfflineParishSnapshot(
+  uid: string
+): OfflineParishSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(
+      `${OFFLINE_CACHE_KEY_PREFIX}${sanitizeDocId(uid)}`
+    );
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as OfflineParishSnapshot;
+    if (!parsed || !parsed.parish || !Array.isArray(parsed.stops)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearOfflineParishSnapshot(uid?: string): void {
+  try {
+    if (uid) {
+      window.localStorage.removeItem(
+        `${OFFLINE_CACHE_KEY_PREFIX}${sanitizeDocId(uid)}`
+      );
+      return;
+    }
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(OFFLINE_CACHE_KEY_PREFIX)) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+  } catch {
+    // Ignore storage issues
+  }
+}
+

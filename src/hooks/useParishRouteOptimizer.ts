@@ -22,12 +22,14 @@ export function useParishRouteOptimizer() {
   const [routes, setRoutes] = useState<PriestRouteResult[]>([]);
   const [routeObjects, setRouteObjects] = useState<RoutePolylineEntry[]>([]);
   const [isComputing, setIsComputing] = useState(false);
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const clearRoutes = useCallback(() => {
     setRoutes([]);
     setRouteObjects([]);
     setError(null);
+    setProgressLabel(null);
   }, []);
 
   const computeAllRoutes = useCallback(
@@ -43,6 +45,7 @@ export function useParishRouteOptimizer() {
       }
 
       setIsComputing(true);
+      setProgressLabel('Przygotowywanie optymalizacji tras Google Maps...');
       setError(null);
 
       const nextRoutes: PriestRouteResult[] = [];
@@ -63,7 +66,8 @@ export function useParishRouteOptimizer() {
         ? MAX_ROUTES_API_INTERMEDIATES
         : MAX_ROUTES_API_INTERMEDIATES + 1;
 
-      for (const priestId of targetPriestIds) {
+      for (let pIdx = 0; pIdx < targetPriestIds.length; pIdx++) {
+        const priestId = targetPriestIds[pIdx];
         const priestProfile =
           PRIEST_PALETTE.find((p) => p.id === priestId) ?? PRIEST_PALETTE[0];
         const allPriestStops = normalizedStops.filter(
@@ -71,6 +75,21 @@ export function useParishRouteOptimizer() {
         );
 
         if (allPriestStops.length === 0) continue;
+
+        const hasManualOrder = allPriestStops.some(
+          (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
+        );
+        const orderedManualStops = hasManualOrder
+          ? [...allPriestStops].sort(
+              (a, b) =>
+                (a.manualOrder ?? Number.MAX_SAFE_INTEGER) -
+                (b.manualOrder ?? Number.MAX_SAFE_INTEGER)
+            )
+          : allPriestStops;
+
+        setProgressLabel(
+          `Liczenie trasy księdza ${pIdx + 1}/${targetPriestIds.length} (${allPriestStops.length} adresów)...`
+        );
 
         try {
           let orderedVisitSequence: VisitStop[] = [];
@@ -90,15 +109,19 @@ export function useParishRouteOptimizer() {
 
             if (config.returnToParish) {
               destination = parish.location;
-              intermediateStops = allPriestStops;
-            } else if (allPriestStops.length === 1) {
-              destination = allPriestStops[0].location;
-              fixedTailStop = allPriestStops[0];
+              intermediateStops = orderedManualStops;
+            } else if (orderedManualStops.length === 1) {
+              destination = orderedManualStops[0].location;
+              fixedTailStop = orderedManualStops[0];
               intermediateStops = [];
+            } else if (hasManualOrder) {
+              fixedTailStop = orderedManualStops[orderedManualStops.length - 1];
+              destination = fixedTailStop.location;
+              intermediateStops = orderedManualStops.slice(0, -1);
             } else {
               let farthestIdx = 0;
               let maxDistSq = -1;
-              allPriestStops.forEach((st, idx) => {
+              orderedManualStops.forEach((st, idx) => {
                 const d =
                   (st.location.lat - parish.location.lat) ** 2 +
                   (st.location.lng - parish.location.lng) ** 2;
@@ -107,14 +130,15 @@ export function useParishRouteOptimizer() {
                   farthestIdx = idx;
                 }
               });
-              fixedTailStop = allPriestStops[farthestIdx];
+              fixedTailStop = orderedManualStops[farthestIdx];
               destination = fixedTailStop.location;
-              intermediateStops = allPriestStops.filter(
+              intermediateStops = orderedManualStops.filter(
                 (_, idx) => idx !== farthestIdx
               );
             }
 
-            const shouldOptimize = intermediateStops.length >= 2;
+            const shouldOptimize =
+              !hasManualOrder && intermediateStops.length >= 2;
             const fields = [
               'path',
               'distanceMeters',
@@ -197,13 +221,15 @@ export function useParishRouteOptimizer() {
               routeObj: primaryRoute,
             });
           } else {
-            // Unlimited stops: optimize full visit sequence locally via TSP + 2-opt,
+            // Unlimited stops: keep manual order if set, or optimize via TSP + 2-opt,
             // then request overlapping chunks of <= 25 intermediate points from Routes API.
-            orderedVisitSequence = orderStopsTsp(
-              parish.location,
-              allPriestStops,
-              config.returnToParish
-            );
+            orderedVisitSequence = hasManualOrder
+              ? orderedManualStops
+              : orderStopsTsp(
+                  parish.location,
+                  allPriestStops,
+                  config.returnToParish
+                );
 
             const fullWaypoints: LatLng[] = [
               parish.location,
@@ -213,9 +239,17 @@ export function useParishRouteOptimizer() {
 
             // Each segment has 1 origin + up to 25 intermediates + 1 destination = up to 27 points
             const maxChunkPoints = MAX_ROUTES_API_INTERMEDIATES + 2;
+            const totalChunks = Math.ceil(
+              (fullWaypoints.length - 1) / (maxChunkPoints - 1)
+            );
             let startIdx = 0;
+            let chunkIndex = 0;
 
             while (startIdx < fullWaypoints.length - 1) {
+              chunkIndex += 1;
+              setProgressLabel(
+                `Liczenie trasy księdza ${pIdx + 1}/${targetPriestIds.length} · odcinek ${chunkIndex}/${totalChunks}...`
+              );
               const endIdx = Math.min(
                 fullWaypoints.length,
                 startIdx + maxChunkPoints
@@ -359,6 +393,7 @@ export function useParishRouteOptimizer() {
       setRoutes(nextRoutes);
       setRouteObjects(nextRouteObjects);
       setIsComputing(false);
+      setProgressLabel(null);
       return {
         routes: nextRoutes,
         routeObjects: nextRouteObjects,
@@ -371,6 +406,7 @@ export function useParishRouteOptimizer() {
     routes,
     routeObjects,
     isComputing,
+    progressLabel,
     error,
     computeAllRoutes,
     clearRoutes,

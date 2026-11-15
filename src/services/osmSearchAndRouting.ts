@@ -765,7 +765,8 @@ const MAX_OSRM_CHUNK_WAYPOINTS = 50;
 
 async function fetchOsrmGeometryChunked(
   waypoints: LatLng[],
-  travelMode: PlanConfig['travelMode']
+  travelMode: PlanConfig['travelMode'],
+  onChunkProgress?: (chunkIdx: number, totalChunks: number) => void
 ): Promise<{
   path: LatLng[];
   totalDistanceMeters: number;
@@ -773,9 +774,13 @@ async function fetchOsrmGeometryChunked(
   legs: Array<{ distanceMeters: number; durationMillis: number }>;
 }> {
   if (waypoints.length <= MAX_OSRM_CHUNK_WAYPOINTS) {
+    onChunkProgress?.(1, 1);
     return fetchOsrmGeometry(waypoints, travelMode);
   }
 
+  const totalChunks = Math.ceil(
+    (waypoints.length - 1) / (MAX_OSRM_CHUNK_WAYPOINTS - 1)
+  );
   const combinedPath: LatLng[] = [];
   const combinedLegs: Array<{ distanceMeters: number; durationMillis: number }> =
     [];
@@ -783,7 +788,10 @@ async function fetchOsrmGeometryChunked(
   let totalDurationMillis = 0;
 
   let startIdx = 0;
+  let chunkIndex = 0;
   while (startIdx < waypoints.length - 1) {
+    chunkIndex += 1;
+    onChunkProgress?.(chunkIndex, totalChunks);
     const endIdx = Math.min(
       waypoints.length,
       startIdx + MAX_OSRM_CHUNK_WAYPOINTS
@@ -817,7 +825,8 @@ async function fetchOsrmGeometryChunked(
 export async function computeOsmParishRoutes(
   parish: ParishCenter,
   stops: VisitStop[],
-  config: PlanConfig
+  config: PlanConfig,
+  onProgress?: (label: string) => void
 ): Promise<PriestRouteResult[]> {
   if (stops.length === 0) return [];
 
@@ -831,17 +840,24 @@ export async function computeOsmParishRoutes(
 
   const results: PriestRouteResult[] = [];
 
-  for (const priestId of activePriestIds) {
+  for (let pIdx = 0; pIdx < activePriestIds.length; pIdx++) {
+    const priestId = activePriestIds[pIdx];
     const priestProfile =
       PRIEST_PALETTE.find((p) => p.id === priestId) ?? PRIEST_PALETTE[0];
     const priestStops = normalizedStops.filter((s) => s.priestId === priestId);
     if (priestStops.length === 0) continue;
 
-    const orderedStops = orderStopsTsp(
-      parish.location,
-      priestStops,
-      config.returnToParish
+    const hasManualOrder = priestStops.some(
+      (s) => typeof s.manualOrder === 'number' && !Number.isNaN(s.manualOrder)
     );
+
+    const orderedStops = hasManualOrder
+      ? [...priestStops].sort(
+          (a, b) =>
+            (a.manualOrder ?? Number.MAX_SAFE_INTEGER) -
+            (b.manualOrder ?? Number.MAX_SAFE_INTEGER)
+        )
+      : orderStopsTsp(parish.location, priestStops, config.returnToParish);
 
     const waypoints: LatLng[] = [
       parish.location,
@@ -849,7 +865,17 @@ export async function computeOsmParishRoutes(
       ...(config.returnToParish ? [parish.location] : []),
     ];
 
-    const osrm = await fetchOsrmGeometryChunked(waypoints, config.travelMode);
+    const osrm = await fetchOsrmGeometryChunked(
+      waypoints,
+      config.travelMode,
+      (chunkIdx, totalChunks) => {
+        onProgress?.(
+          totalChunks > 1
+            ? `Liczenie trasy księdza ${pIdx + 1}/${activePriestIds.length} · odcinek ${chunkIdx}/${totalChunks}...`
+            : `Liczenie trasy księdza ${pIdx + 1}/${activePriestIds.length} (${priestStops.length} adresów)...`
+        );
+      }
+    );
 
     let elapsedMinutes = 0;
     let totalVisitMinutes = 0;

@@ -6,11 +6,13 @@ import {
   Check,
   CheckCircle2,
   Loader2,
+  LocateFixed,
   MapPinPlus,
   Route,
   Undo2,
   X,
 } from 'lucide-react';
+import { useUserGpsLocation } from '../hooks/useUserGpsLocation';
 import {
   LatLng,
   MapInteractionMode,
@@ -95,10 +97,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const draftLayerRef = useRef<L.LayerGroup | null>(null);
   const stopsLayerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
+  const gpsLayerRef = useRef<L.LayerGroup | null>(null);
   const markersByStopIdRef = useRef<Record<string, L.Marker>>({});
   const lastParishKeyRef = useRef<string>('');
   const lastFittedKeyRef = useRef<string>('');
+  const hasCenteredGpsRef = useRef<boolean>(false);
 
+  const gps = useUserGpsLocation();
   const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
   const draftPointsRef = useRef<LatLng[]>([]);
@@ -167,6 +172,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     draftLayerRef.current = L.layerGroup().addTo(map);
     stopsLayerRef.current = L.layerGroup().addTo(map);
     parishLayerRef.current = L.layerGroup().addTo(map);
+    gpsLayerRef.current = L.layerGroup().addTo(map);
 
     map.on('click', (ev: L.LeafletMouseEvent) => {
       const coords: LatLng = { lat: ev.latlng.lat, lng: ev.latlng.lng };
@@ -618,9 +624,102 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     }
   }, [routes, isExactRoute, focusedPriestId, showRouteLines]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = gpsLayerRef.current;
+    if (!map || !layer) return;
+
+    layer.clearLayers();
+
+    if (!gps.active || !gps.position) {
+      if (!gps.active) hasCenteredGpsRef.current = false;
+      return;
+    }
+
+    if (gps.accuracyMeters && gps.accuracyMeters > 0) {
+      L.circle([gps.position.lat, gps.position.lng], {
+        radius: Math.min(gps.accuracyMeters, 250),
+        color: '#2563EB',
+        weight: 1,
+        opacity: 0.45,
+        fillColor: '#3B82F6',
+        fillOpacity: 0.14,
+        interactive: false,
+      }).addTo(layer);
+    }
+
+    const gpsIcon = L.divIcon({
+      className: '',
+      html: `<div style="width:16px;height:16px;border-radius:9999px;background:#2563EB;border:3px solid #FFFFFF;box-shadow:0 2px 8px rgba(37,99,235,0.55);"></div>`,
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+    });
+
+    L.marker([gps.position.lat, gps.position.lng], {
+      icon: gpsIcon,
+      zIndexOffset: 950,
+      interactive: false,
+    }).addTo(layer);
+
+    if (!hasCenteredGpsRef.current) {
+      hasCenteredGpsRef.current = true;
+      map.setView(
+        [gps.position.lat, gps.position.lng],
+        Math.max(map.getZoom(), 16)
+      );
+    }
+  }, [gps.active, gps.position, gps.accuracyMeters]);
+
   return (
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">
       <div ref={containerRef} className="w-full h-full z-0" />
+
+      {/* Live GPS Tracker Control */}
+      <div className="no-print absolute top-3 right-3 z-[460] flex flex-col items-end gap-1.5">
+        <div className="flex items-center gap-1.5">
+          {gps.active && gps.position && (
+            <button
+              type="button"
+              onClick={() => {
+                if (mapRef.current && gps.position) {
+                  mapRef.current.setView(
+                    [gps.position.lat, gps.position.lng],
+                    Math.max(mapRef.current.getZoom(), 17)
+                  );
+                }
+              }}
+              title="Wyśrodkuj mapę na mojej pozycji"
+              className="min-h-[36px] px-2.5 py-1.5 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-800 hover:bg-slate-50 transition-colors"
+            >
+              Wyśrodkuj
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={gps.toggle}
+            aria-pressed={gps.active}
+            title={
+              gps.active
+                ? 'Wyłącz pokazywanie mojej pozycji GPS'
+                : 'Pokaż moją pozycję GPS na mapie'
+            }
+            className={`min-h-[36px] px-3 py-1.5 rounded-xl shadow-md border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+              gps.active
+                ? 'bg-blue-600 border-blue-700 text-white hover:bg-blue-700'
+                : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800 hover:bg-slate-50'
+            }`}
+          >
+            <LocateFixed className="w-3.5 h-3.5" />
+            <span>{gps.active ? 'GPS włączony' : 'Moja pozycja'}</span>
+          </button>
+        </div>
+
+        {gps.error && (
+          <div className="max-w-[230px] px-2.5 py-1.5 bg-red-50/95 border border-red-200 rounded-lg shadow text-[11px] font-medium text-red-800">
+            {gps.error}
+          </div>
+        )}
+      </div>
 
       {parish && interactionMode !== 'pan' && (
         <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[500] w-max max-w-[calc(100%-24px)]">

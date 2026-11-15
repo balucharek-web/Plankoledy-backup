@@ -153,6 +153,16 @@
           "type": "array",
           "description": "Bounded list (max 200) of apartment unit breakdown objects inside the block."
         },
+        "visitStatus": {
+          "type": "string",
+          "description": "Field visit status for a single house: pending, accepted, absent, declined, or invited.",
+          "minLength": 0,
+          "maxLength": 20
+        },
+        "manualOrder": {
+          "type": "number",
+          "description": "Optional manual ordering index within the day/priest route (0 to 10000)."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

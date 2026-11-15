@@ -3,6 +3,7 @@ import {
   MarkerLabelMode,
   ParishCenter,
   PriestRouteResult,
+  RouteStageLink,
   ScheduledStopItem,
   TravelModeOption,
   VisitStop,
@@ -206,6 +207,82 @@ export function buildGoogleMapsDirectionsUrl(
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
+/**
+ * Splits any route of arbitrary length (e.g. 40–100+ stops) into sequential Google Maps
+ * navigation legs respecting the mobile app cap of 9 intermediate waypoints + destination.
+ */
+export function buildGoogleMapsStageUrls(
+  parish: ParishCenter,
+  orderedStops: VisitStop[],
+  returnToParish: boolean,
+  travelMode: TravelModeOption
+): RouteStageLink[] {
+  if (orderedStops.length === 0) return [];
+
+  const modeParam = travelMode === 'WALKING' ? 'walking' : 'driving';
+  const maxStopsPerStage = 10; // up to 9 intermediates + 1 destination per mobile leg
+  const stages: RouteStageLink[] = [];
+
+  let cursorOrigin: LatLng = parish.location;
+  let offset = 0;
+
+  while (offset < orderedStops.length) {
+    const remaining = orderedStops.length - offset;
+    const isFinalChunk = remaining <= maxStopsPerStage;
+    const takeCount = isFinalChunk ? remaining : maxStopsPerStage;
+    const slice = orderedStops.slice(offset, offset + takeCount);
+
+    const includesReturnHere = isFinalChunk && returnToParish && slice.length <= 9;
+    const destLoc = includesReturnHere
+      ? parish.location
+      : slice[slice.length - 1].location;
+    const waypointsList = includesReturnHere ? slice : slice.slice(0, -1);
+
+    const params = new URLSearchParams({
+      api: '1',
+      origin: `${cursorOrigin.lat},${cursorOrigin.lng}`,
+      destination: `${destLoc.lat},${destLoc.lng}`,
+      travelmode: modeParam,
+    });
+    if (waypointsList.length > 0) {
+      params.set(
+        'waypoints',
+        waypointsList
+          .map((s) => `${s.location.lat},${s.location.lng}`)
+          .join('|')
+      );
+    }
+
+    stages.push({
+      stageIndex: stages.length + 1,
+      startStopNumber: offset + 1,
+      endStopNumber: offset + slice.length,
+      url: `https://www.google.com/maps/dir/?${params.toString()}`,
+    });
+
+    cursorOrigin = slice[slice.length - 1].location;
+    offset += takeCount;
+
+    if (isFinalChunk && returnToParish && !includesReturnHere) {
+      const returnParams = new URLSearchParams({
+        api: '1',
+        origin: `${cursorOrigin.lat},${cursorOrigin.lng}`,
+        destination: `${parish.location.lat},${parish.location.lng}`,
+        travelmode: modeParam,
+      });
+      stages.push({
+        stageIndex: stages.length + 1,
+        startStopNumber: orderedStops.length,
+        endStopNumber: orderedStops.length,
+        isReturnLeg: true,
+        url: `https://www.google.com/maps/dir/?${returnParams.toString()}`,
+      });
+    }
+  }
+
+  return stages;
+}
+
 export function exportScheduleToCsv(
   parish: ParishCenter | null,
   routes: PriestRouteResult[]
@@ -309,6 +386,35 @@ export function isEvenHouseNumberStr(houseNumber: string): boolean | null {
   if (!match) return null;
   const num = Number.parseInt(match[0], 10);
   return num % 2 === 0;
+}
+
+export function extractHouseNumberSortKey(houseNumber: string): number {
+  const match = houseNumber.match(/^\d+/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  return Number.parseInt(match[0], 10);
+}
+
+/**
+ * Formats a concise human-readable range of house numbers for parish bulletin announcements,
+ * e.g. "1–45" or "2, 4, 6" when sparse.
+ */
+export function formatStreetHouseRange(
+  stops: Array<Pick<VisitStop, 'address' | 'label'>>
+): string {
+  const numbers = stops
+    .map((s) => extractHouseNumberLabel(s))
+    .filter(Boolean);
+  if (numbers.length === 0) return '';
+
+  const unique = Array.from(new Set(numbers)).sort(
+    (a, b) =>
+      extractHouseNumberSortKey(a) - extractHouseNumberSortKey(b) ||
+      a.localeCompare(b, 'pl', { numeric: true })
+  );
+
+  if (unique.length === 1) return `nr ${unique[0]}`;
+  if (unique.length <= 4) return `nr ${unique.join(', ')}`;
+  return `nr ${unique[0]}–${unique[unique.length - 1]}`;
 }
 
 export interface RouteStopMeta {

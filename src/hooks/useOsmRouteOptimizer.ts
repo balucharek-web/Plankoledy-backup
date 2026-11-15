@@ -7,11 +7,13 @@ export function useOsmRouteOptimizer() {
   const [routes, setRoutes] = useState<PriestRouteResult[]>([]);
   const [routeObjects] = useState<RoutePolylineEntry[]>([]);
   const [isComputing, setIsComputing] = useState(false);
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const clearRoutes = useCallback(() => {
     setRoutes([]);
     setError(null);
+    setProgressLabel(null);
   }, []);
 
   const computeAllRoutes = useCallback(
@@ -22,9 +24,15 @@ export function useOsmRouteOptimizer() {
       }
 
       setIsComputing(true);
+      setProgressLabel('Przygotowywanie optymalizacji trasy...');
       setError(null);
       try {
-        const nextRoutes = await computeOsmParishRoutes(parish, stops, config);
+        const nextRoutes = await computeOsmParishRoutes(
+          parish,
+          stops,
+          config,
+          (label) => setProgressLabel(label)
+        );
         setRoutes(nextRoutes);
         return {
           routes: nextRoutes,
@@ -39,6 +47,7 @@ export function useOsmRouteOptimizer() {
         return undefined;
       } finally {
         setIsComputing(false);
+        setProgressLabel(null);
       }
     },
     [clearRoutes]
@@ -48,6 +57,7 @@ export function useOsmRouteOptimizer() {
     routes,
     routeObjects,
     isComputing,
+    progressLabel,
     error,
     computeAllRoutes,
     clearRoutes,

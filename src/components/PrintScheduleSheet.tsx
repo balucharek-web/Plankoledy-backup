@@ -2,9 +2,12 @@ import React, { useMemo, useState } from 'react';
 import {
   Calendar,
   CalendarDays,
+  Check,
+  Copy,
   Download,
   ExternalLink,
   Map as MapIcon,
+  Megaphone,
   Printer,
   Route,
 } from 'lucide-react';
@@ -15,13 +18,15 @@ import {
   PriestRouteResult,
 } from '../types/parish';
 import {
+  buildAnnouncementDays,
   exportFullSeasonToCsv,
+  formatAnnouncementsPlainText,
   formatPolishDateChip,
   formatPolishDateFull,
   formatPolishWeekdayFull,
 } from '../utils/seasonScheduler';
 import {
-  buildGoogleMapsDirectionsUrl,
+  buildGoogleMapsStageUrls,
   exportScheduleToCsv,
   formatDistance,
   formatDurationMillis,
@@ -61,8 +66,14 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   onComputeDayRoute,
   onBackToMap,
 }) => {
-  const [viewMode, setViewMode] = useState<'season' | 'day'>(
+  const [viewMode, setViewMode] = useState<'season' | 'day' | 'announcements'>(
     plannedDays.length > 0 ? 'season' : 'day'
+  );
+  const [copiedAnnouncements, setCopiedAnnouncements] = useState(false);
+
+  const announcementDays = useMemo(
+    () => buildAnnouncementDays(plannedDays),
+    [plannedDays]
   );
 
   const seasonTotals = useMemo(() => {
@@ -79,6 +90,18 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
     const lastDate = plannedDays[plannedDays.length - 1]?.date ?? null;
     return { totalHouses, totalMeters, totalVisitMins, firstDate, lastDate };
   }, [plannedDays]);
+
+  const handleCopyAnnouncements = async () => {
+    const text = formatAnnouncementsPlainText(parish, plannedDays);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedAnnouncements(true);
+      window.setTimeout(() => setCopiedAnnouncements(false), 2600);
+    } catch {
+      // Fallback ignored if clipboard blocked
+    }
+  };
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6 md:p-8 space-y-6">
@@ -127,6 +150,27 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </button>
           )}
 
+          {viewMode === 'announcements' && plannedDays.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void handleCopyAnnouncements()}
+              className={`min-h-[40px] px-3.5 py-2 text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 border transition-colors ${
+                copiedAnnouncements
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+              }`}
+            >
+              {copiedAnnouncements ? (
+                <Check className="w-3.5 h-3.5" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {copiedAnnouncements ? 'Skopiowano!' : 'Kopiuj tekst ogłoszeń'}
+              </span>
+            </button>
+          )}
+
           {(plannedDays.length > 0 || routes.length > 0) && (
             <button
               type="button"
@@ -140,32 +184,44 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
         </div>
       </div>
 
-      {/* View Mode Switcher (Season vs Selected Day) */}
+      {/* View Mode Switcher (Season vs Selected Day vs Announcements) */}
       <div className="no-print flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-grid grid-cols-2 p-1 bg-slate-200/70 rounded-xl">
+        <div className="inline-grid grid-cols-3 p-1 bg-slate-200/70 rounded-xl">
           <button
             type="button"
             onClick={() => setViewMode('season')}
-            className={`min-h-[38px] px-3.5 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors ${
+            className={`min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors ${
               viewMode === 'season'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
             <CalendarDays className="w-3.5 h-3.5 text-amber-700" />
-            Cały okres ({plannedDays.length})
+            <span>Cały okres ({plannedDays.length})</span>
           </button>
           <button
             type="button"
             onClick={() => setViewMode('day')}
-            className={`min-h-[38px] px-3.5 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors ${
+            className={`min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors ${
               viewMode === 'day'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
             <Calendar className="w-3.5 h-3.5 text-slate-600" />
-            Wybrany dzień
+            <span>Wybrany dzień</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('announcements')}
+            className={`min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors ${
+              viewMode === 'announcements'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Megaphone className="w-3.5 h-3.5 text-amber-700" />
+            <span>Ogłoszenia</span>
           </button>
         </div>
 
@@ -404,6 +460,74 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </div>
           </div>
         )
+      ) : viewMode === 'announcements' ? (
+        /* PARISH BULLETIN ANNOUNCEMENTS VIEW (RODO-SAFE) */
+        announcementDays.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-2">
+            <p className="text-sm font-medium text-slate-800">
+              Brak rozpisanych dni kolędy do ogłoszeń
+            </p>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              Najpierw rozpisz okres kolędowy na dni, aby wygenerować gotowe
+              ogłoszenia duszpasterskie do gabloty i na stronę parafii.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-7 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                  Plan odwiedzin duszpasterskich — ogłoszenia parafialne
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  Zestawienie zgodne z RODO — zawiera wyłącznie daty, godziny
+                  rozpoczęcia, nazwy ulic oraz przedziały numerów budynków (bez
+                  nazwisk).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleCopyAnnouncements()}
+                className="no-print min-h-[38px] px-3.5 py-2 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl inline-flex items-center gap-1.5 shrink-0"
+              >
+                {copiedAnnouncements ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-700" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {copiedAnnouncements
+                    ? 'Skopiowano do schowka'
+                    : 'Kopiuj gotowy tekst'}
+                </span>
+              </button>
+            </div>
+
+            <div className="divide-y divide-slate-100">
+              {announcementDays.map((item) => (
+                <div key={item.date} className="py-3.5 space-y-1">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="text-sm font-bold text-slate-900">
+                      {item.fullDateLabel}
+                    </span>
+                    <span className="text-xs font-mono font-semibold text-amber-800 tabular-nums">
+                      od godz. {item.startTime}
+                    </span>
+                  </div>
+                  <p className="text-xs sm:text-sm text-slate-700 leading-relaxed">
+                    {item.streets
+                      .map((s) =>
+                        s.rangeLabel
+                          ? `${s.streetName} (${s.rangeLabel})`
+                          : s.streetName
+                      )
+                      .join('; ')}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
       ) : /* SELECTED DAY VIEW */
       routes.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
@@ -482,22 +606,36 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                   </p>
                 </div>
 
-                {parish && route.orderedStops.length > 0 && (
-                  <a
-                    href={buildGoogleMapsDirectionsUrl(
-                      parish,
-                      route.orderedStops.map((s) => s.stop),
-                      config.returnToParish,
-                      config.travelMode
-                    )}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="no-print px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1.5"
-                  >
-                    Otwórz w Google Maps
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                )}
+                {parish && route.orderedStops.length > 0 && (() => {
+                  const stages = buildGoogleMapsStageUrls(
+                    parish,
+                    route.orderedStops.map((s) => s.stop),
+                    config.returnToParish,
+                    config.travelMode
+                  );
+                  return (
+                    <div className="no-print flex flex-wrap items-center gap-1.5">
+                      {stages.map((st) => (
+                        <a
+                          key={st.stageIndex}
+                          href={st.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1"
+                        >
+                          <span>
+                            {stages.length === 1
+                              ? 'Otwórz w Google Maps'
+                              : st.isReturnLeg
+                                ? 'Powrót'
+                                : `Etap ${st.stageIndex} (${st.startStopNumber}–${st.endStopNumber})`}
+                          </span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="overflow-x-auto">
