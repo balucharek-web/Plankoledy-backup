@@ -152,6 +152,8 @@ export type MapInteractionMode =
   | 'pick_street'
   | 'add_stop';
 
+export type MarkerLabelMode = 'auto' | 'numbers' | 'dots';
+
 export interface StreetPickFeedback {
   status: 'loading' | 'success' | 'info' | 'error';
   message: string;

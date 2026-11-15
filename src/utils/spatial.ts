@@ -1,7 +1,9 @@
 import {
   LatLng,
+  MarkerLabelMode,
   ParishCenter,
   PriestRouteResult,
+  ScheduledStopItem,
   TravelModeOption,
   VisitStop,
 } from '../types/parish';
@@ -307,5 +309,239 @@ export function isEvenHouseNumberStr(houseNumber: string): boolean | null {
   if (!match) return null;
   const num = Number.parseInt(match[0], 10);
   return num % 2 === 0;
+}
+
+export interface RouteStopMeta {
+  orderNumber: number;
+  arrivalTime: string;
+  departureTime: string;
+  isFirstInRoute: boolean;
+  isLastInRoute: boolean;
+  isStreetEntry: boolean;
+  isOverviewMilestone: boolean;
+}
+
+export function buildRouteStopLookup(
+  routes: PriestRouteResult[]
+): Record<string, RouteStopMeta> {
+  const dict: Record<string, RouteStopMeta> = {};
+
+  for (const route of routes) {
+    const items: ScheduledStopItem[] = route.orderedStops;
+    const total = items.length;
+    if (total === 0) continue;
+
+    const milestoneStep = total > 60 ? 10 : total > 35 ? 5 : 4;
+    let prevStreet = '';
+
+    for (let i = 0; i < total; i++) {
+      const item = items[i];
+      const street = extractStreetName(item.stop);
+      const isStreetEntry = street !== prevStreet;
+      prevStreet = street;
+
+      const isFirstInRoute = i === 0;
+      const isLastInRoute = i === total - 1;
+      const isOverviewMilestone =
+        isFirstInRoute ||
+        isLastInRoute ||
+        item.orderIndex % milestoneStep === 0;
+
+      dict[item.stop.id] = {
+        orderNumber: item.orderIndex,
+        arrivalTime: item.arrivalTime,
+        departureTime: item.departureTime,
+        isFirstInRoute,
+        isLastInRoute,
+        isStreetEntry,
+        isOverviewMilestone,
+      };
+    }
+  }
+
+  return dict;
+}
+
+export interface StopMarkerAppearance {
+  size: number;
+  showLabel: boolean;
+  labelText: string;
+  fontSize: number;
+  opacity: number;
+  borderWidth: number;
+  borderColorOverride?: string;
+  fillColorOverride?: string;
+  zIndexPriority: number;
+}
+
+export function computeStopMarkerAppearance({
+  zoom,
+  activeVisibleCount,
+  markerLabelMode,
+  isActiveInView,
+  isDimmedByPriest,
+  isDimmedByStreet,
+  hasFocusedStreet,
+  isSelected,
+  isBlock,
+  routeMeta,
+}: {
+  zoom: number;
+  activeVisibleCount: number;
+  markerLabelMode: MarkerLabelMode;
+  isActiveInView: boolean;
+  isDimmedByPriest: boolean;
+  isDimmedByStreet: boolean;
+  hasFocusedStreet: boolean;
+  isSelected: boolean;
+  isBlock: boolean;
+  routeMeta?: RouteStopMeta;
+}): StopMarkerAppearance {
+  if (!isActiveInView || isDimmedByStreet) {
+    return {
+      size: isSelected ? 22 : 9,
+      showLabel: isSelected,
+      labelText: isSelected && routeMeta ? String(routeMeta.orderNumber) : '',
+      fontSize: 10,
+      opacity: isSelected ? 1 : isDimmedByStreet ? 0.24 : 0.26,
+      borderWidth: isSelected ? 2.5 : 1.5,
+      fillColorOverride: isDimmedByStreet ? '#94A3B8' : '#CBD5E1',
+      borderColorOverride: isSelected ? '#0F172A' : '#64748B',
+      zIndexPriority: isSelected ? 400 : 15,
+    };
+  }
+
+  const orderNumber = routeMeta?.orderNumber;
+  const opacity = isDimmedByPriest ? 0.28 : 1;
+
+  if (markerLabelMode === 'dots') {
+    const showKeyBadge =
+      isSelected ||
+      Boolean(routeMeta?.isFirstInRoute) ||
+      Boolean(routeMeta?.isLastInRoute);
+    const size = showKeyBadge ? (isSelected ? 24 : 20) : isBlock ? 15 : 12;
+    return {
+      size,
+      showLabel: showKeyBadge && Boolean(orderNumber),
+      labelText: showKeyBadge ? (orderNumber ? String(orderNumber) : isBlock ? 'B' : '') : '',
+      fontSize: 10,
+      opacity,
+      borderWidth: showKeyBadge ? 2 : 1.5,
+      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
+      zIndexPriority: isSelected ? 400 : showKeyBadge ? 250 : isBlock ? 140 : 80,
+    };
+  }
+
+  if (markerLabelMode === 'numbers') {
+    const size = isSelected ? 26 : orderNumber ? 24 : isBlock ? 22 : 19;
+    return {
+      size,
+      showLabel: Boolean(orderNumber) || isBlock,
+      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
+      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+      opacity,
+      borderWidth: 2,
+      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
+      zIndexPriority: isSelected
+        ? 400
+        : isDimmedByPriest
+          ? 40
+          : orderNumber
+            ? 240 - Math.min(140, orderNumber)
+            : 100,
+    };
+  }
+
+  // 'auto': Smart zoom & density adaptation
+  const sparseOrDetailedZoom =
+    hasFocusedStreet || activeVisibleCount <= 18 || zoom >= 17;
+
+  if (sparseOrDetailedZoom) {
+    const size = isSelected ? 26 : orderNumber ? 24 : isBlock ? 22 : 18;
+    return {
+      size,
+      showLabel: Boolean(orderNumber) || isBlock,
+      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
+      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+      opacity,
+      borderWidth: 2,
+      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
+      zIndexPriority: isSelected
+        ? 400
+        : isDimmedByPriest
+          ? 40
+          : orderNumber
+            ? 260 - Math.min(150, orderNumber)
+            : 110,
+    };
+  }
+
+  if (zoom >= 16) {
+    const showMediumAnchor =
+      isSelected ||
+      isBlock ||
+      Boolean(routeMeta?.isFirstInRoute) ||
+      Boolean(routeMeta?.isLastInRoute) ||
+      Boolean(routeMeta?.isStreetEntry) ||
+      Boolean(orderNumber && orderNumber % 4 === 0);
+
+    if (showMediumAnchor) {
+      return {
+        size: isSelected ? 25 : 22,
+        showLabel: Boolean(orderNumber) || isBlock,
+        labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
+        fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+        opacity,
+        borderWidth: 2,
+        borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
+        zIndexPriority: isSelected ? 400 : 280,
+      };
+    }
+
+    return {
+      size: 13,
+      showLabel: false,
+      labelText: '',
+      fontSize: 9,
+      opacity,
+      borderWidth: 1.5,
+      borderColorOverride: '#FFFFFF',
+      zIndexPriority: 100,
+    };
+  }
+
+  // Overview zoom (zoom <= 15) with dense stops (> 18): clean dots + key milestone badges
+  const showOverviewAnchor =
+    isSelected ||
+    isBlock ||
+    Boolean(routeMeta?.isOverviewMilestone);
+
+  if (showOverviewAnchor) {
+    return {
+      size: isSelected ? 25 : 21,
+      showLabel: Boolean(orderNumber) || isBlock,
+      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
+      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+      opacity,
+      borderWidth: 2,
+      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
+      zIndexPriority: isSelected
+        ? 400
+        : routeMeta?.isFirstInRoute || routeMeta?.isLastInRoute
+          ? 340
+          : 290,
+    };
+  }
+
+  return {
+    size: 11,
+    showLabel: false,
+    labelText: '',
+    fontSize: 9,
+    opacity: isDimmedByPriest ? 0.25 : 0.92,
+    borderWidth: 1.5,
+    borderColorOverride: '#FFFFFF',
+    zIndexPriority: isDimmedByPriest ? 35 : 95,
+  };
 }
 

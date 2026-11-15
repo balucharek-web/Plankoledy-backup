@@ -4,6 +4,7 @@ import { LatLng } from '../types/parish';
 
 interface UseParishPolygonDrawerOptions {
   isDrawing: boolean;
+  canEditBoundary?: boolean;
   savedBoundary: LatLng[];
   onComplete: (polygon: LatLng[]) => void;
   onUpdateBoundary: (polygon: LatLng[]) => void;
@@ -15,6 +16,7 @@ interface UseParishPolygonDrawerOptions {
  */
 export function useParishPolygonDrawer({
   isDrawing,
+  canEditBoundary = true,
   savedBoundary,
   onComplete,
   onUpdateBoundary,
@@ -93,11 +95,11 @@ export function useParishPolygonDrawer({
       const polygon = new google.maps.Polygon({
         paths: savedBoundary,
         strokeColor: '#B45309',
-        strokeOpacity: 0.9,
-        strokeWeight: 2.2,
+        strokeOpacity: canEditBoundary ? 0.85 : 0.42,
+        strokeWeight: canEditBoundary ? 2.2 : 1.5,
         fillColor: '#F59E0B',
-        fillOpacity: 0.12,
-        editable: true,
+        fillOpacity: canEditBoundary ? 0.11 : 0.03,
+        editable: canEditBoundary,
         draggable: false,
         clickable: false,
         map,
@@ -116,12 +118,14 @@ export function useParishPolygonDrawer({
         }
       };
 
-      const path = polygon.getPath();
-      listeners.push(
-        google.maps.event.addListener(path, 'set_at', syncPath),
-        google.maps.event.addListener(path, 'insert_at', syncPath),
-        google.maps.event.addListener(path, 'remove_at', syncPath)
-      );
+      if (canEditBoundary) {
+        const path = polygon.getPath();
+        listeners.push(
+          google.maps.event.addListener(path, 'set_at', syncPath),
+          google.maps.event.addListener(path, 'insert_at', syncPath),
+          google.maps.event.addListener(path, 'remove_at', syncPath)
+        );
+      }
 
       savedPolygonRef.current = polygon;
     }
@@ -133,7 +137,7 @@ export function useParishPolygonDrawer({
         savedPolygonRef.current = null;
       }
     };
-  }, [map, isDrawing, savedBoundary, onUpdateBoundary]);
+  }, [map, isDrawing, canEditBoundary, savedBoundary, onUpdateBoundary]);
 
   // Drawing interaction listeners
   useEffect(() => {

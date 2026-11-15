@@ -6,6 +6,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Church,
+  Eye,
+  EyeOff,
   HelpCircle,
   LayoutDashboard,
   ListOrdered,
@@ -63,6 +65,7 @@ import {
 import {
   LatLng,
   MapInteractionMode,
+  MarkerLabelMode,
   PRIEST_PALETTE,
   ParishCenter,
   PlanConfig,
@@ -80,6 +83,7 @@ import {
 } from './utils/seasonScheduler';
 import {
   createPresetBoundaryPolygon,
+  extractStreetName,
   isPointInsideBoundary,
   partitionStopsBySector,
   scaleBoundaryFromCenter,
@@ -149,6 +153,10 @@ function ParishPlannerWorkspace({
 
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [focusedPriestId, setFocusedPriestId] = useState<number | null>(null);
+  const [markerLabelMode, setMarkerLabelMode] =
+    useState<MarkerLabelMode>('auto');
+  const [showRouteLines, setShowRouteLines] = useState<boolean>(true);
+  const [focusedStreet, setFocusedStreet] = useState<string | null>(null);
   const [exactRoutesCache, setExactRoutesCache] = useState<
     Record<
       string,
@@ -1194,6 +1202,33 @@ function ParishPlannerWorkspace({
     [selectedDate, seasonConfig, config.startTime]
   );
 
+  const availableMapStreets = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const stop of stops) {
+      const isActive = selectedDate
+        ? (stop.visitDate ?? '').trim() === selectedDate
+        : stop.included !== false;
+      if (!isActive) continue;
+      if (focusedPriestId !== null && stop.priestId !== focusedPriestId) {
+        continue;
+      }
+      const street = extractStreetName(stop);
+      counts.set(street, (counts.get(street) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'pl'));
+  }, [stops, selectedDate, focusedPriestId]);
+
+  useEffect(() => {
+    if (
+      focusedStreet &&
+      !availableMapStreets.some((s) => s.name === focusedStreet)
+    ) {
+      setFocusedStreet(null);
+    }
+  }, [availableMapStreets, focusedStreet]);
+
   const handleComputeRoutesForDate = useCallback(
     async (explicitDate?: string | null) => {
       if (!parish) return;
@@ -1640,6 +1675,10 @@ function ParishPlannerWorkspace({
                   isExactRoute={isExactRoute}
                   selectedDate={selectedDate}
                   focusedPriestId={focusedPriestId}
+                  canEditBoundary={activeSection === 'parish'}
+                  markerLabelMode={markerLabelMode}
+                  showRouteLines={showRouteLines}
+                  focusedStreet={focusedStreet}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -1664,6 +1703,10 @@ function ParishPlannerWorkspace({
                   isExactRoute={isExactRoute}
                   selectedDate={selectedDate}
                   focusedPriestId={focusedPriestId}
+                  canEditBoundary={activeSection === 'parish'}
+                  markerLabelMode={markerLabelMode}
+                  showRouteLines={showRouteLines}
+                  focusedStreet={focusedStreet}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -1681,12 +1724,14 @@ function ParishPlannerWorkspace({
                 />
               )}
 
-              {/* Floating Map Route & Day Preview HUD (bottom-right on desktop, bottom bar on mobile) */}
+              {/* Compact Map Readability & Day HUD */}
               {interactionMode === 'pan' &&
-                (plannedDays.length > 0 || displayedRoutes.length > 0) && (
-                  <div className="no-print absolute bottom-3 inset-x-3 sm:inset-x-auto sm:right-4 sm:bottom-4 z-[460] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 max-w-full sm:max-w-[460px]">
+                (plannedDays.length > 0 ||
+                  displayedRoutes.length > 0 ||
+                  activeStopsCount > 0) && (
+                  <div className="no-print absolute bottom-6 right-3 sm:right-4 sm:bottom-5 z-[460] w-fit max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg p-1.5 flex flex-wrap items-center justify-end gap-1.5">
                     {plannedDays.length > 0 && (
-                      <div className="flex items-center gap-1 min-w-0">
+                      <div className="flex items-center gap-0.5 min-w-0">
                         <button
                           type="button"
                           onClick={() => {
@@ -1711,7 +1756,7 @@ function ParishPlannerWorkspace({
                             setFocusedPriestId(null);
                           }}
                           aria-label="Wybierz dzień na mapie"
-                          className="min-h-[32px] px-2 py-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg text-slate-900 tabular-nums focus:outline-none focus:border-amber-600 max-w-[180px]"
+                          className="min-h-[32px] px-2 py-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg text-slate-900 tabular-nums focus:outline-none focus:border-amber-600 max-w-[165px]"
                         >
                           {plannedDays.map((d) => (
                             <option key={d.date} value={d.date}>
@@ -1748,7 +1793,7 @@ function ParishPlannerWorkspace({
                         <button
                           type="button"
                           onClick={() => setFocusedPriestId(null)}
-                          className={`min-h-[30px] px-2 py-1 text-[11px] font-medium rounded-lg transition-colors ${
+                          className={`min-h-[32px] px-2 py-1 text-[11px] font-medium rounded-lg transition-colors ${
                             focusedPriestId === null
                               ? 'bg-slate-900 text-white'
                               : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -1767,7 +1812,7 @@ function ParishPlannerWorkspace({
                                   : r.priestId
                               )
                             }
-                            className={`min-h-[30px] px-2 py-1 text-[11px] font-medium rounded-lg inline-flex items-center gap-1 transition-colors ${
+                            className={`min-h-[32px] px-2 py-1 text-[11px] font-medium rounded-lg inline-flex items-center gap-1 transition-colors ${
                               focusedPriestId === r.priestId
                                 ? 'bg-slate-900 text-white'
                                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -1783,19 +1828,98 @@ function ParishPlannerWorkspace({
                       </div>
                     )}
 
-                    <button
-                      type="button"
-                      onClick={() => navigateToSection('routes')}
-                      className="lg:hidden min-h-[32px] px-2.5 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1 ml-auto whitespace-nowrap"
-                    >
-                      <ListOrdered className="w-3.5 h-3.5" />
-                      Szczegóły
-                    </button>
+                    {availableMapStreets.length > 1 && (
+                      <select
+                        value={focusedStreet ?? ''}
+                        onChange={(e) =>
+                          setFocusedStreet(e.target.value || null)
+                        }
+                        aria-label="Filtruj ulicę na mapie"
+                        className={`min-h-[32px] px-2 py-1 text-[11px] font-medium border rounded-lg focus:outline-none max-w-[165px] ${
+                          focusedStreet
+                            ? 'bg-amber-50 border-amber-400 text-amber-950 font-semibold'
+                            : 'bg-slate-50 border-slate-200 text-slate-800'
+                        }`}
+                      >
+                        <option value="">
+                          Wszystkie ulice ({availableMapStreets.length})
+                        </option>
+                        {availableMapStreets.map((st) => (
+                          <option key={st.name} value={st.name}>
+                            {st.name} ({st.count})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    {activeStopsCount > 0 && (
+                      <div
+                        role="group"
+                        aria-label="Sposób wyświetlania punktów na mapie"
+                        className="inline-flex items-center rounded-lg bg-slate-100 p-0.5"
+                      >
+                        {(
+                          [
+                            { id: 'auto', label: 'Auto' },
+                            { id: 'numbers', label: 'Numery' },
+                            { id: 'dots', label: 'Kropki' },
+                          ] as const
+                        ).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setMarkerLabelMode(opt.id)}
+                            className={`min-h-[28px] px-2 py-0.5 text-[11px] font-semibold rounded-md transition-colors whitespace-nowrap ${
+                              markerLabelMode === opt.id
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {displayedRoutes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowRouteLines((v) => !v)}
+                        title={
+                          showRouteLines
+                            ? 'Ukryj linię trasy'
+                            : 'Pokaż linię trasy'
+                        }
+                        className={`min-h-[32px] px-2.5 py-1 text-[11px] font-semibold rounded-lg inline-flex items-center gap-1 transition-colors whitespace-nowrap ${
+                          showRouteLines
+                            ? 'bg-slate-900 text-white hover:bg-slate-800'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {showRouteLines ? (
+                          <Eye className="w-3.5 h-3.5" />
+                        ) : (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        )}
+                        <span>Trasa</span>
+                      </button>
+                    )}
+
+                    {displayedRoutes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => navigateToSection('routes')}
+                        className="lg:hidden min-h-[32px] px-2.5 py-1 text-[11px] font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <ListOrdered className="w-3.5 h-3.5" />
+                        Szczegóły
+                      </button>
+                    )}
                   </div>
                 )}
 
-              {activeStopsCount > 0 && (
-                <div className="no-print absolute top-3 right-3 sm:top-auto sm:right-auto sm:bottom-4 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
+              {activeStopsCount > 0 && config.priestCount > 1 && (
+                <div className="no-print absolute top-14 left-3 sm:top-auto sm:bottom-5 sm:left-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700 pointer-events-none">
                   {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                     <span key={p.id} className="inline-flex items-center gap-1.5">
                       <span

@@ -25,12 +25,20 @@ import { useParishPolygonDrawer } from '../hooks/useParishPolygonDrawer';
 import {
   LatLng,
   MapInteractionMode,
+  MarkerLabelMode,
   PRIEST_PALETTE,
   ParishCenter,
   PriestRouteResult,
   StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
+import {
+  RouteStopMeta,
+  StopMarkerAppearance,
+  buildRouteStopLookup,
+  computeStopMarkerAppearance,
+  extractStreetName,
+} from '../utils/spatial';
 
 export interface RoutePolylineEntry {
   priestId: number;
@@ -47,6 +55,10 @@ interface ParishMapProps {
   isExactRoute: boolean;
   selectedDate: string | null;
   focusedPriestId: number | null;
+  canEditBoundary?: boolean;
+  markerLabelMode?: MarkerLabelMode;
+  showRouteLines?: boolean;
+  focusedStreet?: string | null;
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
   streetPickFeedback: StreetPickFeedback | null;
@@ -65,11 +77,10 @@ const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
 
 interface StopMarkerProps {
   stop: VisitStop;
-  orderNumber?: number;
+  routeMeta?: RouteStopMeta;
   isActiveInView: boolean;
-  isDimmedByPriest: boolean;
+  appearance: StopMarkerAppearance;
   color: string;
-  borderColor: string;
   isSelected: boolean;
   onSelect: () => void;
   onClose: () => void;
@@ -79,11 +90,10 @@ interface StopMarkerProps {
 
 const StopMarker: React.FC<StopMarkerProps> = ({
   stop,
-  orderNumber,
+  routeMeta,
   isActiveInView,
-  isDimmedByPriest,
+  appearance,
   color,
-  borderColor,
   isSelected,
   onSelect,
   onClose,
@@ -93,8 +103,10 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   const [markerRef, marker] = useAdvancedMarkerRef();
   const isBlock = Boolean(stop.isMultiUnit || (stop.units && stop.units.length > 0));
   const unitsTotal = stop.units?.length || stop.unitsCount || 0;
-  const size = !isActiveInView ? 12 : orderNumber ? 28 : isBlock ? 25 : 22;
-  const opacity = !isActiveInView ? 0.32 : isDimmedByPriest ? 0.38 : 1;
+  const orderNumber = routeMeta?.orderNumber;
+  const bgColor = appearance.fillColorOverride ?? color;
+  const borderCol =
+    appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
 
   return (
     <>
@@ -102,35 +114,28 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         ref={markerRef}
         position={stop.location}
         title={stop.address || stop.label}
-        zIndex={
-          isSelected
-            ? 400
-            : !isActiveInView
-              ? 30
-              : isDimmedByPriest
-                ? 50
-                : orderNumber
-                  ? 200 - orderNumber
-                  : 100
-        }
+        zIndex={appearance.zIndexPriority}
         onClick={onSelect}
       >
         <div
-          className={`flex items-center justify-center text-xs font-mono font-semibold shadow-md transition-transform hover:scale-110 cursor-pointer select-none ${
+          className={`flex items-center justify-center font-mono font-bold transition-transform hover:scale-110 cursor-pointer select-none ${
             isBlock ? 'rounded-md' : 'rounded-full'
           }`}
           style={{
-            width: size,
-            height: size,
-            backgroundColor: isActiveInView ? color : '#CBD5E1',
-            border: `2.5px solid ${
-              isSelected ? '#0F172A' : isActiveInView ? borderColor : '#64748B'
-            }`,
+            width: appearance.size,
+            height: appearance.size,
+            fontSize: appearance.fontSize,
+            lineHeight: 1,
+            backgroundColor: bgColor,
+            border: `${appearance.borderWidth}px solid ${borderCol}`,
+            boxShadow: appearance.showLabel
+              ? '0 2px 6px rgba(15,23,42,0.28)'
+              : '0 1px 3px rgba(15,23,42,0.25)',
             color: '#FFFFFF',
-            opacity,
+            opacity: appearance.opacity,
           }}
         >
-          {isActiveInView ? (orderNumber ?? (isBlock ? 'B' : '')) : ''}
+          {appearance.showLabel ? appearance.labelText : ''}
         </div>
       </AdvancedMarker>
 
@@ -154,6 +159,11 @@ const StopMarker: React.FC<StopMarkerProps> = ({
               )}
               <span>{stop.address}</span>
             </div>
+            {routeMeta?.arrivalTime && (
+              <div className="text-xs text-slate-700 font-semibold mt-0.5 tabular-nums">
+                Godzina: ~{routeMeta.arrivalTime}–{routeMeta.departureTime}
+              </div>
+            )}
             {stop.visitDate && (
               <div className="text-xs text-amber-800 font-medium mt-0.5 tabular-nums">
                 Zaplanowano: {stop.visitDate}
@@ -265,9 +275,17 @@ const RoutePolylinesLayer: React.FC<{
   routes: PriestRouteResult[];
   isExactRoute: boolean;
   focusedPriestId: number | null;
-}> = ({ routeObjects, routes, isExactRoute, focusedPriestId }) => {
+  showRouteLines: boolean;
+}> = ({
+  routeObjects,
+  routes,
+  isExactRoute,
+  focusedPriestId,
+  showRouteLines,
+}) => {
   const map = useMap();
   const polylinesRef = useRef<google.maps.Polyline[]>([]);
+  const lastFittedKeyRef = useRef<string>('');
 
   useEffect(() => {
     if (!map) return;
@@ -275,9 +293,18 @@ const RoutePolylinesLayer: React.FC<{
     polylinesRef.current.forEach((p) => p.setMap(null));
     polylinesRef.current = [];
 
+    if (!showRouteLines) return;
+
     const created: google.maps.Polyline[] = [];
     const bounds = new google.maps.LatLngBounds();
     let hasBounds = false;
+
+    const routeSignature = `${isExactRoute ? 'exact' : 'est'}:${routes
+      .map(
+        (r) =>
+          `${r.priestId}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
+      )
+      .join(',')}:${focusedPriestId ?? 'all'}`;
 
     if (routeObjects.length > 0 && isExactRoute) {
       for (const entry of routeObjects) {
@@ -285,11 +312,27 @@ const RoutePolylinesLayer: React.FC<{
           focusedPriestId === null || focusedPriestId === entry.priestId;
         const nativePolylines = entry.routeObj.createPolylines();
         nativePolylines.forEach((pl) => {
+          // Strip Google's chunky dotted walking bead icons and render clean, slim navigation lines
           pl.setOptions({
             strokeColor: entry.color,
-            strokeWeight: isFocused ? 5.5 : 3,
-            strokeOpacity: isFocused ? 0.92 : 0.25,
-            zIndex: isFocused ? 90 + entry.priestId : 40 + entry.priestId,
+            strokeWeight: isFocused ? 3.5 : 2,
+            strokeOpacity: isFocused ? 0.78 : 0.2,
+            icons: isFocused
+              ? [
+                  {
+                    icon: {
+                      path: google.maps.SymbolPath.FORWARD_OPEN_ARROW,
+                      scale: 2,
+                      strokeColor: entry.color,
+                      strokeOpacity: 0.9,
+                      strokeWeight: 1.8,
+                    },
+                    offset: '90px',
+                    repeat: '160px',
+                  },
+                ]
+              : [],
+            zIndex: isFocused ? 70 + entry.priestId : 30 + entry.priestId,
           });
           pl.setMap(map);
           created.push(pl);
@@ -304,7 +347,6 @@ const RoutePolylinesLayer: React.FC<{
         });
       }
     } else if (routes.length > 0) {
-      // Dashed preview lines for estimated day schedules before road routing is fetched
       for (const route of routes) {
         if (route.encodedPathPoints.length < 2) continue;
         const isFocused =
@@ -317,14 +359,14 @@ const RoutePolylinesLayer: React.FC<{
             {
               icon: {
                 path: 'M 0,-1 0,1',
-                strokeOpacity: isFocused ? 0.8 : 0.22,
-                scale: isFocused ? 3.5 : 2.5,
+                strokeOpacity: isFocused ? 0.72 : 0.18,
+                scale: isFocused ? 2.6 : 1.8,
               },
               offset: '0',
-              repeat: '12px',
+              repeat: '11px',
             },
           ],
-          zIndex: isFocused ? 80 + route.priestId : 30 + route.priestId,
+          zIndex: isFocused ? 65 + route.priestId : 25 + route.priestId,
           map,
         });
         created.push(pl);
@@ -339,15 +381,16 @@ const RoutePolylinesLayer: React.FC<{
 
     polylinesRef.current = created;
 
-    if (hasBounds) {
-      map.fitBounds(bounds, { top: 64, right: 48, bottom: 72, left: 48 });
+    if (hasBounds && lastFittedKeyRef.current !== routeSignature) {
+      lastFittedKeyRef.current = routeSignature;
+      map.fitBounds(bounds, { top: 64, right: 48, bottom: 90, left: 48 });
     }
 
     return () => {
       polylinesRef.current.forEach((p) => p.setMap(null));
       polylinesRef.current = [];
     };
-  }, [map, routeObjects, routes, isExactRoute, focusedPriestId]);
+  }, [map, routeObjects, routes, isExactRoute, focusedPriestId, showRouteLines]);
 
   return null;
 };
@@ -355,7 +398,9 @@ const RoutePolylinesLayer: React.FC<{
 const MapControllerLayer: React.FC<{
   parish: ParishCenter | null;
   boundary: LatLng[];
+  canEditBoundary: boolean;
   interactionMode: MapInteractionMode;
+  onZoomChange: (zoom: number) => void;
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
   onCancelInteraction: () => void;
@@ -364,7 +409,9 @@ const MapControllerLayer: React.FC<{
 }> = ({
   parish,
   boundary,
+  canEditBoundary,
   interactionMode,
+  onZoomChange,
   onBoundaryComplete,
   onBoundaryUpdate,
   onCancelInteraction,
@@ -377,10 +424,24 @@ const MapControllerLayer: React.FC<{
   const { draftVertexCount, finishDraft, undoLastVertex, cancelDraft } =
     useParishPolygonDrawer({
       isDrawing: interactionMode === 'draw_boundary',
+      canEditBoundary,
       savedBoundary: boundary,
       onComplete: onBoundaryComplete,
       onUpdateBoundary: onBoundaryUpdate,
     });
+
+  useEffect(() => {
+    if (!map) return;
+    const syncZoom = () => {
+      const z = map.getZoom();
+      if (typeof z === 'number') {
+        onZoomChange(z);
+      }
+    };
+    syncZoom();
+    const listener = map.addListener('zoom_changed', syncZoom);
+    return () => google.maps.event.removeListener(listener);
+  }, [map, onZoomChange]);
 
   useEffect(() => {
     if (!map || !parish) return;
@@ -512,6 +573,10 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   isExactRoute,
   selectedDate,
   focusedPriestId,
+  canEditBoundary = true,
+  markerLabelMode = 'auto',
+  showRouteLines = true,
+  focusedStreet = null,
   interactionMode,
   highlightedStopId,
   streetPickFeedback,
@@ -525,15 +590,30 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   onDeleteStop,
   onOpenBlockUnits,
 }) => {
-  const orderByStopId = useMemo(() => {
-    const dict: Record<string, number> = {};
-    for (const route of routes) {
-      for (const item of route.orderedStops) {
-        dict[item.stop.id] = item.orderIndex;
+  const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
+
+  const routeMetaByStopId = useMemo(
+    () => buildRouteStopLookup(routes),
+    [routes]
+  );
+
+  const activeVisibleCount = useMemo(() => {
+    let count = 0;
+    for (const stop of stops) {
+      const isActive = selectedDate
+        ? (stop.visitDate ?? '').trim() === selectedDate
+        : stop.included !== false;
+      if (!isActive) continue;
+      if (focusedPriestId !== null && stop.priestId !== focusedPriestId) {
+        continue;
       }
+      if (focusedStreet && extractStreetName(stop) !== focusedStreet) {
+        continue;
+      }
+      count += 1;
     }
-    return dict;
-  }, [routes]);
+    return count;
+  }, [stops, selectedDate, focusedPriestId, focusedStreet]);
 
   return (
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">
@@ -556,7 +636,9 @@ export const ParishMap: React.FC<ParishMapProps> = ({
         <MapControllerLayer
           parish={parish}
           boundary={boundary}
+          canEditBoundary={canEditBoundary}
           interactionMode={interactionMode}
+          onZoomChange={setMapZoom}
           onBoundaryComplete={onBoundaryComplete}
           onBoundaryUpdate={onBoundaryUpdate}
           onCancelInteraction={onCancelInteraction}
@@ -569,6 +651,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           routes={routes}
           isExactRoute={isExactRoute}
           focusedPriestId={focusedPriestId}
+          showRouteLines={showRouteLines}
         />
 
         {parish && <ParishChurchMarker parish={parish} />}
@@ -582,16 +665,37 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             : stop.included !== false;
           const isDimmedByPriest =
             focusedPriestId !== null && stop.priestId !== focusedPriestId;
+          const isDimmedByStreet =
+            Boolean(focusedStreet) &&
+            extractStreetName(stop) !== focusedStreet;
+          const isBlock = Boolean(
+            stop.isMultiUnit || (stop.units && stop.units.length > 0)
+          );
+          const isSelected = highlightedStopId === stop.id;
+          const routeMeta = routeMetaByStopId[stop.id];
+
+          const appearance = computeStopMarkerAppearance({
+            zoom: mapZoom,
+            activeVisibleCount,
+            markerLabelMode,
+            isActiveInView,
+            isDimmedByPriest,
+            isDimmedByStreet,
+            hasFocusedStreet: Boolean(focusedStreet),
+            isSelected,
+            isBlock,
+            routeMeta,
+          });
+
           return (
             <StopMarker
               key={stop.id}
               stop={stop}
-              orderNumber={orderByStopId[stop.id]}
+              routeMeta={routeMeta}
               isActiveInView={isActiveInView}
-              isDimmedByPriest={isDimmedByPriest}
+              appearance={appearance}
               color={palette.color}
-              borderColor={palette.borderColor}
-              isSelected={highlightedStopId === stop.id}
+              isSelected={isSelected}
               onSelect={() => onSelectStop(stop.id)}
               onClose={() => onSelectStop(null)}
               onDelete={() => {

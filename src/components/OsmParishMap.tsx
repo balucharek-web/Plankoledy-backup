@@ -14,12 +14,18 @@ import {
 import {
   LatLng,
   MapInteractionMode,
+  MarkerLabelMode,
   PRIEST_PALETTE,
   ParishCenter,
   PriestRouteResult,
   StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
+import {
+  buildRouteStopLookup,
+  computeStopMarkerAppearance,
+  extractStreetName,
+} from '../utils/spatial';
 
 interface OsmParishMapProps {
   parish: ParishCenter | null;
@@ -29,6 +35,10 @@ interface OsmParishMapProps {
   isExactRoute: boolean;
   selectedDate: string | null;
   focusedPriestId: number | null;
+  canEditBoundary?: boolean;
+  markerLabelMode?: MarkerLabelMode;
+  showRouteLines?: boolean;
+  focusedStreet?: string | null;
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
   streetPickFeedback: StreetPickFeedback | null;
@@ -61,6 +71,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   isExactRoute,
   selectedDate,
   focusedPriestId,
+  canEditBoundary = true,
+  markerLabelMode = 'auto',
+  showRouteLines = true,
+  focusedStreet = null,
   interactionMode,
   highlightedStopId,
   streetPickFeedback,
@@ -83,7 +97,9 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
   const markersByStopIdRef = useRef<Record<string, L.Marker>>({});
   const lastParishKeyRef = useRef<string>('');
+  const lastFittedKeyRef = useRef<string>('');
 
+  const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
   const draftPointsRef = useRef<LatLng[]>([]);
 
@@ -106,15 +122,28 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const highlightedStopIdRef = useRef(highlightedStopId);
   highlightedStopIdRef.current = highlightedStopId;
 
-  const orderByStopId = useMemo(() => {
-    const dict: Record<string, number> = {};
-    for (const route of routes) {
-      for (const item of route.orderedStops) {
-        dict[item.stop.id] = item.orderIndex;
+  const routeMetaByStopId = useMemo(
+    () => buildRouteStopLookup(routes),
+    [routes]
+  );
+
+  const activeVisibleCount = useMemo(() => {
+    let count = 0;
+    for (const stop of stops) {
+      const isActive = selectedDate
+        ? (stop.visitDate ?? '').trim() === selectedDate
+        : stop.included !== false;
+      if (!isActive) continue;
+      if (focusedPriestId !== null && stop.priestId !== focusedPriestId) {
+        continue;
       }
+      if (focusedStreet && extractStreetName(stop) !== focusedStreet) {
+        continue;
+      }
+      count += 1;
     }
-    return dict;
-  }, [routes]);
+    return count;
+  }, [stops, selectedDate, focusedPriestId, focusedStreet]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -167,6 +196,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         setDraftPoints([]);
         onBoundaryCompleteRef.current(pts);
       }
+    });
+
+    map.on('zoomend', () => {
+      setMapZoom(map.getZoom());
     });
 
     mapRef.current = map;
@@ -251,12 +284,14 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     const latLngs = boundary.map((p) => [p.lat, p.lng] as [number, number]);
     const polygon = L.polygon(latLngs, {
       color: '#B45309',
-      weight: 2.5,
-      opacity: 0.9,
+      weight: canEditBoundary ? 2.2 : 1.5,
+      opacity: canEditBoundary ? 0.85 : 0.42,
       fillColor: '#F59E0B',
-      fillOpacity: 0.14,
+      fillOpacity: canEditBoundary ? 0.11 : 0.03,
       interactive: false,
     }).addTo(layer);
+
+    if (!canEditBoundary) return;
 
     boundary.forEach((pt, idx) => {
       const handleIcon = L.divIcon({
@@ -289,7 +324,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         onBoundaryUpdateRef.current(updated);
       });
     });
-  }, [boundary, interactionMode]);
+  }, [boundary, interactionMode, canEditBoundary]);
 
   useEffect(() => {
     const layer = draftLayerRef.current;
@@ -353,44 +388,54 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     stops.forEach((stop) => {
       const palette =
         PRIEST_PALETTE.find((p) => p.id === stop.priestId) ?? PRIEST_PALETTE[0];
-      const orderNum = orderByStopId[stop.id];
+      const routeMeta = routeMetaByStopId[stop.id];
+      const orderNum = routeMeta?.orderNumber;
       const isSelected = highlightedStopId === stop.id;
       const isActiveInView = selectedDate
         ? (stop.visitDate ?? '').trim() === selectedDate
         : stop.included !== false;
       const isDimmedByPriest =
         focusedPriestId !== null && stop.priestId !== focusedPriestId;
+      const isDimmedByStreet =
+        Boolean(focusedStreet) &&
+        extractStreetName(stop) !== focusedStreet;
       const isBlock = Boolean(
         stop.isMultiUnit || (stop.units && stop.units.length > 0)
       );
       const unitsTotal = stop.units?.length || stop.unitsCount || 0;
-      const size = !isActiveInView ? 12 : orderNum ? 28 : isBlock ? 25 : 22;
-      const opacity = !isActiveInView ? 0.32 : isDimmedByPriest ? 0.38 : 1;
+
+      const appearance = computeStopMarkerAppearance({
+        zoom: mapZoom,
+        activeVisibleCount,
+        markerLabelMode,
+        isActiveInView,
+        isDimmedByPriest,
+        isDimmedByStreet,
+        hasFocusedStreet: Boolean(focusedStreet),
+        isSelected,
+        isBlock,
+        routeMeta,
+      });
+
       const borderRadius = isBlock ? '6px' : '9999px';
-      const markerLabel = isActiveInView ? (orderNum ?? (isBlock ? 'B' : '')) : '';
+      const bgColor = appearance.fillColorOverride ?? palette.color;
+      const borderCol =
+        appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
 
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:${size}px;height:${size}px;border-radius:${borderRadius};background:${
-          isActiveInView ? palette.color : '#CBD5E1'
-        };border:2.5px solid ${
-          isSelected ? '#0F172A' : isActiveInView ? palette.borderColor : '#64748B'
-        };opacity:${opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${markerLabel}</div>`,
-        iconSize: [size, size],
-        iconAnchor: [size / 2, size / 2],
+        html: `<div style="width:${appearance.size}px;height:${appearance.size}px;border-radius:${borderRadius};background:${bgColor};border:${appearance.borderWidth}px solid ${borderCol};opacity:${appearance.opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:${appearance.fontSize}px;line-height:1;font-weight:700;box-shadow:${
+          appearance.showLabel
+            ? '0 2px 6px rgba(15,23,42,0.28)'
+            : '0 1px 3px rgba(15,23,42,0.24)'
+        };cursor:pointer;">${appearance.showLabel ? appearance.labelText : ''}</div>`,
+        iconSize: [appearance.size, appearance.size],
+        iconAnchor: [appearance.size / 2, appearance.size / 2],
       });
 
       const marker = L.marker([stop.location.lat, stop.location.lng], {
         icon,
-        zIndexOffset: isSelected
-          ? 400
-          : !isActiveInView
-            ? 30
-            : isDimmedByPriest
-              ? 50
-              : orderNum
-                ? 200 - orderNum
-                : 100,
+        zIndexOffset: appearance.zIndexPriority,
       }).addTo(layer);
 
       const unitsPreviewHtml =
@@ -434,6 +479,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
               }</span>`
             : ''
         }${escapeHtml(stop.address)}</div>
+        ${
+          routeMeta?.arrivalTime
+            ? `<div style="color:#334155;font-weight:600;margin-top:2px;">Godzina: ~${escapeHtml(
+                routeMeta.arrivalTime
+              )}–${escapeHtml(routeMeta.departureTime)}</div>`
+            : ''
+        }
         ${
           stop.visitDate
             ? `<div style="color:#92400E;font-weight:600;margin-top:2px;">Zaplanowano: ${escapeHtml(
@@ -494,7 +546,17 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
       markersByStopIdRef.current[stop.id] = marker;
     });
-  }, [stops, orderByStopId, highlightedStopId, selectedDate, focusedPriestId]);
+  }, [
+    stops,
+    routeMetaByStopId,
+    highlightedStopId,
+    selectedDate,
+    focusedPriestId,
+    focusedStreet,
+    markerLabelMode,
+    mapZoom,
+    activeVisibleCount,
+  ]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -512,8 +574,17 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     if (!map || !layer) return;
     layer.clearLayers();
 
+    if (!showRouteLines) return;
+
     const routesWithPath = routes.filter((r) => r.encodedPathPoints.length >= 2);
     if (routesWithPath.length === 0) return;
+
+    const routeSignature = `${isExactRoute ? 'exact' : 'est'}:${routesWithPath
+      .map(
+        (r) =>
+          `${r.priestId}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
+      )
+      .join(',')}:${focusedPriestId ?? 'all'}`;
 
     const bounds = L.latLngBounds([]);
     let hasBounds = false;
@@ -525,8 +596,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       );
       L.polyline(latLngs, {
         color: route.color,
-        weight: isFocused ? 5 : 3,
-        opacity: isFocused ? 0.9 : 0.25,
+        weight: isFocused ? 3.5 : 2,
+        opacity: isFocused ? 0.78 : 0.2,
         dashArray: isExactRoute ? undefined : '7, 8',
       }).addTo(layer);
       if (isFocused) {
@@ -537,10 +608,15 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       }
     });
 
-    if (hasBounds && bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [48, 72] });
+    if (
+      hasBounds &&
+      bounds.isValid() &&
+      lastFittedKeyRef.current !== routeSignature
+    ) {
+      lastFittedKeyRef.current = routeSignature;
+      map.fitBounds(bounds, { padding: [48, 84] });
     }
-  }, [routes, isExactRoute, focusedPriestId]);
+  }, [routes, isExactRoute, focusedPriestId, showRouteLines]);
 
   return (
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">

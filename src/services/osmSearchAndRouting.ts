@@ -8,7 +8,7 @@ import {
   ScheduledStopItem,
   VisitStop,
 } from '../types/parish';
-import { addMinutesToHHMM } from '../utils/spatial';
+import { addMinutesToHHMM, extractStreetName } from '../utils/spatial';
 import { fetchNearbyParishesOsm } from './overpassStreets';
 
 interface NominatimSearchItem {
@@ -535,7 +535,8 @@ function haversineMeters(a: LatLng, b: LatLng): number {
 }
 
 /**
- * Nearest-neighbor + 2-opt TSP ordering around parish center.
+ * Street-coherent nearest-neighbor + 2-opt TSP ordering around parish center.
+ * Strongly prefers visiting contiguous houses on the same street before crossing to another street.
  */
 export function orderStopsTsp(
   origin: LatLng,
@@ -544,9 +545,15 @@ export function orderStopsTsp(
 ): VisitStop[] {
   if (stops.length <= 1) return stops;
 
+  const streetOf = new Map<string, string>();
+  for (const s of stops) {
+    streetOf.set(s.id, extractStreetName(s));
+  }
+
   const remaining = [...stops];
   const ordered: VisitStop[] = [];
   let current = origin;
+  let currentStreet = '';
 
   // If open route, pick the farthest stop as fixed end anchor
   let fixedEnd: VisitStop | null = null;
@@ -564,32 +571,53 @@ export function orderStopsTsp(
   }
 
   while (remaining.length > 0) {
+    const hasNearbySameStreet =
+      currentStreet.length > 0 &&
+      remaining.some(
+        (s) =>
+          streetOf.get(s.id) === currentStreet &&
+          haversineMeters(current, s.location) < 420
+      );
+
     let bestIdx = 0;
-    let bestDist = Number.POSITIVE_INFINITY;
+    let bestScore = Number.POSITIVE_INFINITY;
     for (let i = 0; i < remaining.length; i++) {
-      const d = haversineMeters(current, remaining[i].location);
-      if (d < bestDist) {
-        bestDist = d;
+      const candidate = remaining[i];
+      const d = haversineMeters(current, candidate.location);
+      const candStreet = streetOf.get(candidate.id) ?? '';
+      let score = d;
+      if (hasNearbySameStreet) {
+        score = candStreet === currentStreet && d < 420 ? d * 0.35 : d + 260;
+      }
+      if (score < bestScore) {
+        bestScore = score;
         bestIdx = i;
       }
     }
     const picked = remaining.splice(bestIdx, 1)[0];
     ordered.push(picked);
     current = picked.location;
+    currentStreet = streetOf.get(picked.id) ?? '';
   }
 
-  // 2-opt local refinement on intermediate stops
+  // 2-opt local refinement with mild street-switch penalty so contiguous streets stay intact
   if (ordered.length >= 3) {
-    const calcPathLength = (seq: VisitStop[]) => {
+    const STREET_SWITCH_PENALTY = 75;
+    const calcPathScore = (seq: VisitStop[]) => {
       let sum = haversineMeters(origin, seq[0].location);
       for (let i = 0; i < seq.length - 1; i++) {
-        sum += haversineMeters(seq[i].location, seq[i + 1].location);
+        const d = haversineMeters(seq[i].location, seq[i + 1].location);
+        const sameStreet = streetOf.get(seq[i].id) === streetOf.get(seq[i + 1].id);
+        sum += d + (sameStreet ? 0 : STREET_SWITCH_PENALTY);
       }
       if (fixedEnd) {
-        sum += haversineMeters(
+        const d = haversineMeters(
           seq[seq.length - 1].location,
           fixedEnd.location
         );
+        const sameStreet =
+          streetOf.get(seq[seq.length - 1].id) === streetOf.get(fixedEnd.id);
+        sum += d + (sameStreet ? 0 : STREET_SWITCH_PENALTY);
       } else if (returnToParish) {
         sum += haversineMeters(seq[seq.length - 1].location, origin);
       }
@@ -601,7 +629,7 @@ export function orderStopsTsp(
     while (improved && guard < 40) {
       improved = false;
       guard += 1;
-      const bestLen = calcPathLength(ordered);
+      const bestLen = calcPathScore(ordered);
       for (let i = 0; i < ordered.length - 1; i++) {
         for (let j = i + 1; j < ordered.length; j++) {
           const candidate = [
@@ -609,7 +637,7 @@ export function orderStopsTsp(
             ...ordered.slice(i, j + 1).reverse(),
             ...ordered.slice(j + 1),
           ];
-          if (calcPathLength(candidate) + 1 < bestLen) {
+          if (calcPathScore(candidate) + 1 < bestLen) {
             ordered.splice(0, ordered.length, ...candidate);
             improved = true;
             break;
