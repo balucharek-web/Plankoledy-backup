@@ -39,16 +39,26 @@
 
 @page {
   size: A4 portrait;
-  margin: 10mm 11mm;
+  margin: 14mm 14mm 15mm 14mm;
 }
 
 @media print {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box !important;
+  }
+
   html,
   body,
   #root {
+    width: 100% !important;
+    max-width: 100% !important;
     height: auto !important;
     min-height: 0 !important;
     max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
     overflow: visible !important;
     background: #ffffff !important;
     color-adjust: exact;
@@ -67,9 +77,11 @@
     display: block !important;
     position: static !important;
     width: 100% !important;
+    max-width: 100% !important;
     height: auto !important;
     min-height: 0 !important;
     max-height: none !important;
+    margin: 0 !important;
     overflow: visible !important;
     background: #ffffff !important;
   }
@@ -81,6 +93,7 @@
     left: auto !important;
     top: auto !important;
     width: 100% !important;
+    max-width: 100% !important;
     visibility: visible !important;
     pointer-events: auto !important;
     z-index: auto !important;
@@ -88,9 +101,17 @@
 
   table {
     width: 100% !important;
+    max-width: 100% !important;
+    table-layout: fixed !important;
     border-collapse: collapse !important;
     break-inside: auto;
     page-break-inside: auto;
+  }
+
+  th,
+  td {
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   thead {

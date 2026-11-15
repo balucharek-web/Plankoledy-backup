@@ -19,6 +19,7 @@ import {
   Navigation,
   Printer,
   RefreshCw,
+  Trash2,
   UserX,
 } from 'lucide-react';
 import {
@@ -68,6 +69,8 @@ interface SidebarRoutesProps {
     direction: 'up' | 'down'
   ) => void;
   onSetRouteStartStop?: (priestId: number, stopId: string) => void;
+  onDeleteRoute?: () => void;
+  onGoToPlanner?: () => void;
 }
 
 const STATUS_BADGE: Record<
@@ -129,6 +132,8 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
   onUpdateStopStatus,
   onMoveStopOrder,
   onSetRouteStartStop,
+  onDeleteRoute,
+  onGoToPlanner,
 }) => {
   const [viewSubMode, setViewSubMode] = useState<'list' | 'field'>('list');
   const [fieldPriestId, setFieldPriestId] = useState<number>(1);
@@ -273,15 +278,33 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
               )}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onRecompute}
-            disabled={!parish}
-            className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            {isExactRoute ? 'Przelicz' : 'Wyznacz drogowo'}
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={onRecompute}
+              disabled={!parish || routes.length === 0}
+              className="min-h-[36px] px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              {isExactRoute ? 'Przelicz' : 'Wyznacz drogowo'}
+            </button>
+            {onDeleteRoute && (routes.length > 0 || Boolean(selectedDate)) && (
+              <button
+                type="button"
+                onClick={onDeleteRoute}
+                title={
+                  selectedDate
+                    ? 'Usuń trasę tego dnia'
+                    : 'Usuń wyznaczoną trasę'
+                }
+                aria-label="Usuń trasę"
+                className="min-h-[36px] px-2.5 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg inline-flex items-center gap-1 transition-colors whitespace-nowrap"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Usuń trasę</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Multi-day switcher strip */}
@@ -396,15 +419,26 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
 
       <div className="flex-1 overflow-y-auto divide-y divide-slate-200">
         {routes.length === 0 ? (
-          <div className="p-8 text-center">
-            <Navigation className="w-6 h-6 text-slate-400 mx-auto mb-2" />
-            <p className="text-sm font-medium text-slate-800">
-              Brak wyznaczonych tras
-            </p>
-            <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto leading-relaxed">
-              W zakładce „Układanie planu” rozpisz okres kolędowy albo zaznacz
-              ulice i kliknij „Wyznacz trasy”, aby zobaczyć przebieg na mapie.
-            </p>
+          <div className="p-8 text-center space-y-3">
+            <Navigation className="w-6 h-6 text-slate-400 mx-auto" />
+            <div>
+              <p className="text-sm font-medium text-slate-800">
+                Brak wyznaczonych tras
+              </p>
+              <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto leading-relaxed">
+                Wybierz datę i ulice w zakładce „Zaplanuj dzień” lub ułóż cały
+                okres w zakładce „Cały okres”.
+              </p>
+            </div>
+            {onGoToPlanner && (
+              <button
+                type="button"
+                onClick={onGoToPlanner}
+                className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+              >
+                Zaplanuj dzień
+              </button>
+            )}
           </div>
         ) : viewSubMode === 'field' && activeFieldRoute ? (
           /* LIVE FIELD MODE ("KOLĘDA W TERENIE") */

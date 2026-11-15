@@ -3,6 +3,7 @@ import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
   CalendarCheck,
+  CalendarPlus,
   ChevronLeft,
   ChevronRight,
   Church,
@@ -14,7 +15,6 @@ import {
   LogIn,
   LogOut,
   Map as MapIcon,
-  MapPin,
   Menu,
   Route,
   SlidersHorizontal,
@@ -92,7 +92,6 @@ import {
   buildSeasonDaySummaries,
   collectReturnVisitCandidates,
   computeManualOrderForStops,
-  estimateDayRoutes,
   formatPolishDateChip,
   formatPolishDateFull,
   getDayEndTime,
@@ -111,12 +110,12 @@ type MobilePane = 'panel' | 'map';
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
 const SECTION_TITLES: Record<WorkspaceSection, string> = {
-  overview: 'Plan kolędy',
-  parish: 'Parafia i teren',
-  stops: 'Układanie planu',
-  routes: 'Trasy księży',
-  schedule: 'Harmonogram',
-  settings: 'Ustawienia kolędy',
+  overview: 'Start',
+  parish: 'Parafia i ulice',
+  stops: 'Zaplanuj dzień',
+  routes: 'Trasa dnia',
+  schedule: 'Cały okres',
+  settings: 'Ustawienia',
 };
 
 interface RouteOptimizerHandle {
@@ -186,6 +185,10 @@ function ParishPlannerWorkspace({
 
   const [activeSection, setActiveSection] =
     useState<WorkspaceSection>('overview');
+  const [plannerLoadState, setPlannerLoadState] = useState<{
+    date: string | null;
+    seq: number;
+  }>({ date: null, seq: 0 });
   const [mobilePane, setMobilePane] = useState<MobilePane>('panel');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [interactionMode, setInteractionMode] =
@@ -225,6 +228,21 @@ function ParishPlannerWorkspace({
     setMobilePane('panel');
     setMobileMenuOpen(false);
   }, []);
+
+  const handleEditDayInPlanner = useCallback(
+    (date: string) => {
+      setSelectedDate(date);
+      setFocusedPriestId(null);
+      setPlannerLoadState((prev) => ({ date, seq: prev.seq + 1 }));
+      navigateToSection('stops');
+    },
+    [navigateToSection]
+  );
+
+  const handleStartNewDayInPlanner = useCallback(() => {
+    setPlannerLoadState((prev) => ({ date: null, seq: prev.seq + 1 }));
+    navigateToSection('stops');
+  }, [navigateToSection]);
 
   const showUndoToast = useCallback((message: string, onUndo: () => void) => {
     if (undoTimerRef.current) {
@@ -1245,28 +1263,44 @@ function ParishPlannerWorkspace({
     const withDates = stopsRef.current.filter((s) =>
       Boolean((s.visitDate ?? '').trim())
     );
-    if (withDates.length === 0) return;
+    const hasOverrides =
+      Object.keys(seasonConfig.dayTimeOverrides ?? {}).length > 0;
+    if (withDates.length === 0 && !hasOverrides) {
+      clearRoutes();
+      return;
+    }
 
-    const prevDateById = new Map(
-      withDates.map((s) => [s.id, s.visitDate ?? ''])
+    const prevStopSnapshot = new Map(
+      withDates.map((s) => [
+        s.id,
+        { visitDate: s.visitDate ?? '', manualOrder: s.manualOrder ?? 0 },
+      ])
     );
+    const prevOverrides = seasonConfig.dayTimeOverrides
+      ? { ...seasonConfig.dayTimeOverrides }
+      : undefined;
     const currentId = activeParishIdRef.current;
 
     setConfirmState({
-      title: 'Wyczyścić wszystkie daty z kalendarza?',
-      description: `Przypisania dni kolędy dla ${withDates.length} domów zostaną wyczyszczone. Lista samych domów i ulic pozostanie nienaruszona.`,
-      confirmLabel: 'Wyczyść daty',
-      variant: 'warning',
+      title: 'Usunąć wszystkie wyznaczone trasy i daty?',
+      description: `Wszystkie zaplanowane dni kolędy (${withDates.length} domów) zostaną usunięte z kalendarza. Lista ulic i domów parafii pozostanie bez zmian.`,
+      confirmLabel: 'Usuń wszystkie trasy',
+      variant: 'danger',
       onConfirm: () => {
         const changed: VisitStop[] = [];
         setStops((prev) =>
           prev.map((s) => {
-            if (!(s.visitDate ?? '').trim()) return s;
-            const next = { ...s, visitDate: '' };
+            if (!(s.visitDate ?? '').trim() && !s.manualOrder) return s;
+            const next = { ...s, visitDate: '', manualOrder: 0 };
             changed.push(next);
             return next;
           })
         );
+        if (hasOverrides) {
+          const nextSeason = { ...seasonConfig };
+          delete nextSeason.dayTimeOverrides;
+          handleChangeSeasonConfig(nextSeason);
+        }
         setSelectedDate(null);
         setFocusedPriestId(null);
         clearRoutes();
@@ -1275,32 +1309,205 @@ function ParishPlannerWorkspace({
           void batchUpdateStopFieldInFirestore(
             currentId,
             changed,
-            'visitDate'
+            'manualOrder_schedule'
           ).catch(() => {});
         }
 
-        showUndoToast('Wyczyszczono przypisane daty kolędy.', () => {
+        showUndoToast('Usunięto wszystkie wyznaczone trasy.', () => {
           const restored: VisitStop[] = [];
           setStops((prev) =>
             prev.map((s) => {
-              const oldDate = prevDateById.get(s.id);
-              if (!oldDate) return s;
-              const next = { ...s, visitDate: oldDate };
+              const snap = prevStopSnapshot.get(s.id);
+              if (!snap) return s;
+              const next = {
+                ...s,
+                visitDate: snap.visitDate,
+                manualOrder: snap.manualOrder,
+              };
               restored.push(next);
               return next;
             })
           );
+          if (prevOverrides) {
+            handleChangeSeasonConfig({
+              ...seasonConfig,
+              dayTimeOverrides: prevOverrides,
+            });
+          }
           if (authUser && currentId && restored.length > 0) {
             void batchUpdateStopFieldInFirestore(
               currentId,
               restored,
-              'visitDate'
+              'manualOrder_schedule'
             ).catch(() => {});
           }
         });
       },
     });
-  }, [authUser, clearRoutes, showUndoToast]);
+  }, [
+    authUser,
+    clearRoutes,
+    handleChangeSeasonConfig,
+    seasonConfig,
+    showUndoToast,
+  ]);
+
+  const handleDeleteDayPlan = useCallback(
+    (date: string) => {
+      if (!date) return;
+      const dayStops = stopsRef.current.filter(
+        (s) => (s.visitDate ?? '').trim() === date
+      );
+      const prevOverride = seasonConfig.dayTimeOverrides?.[date];
+      if (dayStops.length === 0 && !prevOverride) {
+        setExactRoutesCache((prev) => {
+          if (!prev[date]) return prev;
+          const copy = { ...prev };
+          delete copy[date];
+          return copy;
+        });
+        return;
+      }
+
+      const snapshotById = new Map(
+        dayStops.map((s) => [
+          s.id,
+          {
+            visitDate: s.visitDate ?? '',
+            manualOrder: s.manualOrder ?? 0,
+            priestId: s.priestId,
+          },
+        ])
+      );
+      const currentId = activeParishIdRef.current;
+
+      setConfirmState({
+        title: `Usunąć trasę z dnia ${formatPolishDateFull(date)}?`,
+        description: `Trasa dla ${dayStops.length} ${
+          dayStops.length === 1 ? 'domu' : 'domów'
+        } zostanie usunięta, a ulice wrócą jako wolne (bez terminu). Same domy pozostaną w bazie parafii.`,
+        confirmLabel: 'Usuń trasę',
+        variant: 'warning',
+        onConfirm: () => {
+          const changed: VisitStop[] = [];
+          setStops((prev) =>
+            prev.map((s) => {
+              if ((s.visitDate ?? '').trim() !== date) return s;
+              const next = { ...s, visitDate: '', manualOrder: 0 };
+              changed.push(next);
+              return next;
+            })
+          );
+
+          if (prevOverride) {
+            const nextOverrides = { ...(seasonConfig.dayTimeOverrides ?? {}) };
+            delete nextOverrides[date];
+            const nextSeason = { ...seasonConfig };
+            if (Object.keys(nextOverrides).length > 0) {
+              nextSeason.dayTimeOverrides = nextOverrides;
+            } else {
+              delete nextSeason.dayTimeOverrides;
+            }
+            handleChangeSeasonConfig(nextSeason);
+          }
+
+          clearOptimizerRoutes();
+          setExactRoutesCache((prev) => {
+            const copy = { ...prev };
+            delete copy[date];
+            delete copy.current;
+            return copy;
+          });
+          setFocusedPriestId(null);
+          if (selectedDate === date) {
+            setSelectedDate(null);
+          }
+
+          if (authUser && currentId && changed.length > 0) {
+            void batchUpdateStopFieldInFirestore(
+              currentId,
+              changed,
+              'manualOrder_schedule'
+            ).catch(() => {});
+          }
+
+          showUndoToast(
+            `Usunięto trasę z dnia ${formatPolishDateChip(date)}.`,
+            () => {
+              const restored: VisitStop[] = [];
+              setStops((prev) =>
+                prev.map((s) => {
+                  const snap = snapshotById.get(s.id);
+                  if (!snap) return s;
+                  const next = {
+                    ...s,
+                    visitDate: snap.visitDate,
+                    manualOrder: snap.manualOrder,
+                    priestId: snap.priestId,
+                  };
+                  restored.push(next);
+                  return next;
+                })
+              );
+              if (prevOverride) {
+                handleChangeSeasonConfig({
+                  ...seasonConfig,
+                  dayTimeOverrides: {
+                    ...(seasonConfig.dayTimeOverrides ?? {}),
+                    [date]: prevOverride,
+                  },
+                });
+              }
+              setSelectedDate(date);
+              if (authUser && currentId && restored.length > 0) {
+                void batchUpdateStopFieldInFirestore(
+                  currentId,
+                  restored,
+                  'manualOrder_schedule'
+                ).catch(() => {});
+              }
+            }
+          );
+        },
+      });
+    },
+    [
+      authUser,
+      clearOptimizerRoutes,
+      exactRoutesCache,
+      handleChangeSeasonConfig,
+      seasonConfig,
+      selectedDate,
+      showUndoToast,
+    ]
+  );
+
+  const handleClearCurrentRoute = useCallback(() => {
+    if (selectedDate) {
+      handleDeleteDayPlan(selectedDate);
+      return;
+    }
+    clearOptimizerRoutes();
+    setExactRoutesCache((prev) => {
+      if (!prev.current) return prev;
+      const copy = { ...prev };
+      delete copy.current;
+      return copy;
+    });
+    setFocusedPriestId(null);
+    showStreetFeedback(
+      {
+        status: 'info',
+        message: 'Wyczyszczono bieżącą trasę z podglądu.',
+      },
+      3500
+    );
+  }, [
+    clearOptimizerRoutes,
+    handleDeleteDayPlan,
+    selectedDate,
+    showStreetFeedback,
+  ]);
 
   const handleAssignStopsDate = useCallback(
     (stopIds: string[], visitDate: string) => {
@@ -1387,15 +1594,8 @@ function ParishPlannerWorkspace({
     if (selectedDaySummary) {
       return selectedDaySummary.estimatedRoutes;
     }
-    if (parish && !selectedDate) {
-      const activeOnly = stops.filter((s) => s.included !== false);
-      if (activeOnly.length > 0) {
-        return estimateDayRoutes(parish, activeOnly, config, config.startTime)
-          .routes;
-      }
-    }
     return [];
-  }, [cachedExact, config, parish, selectedDate, selectedDaySummary, stops]);
+  }, [cachedExact, selectedDaySummary]);
 
   const displayedRouteObjects = useMemo(
     () => (cachedExact ? cachedExact.routeObjects : []),
@@ -1834,27 +2034,26 @@ function ParishPlannerWorkspace({
     icon: React.ComponentType<{ className?: string }>;
     count?: number;
   }> = [
-    { id: 'overview', label: 'Plan kolędy', icon: LayoutDashboard },
-    { id: 'parish', label: 'Parafia i teren', icon: Church },
+    { id: 'overview', label: 'Start', icon: LayoutDashboard },
+    { id: 'parish', label: 'Parafia i ulice', icon: Church },
     {
       id: 'stops',
-      label: 'Układanie planu',
-      icon: MapPin,
-      count:
-        plannedDays.length > 0
-          ? plannedDays.length
-          : activeStopsCount > 0
-            ? activeStopsCount
-            : undefined,
+      label: 'Zaplanuj dzień',
+      icon: CalendarPlus,
     },
     {
       id: 'routes',
-      label: 'Trasy księży',
+      label: 'Trasa dnia',
       icon: Route,
       count: displayedRoutes.length > 0 ? displayedRoutes.length : undefined,
     },
-    { id: 'schedule', label: 'Harmonogram', icon: CalendarCheck },
-    { id: 'settings', label: 'Ustawienia planu', icon: SlidersHorizontal },
+    {
+      id: 'schedule',
+      label: 'Cały okres',
+      icon: CalendarCheck,
+      count: plannedDays.length > 0 ? plannedDays.length : undefined,
+    },
+    { id: 'settings', label: 'Ustawienia', icon: SlidersHorizontal },
   ];
 
   const isScheduleView =
@@ -2052,7 +2251,9 @@ function ParishPlannerWorkspace({
             <PrintScheduleSheet
               parish={parish}
               boundary={boundary}
+              stops={stops}
               config={config}
+              seasonConfig={seasonConfig}
               routes={displayedRoutes}
               isExactRoute={isExactRoute}
               plannedDays={plannedDays}
@@ -2068,6 +2269,14 @@ function ParishPlannerWorkspace({
               }}
               onViewDayOnMap={handleViewDayOnMap}
               onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
+              onChangeSeasonConfig={handleChangeSeasonConfig}
+              onAutoScheduleSeason={handleAutoScheduleSeason}
+              onClearAllDates={handleClearAllDates}
+              onUpdateDayTimeWindow={handleUpdateDayTimeWindow}
+              onScheduleReturnVisits={handleScheduleReturnVisits}
+              onGoToDayPlanner={handleStartNewDayInPlanner}
+              onEditDayInPlanner={handleEditDayInPlanner}
+              onDeleteDayRoute={handleDeleteDayPlan}
               onBackToMap={() => {
                 setActiveSection('overview');
                 setMobilePane('map');
@@ -2114,17 +2323,17 @@ function ParishPlannerWorkspace({
                     selectedDate={selectedDate}
                     isSignedIn={Boolean(authUser)}
                     userEmail={authUser?.email ?? null}
-                    isComputing={isComputing}
                     onSignInGoogle={onSignInGoogle}
                     onSelectParish={handleSelectParish}
                     onSelectSavedParish={handleSelectSavedParish}
                     onNavigateSection={navigateToSection}
-                    onOpenMapWithMode={(mode) => {
-                      setInteractionMode(mode);
-                      setMobilePane('map');
+                    onOpenDayRoute={(date) => {
+                      setSelectedDate(date);
+                      setFocusedPriestId(null);
+                      navigateToSection('routes');
                     }}
-                    onViewDayOnMap={(date) => handleViewDayOnMap(date)}
-                    onComputeRoutes={handleComputeRoutes}
+                    onViewDayOnMap={handleViewDayOnMap}
+                    onEditDay={handleEditDayInPlanner}
                   />
                 )}
 
@@ -2187,14 +2396,12 @@ function ParishPlannerWorkspace({
                     seasonConfig={seasonConfig}
                     plannedDays={plannedDays}
                     selectedDate={selectedDate}
-                    exactDayKeys={exactDayKeys}
+                    plannerLoadDate={plannerLoadState.date}
+                    plannerLoadSeq={plannerLoadState.seq}
                     onSelectDate={(d) => {
                       setSelectedDate(d);
                       setFocusedPriestId(null);
                     }}
-                    onChangeSeasonConfig={handleChangeSeasonConfig}
-                    onAutoScheduleSeason={handleAutoScheduleSeason}
-                    onClearAllDates={handleClearAllDates}
                     onAssignStopsDate={handleAssignStopsDate}
                     onToggleStreetIncluded={handleToggleStreetIncluded}
                     onAssignStreetPriest={handleAssignStreetPriest}
@@ -2208,14 +2415,13 @@ function ParishPlannerWorkspace({
                       setMobilePane('map');
                     }}
                     onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
-                    onViewDayOnMap={(d) => handleViewDayOnMap(d)}
                     onComputeDayRoute={(d) =>
                       void handleComputeRoutesForDate(d)
                     }
-                    onScheduleReturnVisits={handleScheduleReturnVisits}
                     onPlanCustomDay={handlePlanCustomDay}
-                    onUpdateDayTimeWindow={handleUpdateDayTimeWindow}
+                    onDeleteDayPlan={handleDeleteDayPlan}
                     onGoToSetup={() => navigateToSection('parish')}
+                    onGoToSchedule={() => navigateToSection('schedule')}
                     isComputing={isComputing}
                     progressLabel={progressLabel}
                   />
@@ -2254,6 +2460,8 @@ function ParishPlannerWorkspace({
                     onUpdateStopStatus={handleUpdateStopStatus}
                     onMoveStopOrder={handleMoveStopOrder}
                     onSetRouteStartStop={handleSetRouteStartStop}
+                    onDeleteRoute={handleClearCurrentRoute}
+                    onGoToPlanner={handleStartNewDayInPlanner}
                   />
                 )}
 
@@ -2659,7 +2867,20 @@ function ParishPlannerWorkspace({
           }`}
         >
           <LayoutDashboard className="w-5 h-5" />
-          <span>Plan</span>
+          <span>Start</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigateToSection('stops')}
+          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
+            mobilePane === 'panel' && activeSection === 'stops'
+              ? 'text-amber-800'
+              : 'text-slate-500 hover:text-slate-900'
+          }`}
+        >
+          <CalendarPlus className="w-5 h-5" />
+          <span>Zaplanuj</span>
         </button>
 
         <button
@@ -2680,21 +2901,6 @@ function ParishPlannerWorkspace({
 
         <button
           type="button"
-          onClick={() => navigateToSection('stops')}
-          className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
-            mobilePane === 'panel' && activeSection === 'stops'
-              ? 'text-amber-800'
-              : 'text-slate-500 hover:text-slate-900'
-          }`}
-        >
-          <MapPin className="w-5 h-5" />
-          <span className="tabular-nums">
-            Plan{activeStopsCount > 0 ? ` (${activeStopsCount})` : ''}
-          </span>
-        </button>
-
-        <button
-          type="button"
           onClick={() => navigateToSection('routes')}
           className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
             mobilePane === 'panel' && activeSection === 'routes'
@@ -2710,18 +2916,17 @@ function ParishPlannerWorkspace({
 
         <button
           type="button"
-          onClick={() => setMobileMenuOpen(true)}
+          onClick={() => navigateToSection('schedule')}
           className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
-            mobilePane === 'panel' &&
-            (activeSection === 'parish' ||
-              activeSection === 'settings' ||
-              activeSection === 'schedule')
+            mobilePane === 'panel' && activeSection === 'schedule'
               ? 'text-amber-800'
               : 'text-slate-500 hover:text-slate-900'
           }`}
         >
-          <Menu className="w-5 h-5" />
-          <span>Menu</span>
+          <CalendarCheck className="w-5 h-5" />
+          <span className="tabular-nums">
+            Okres{plannedDays.length > 0 ? ` (${plannedDays.length})` : ''}
+          </span>
         </button>
       </nav>
 

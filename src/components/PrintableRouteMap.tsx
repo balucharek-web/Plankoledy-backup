@@ -142,11 +142,12 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
       if (ty < 0 || ty >= maxTile) continue;
       for (let tx = minTx; tx <= maxTx; tx++) {
         const wrappedTx = ((tx % maxTile) + maxTile) % maxTile;
+        const osmSub = ['a', 'b', 'c'][Math.abs(tx + ty) % 3];
         const leftPx = tx * TILE_SIZE - originX;
         const topPx = ty * TILE_SIZE - originY;
         tiles.push({
           key: `${zoom}_${tx}_${ty}`,
-          primaryUrl: `https://basemaps.cartocdn.com/rastertiles/voyager/${zoom}/${wrappedTx}/${ty}.png`,
+          primaryUrl: `https://${osmSub}.tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
           fallbackUrl: `https://tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
           leftPct: (leftPx / VIEW_W) * 100,
           topPct: (topPx / VIEW_H) * 100,
@@ -267,7 +268,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
   if (!mapData || activeRoutes.length === 0) return null;
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden print:border-slate-300 print-break-avoid">
+    <div className="w-full max-w-full bg-white border border-slate-200 rounded-xl overflow-hidden print:rounded-lg print:border-slate-300 print-break-avoid">
       <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2 print:py-1.5 print:px-3">
         <div className="text-xs font-bold text-slate-900">
           {title || 'Mapa trasy kolędy (START i wszystkie punkty do odwiedzenia)'}
@@ -503,7 +504,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
 
         {/* Map attribution */}
         <div className="absolute bottom-1.5 right-2 z-20 px-1.5 py-0.5 bg-white/90 rounded text-[9px] text-slate-600">
-          © OpenStreetMap / CARTO
+          © OpenStreetMap
         </div>
       </div>
 

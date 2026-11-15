@@ -2,15 +2,23 @@ import React, { useMemo, useState } from 'react';
 import {
   Calendar,
   CalendarDays,
+  CalendarPlus,
   Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
   Copy,
   Download,
   ExternalLink,
   Map as MapIcon,
   Megaphone,
   Navigation,
+  Pencil,
   Printer,
+  RotateCcw,
   Route,
+  Sparkles,
+  Trash2,
 } from 'lucide-react';
 import {
   DayPlanSummary,
@@ -18,15 +26,22 @@ import {
   ParishCenter,
   PlanConfig,
   PriestRouteResult,
+  SeasonPlanConfig,
+  VisitStop,
 } from '../types/parish';
 import { PrintableRouteMap } from './PrintableRouteMap';
 import {
+  WEEKDAY_OPTIONS,
+  addDaysToIsoDate,
   buildAnnouncementDays,
+  collectReturnVisitCandidates,
   exportFullSeasonToCsv,
   formatAnnouncementsPlainText,
   formatPolishDateChip,
   formatPolishDateFull,
   formatPolishWeekdayFull,
+  parseWeekdaysMask,
+  toggleWeekdayInMask,
 } from '../utils/seasonScheduler';
 import {
   buildGoogleMapsStageUrls,
@@ -40,7 +55,9 @@ import {
 interface PrintScheduleSheetProps {
   parish: ParishCenter | null;
   boundary?: LatLng[];
+  stops?: VisitStop[];
   config: PlanConfig;
+  seasonConfig?: SeasonPlanConfig;
   routes: PriestRouteResult[];
   isExactRoute: boolean;
   plannedDays: DayPlanSummary[];
@@ -54,13 +71,27 @@ interface PrintScheduleSheetProps {
   onViewDayOnMap: (date: string | null) => void;
   onComputeDayRoute: (date: string | null) => void;
   onBackToMap: () => void;
+  onChangeSeasonConfig?: (next: SeasonPlanConfig) => void;
+  onAutoScheduleSeason?: (targetMode: 'all' | 'unscheduled') => void;
+  onClearAllDates?: () => void;
+  onUpdateDayTimeWindow?: (
+    date: string,
+    startTime: string,
+    endTime: string
+  ) => void;
+  onScheduleReturnVisits?: (targetDate: string) => void;
+  onGoToDayPlanner?: () => void;
+  onEditDayInPlanner?: (date: string) => void;
+  onDeleteDayRoute?: (date: string) => void;
   forcedViewMode?: 'season' | 'day' | 'announcements';
 }
 
 export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   parish,
   boundary = [],
+  stops = [],
   config,
+  seasonConfig,
   routes,
   isExactRoute,
   plannedDays,
@@ -74,20 +105,50 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   onViewDayOnMap,
   onComputeDayRoute,
   onBackToMap,
+  onChangeSeasonConfig,
+  onAutoScheduleSeason,
+  onClearAllDates,
+  onUpdateDayTimeWindow,
+  onScheduleReturnVisits,
+  onGoToDayPlanner,
+  onEditDayInPlanner,
+  onDeleteDayRoute,
   forcedViewMode,
 }) => {
   const [viewMode, setViewMode] = useState<'season' | 'day' | 'announcements'>(
-    () =>
-      (selectedDate && routes.length > 0) || plannedDays.length <= 1
-        ? 'day'
-        : 'season'
+    'season'
   );
   const [copiedAnnouncements, setCopiedAnnouncements] = useState(false);
   const [openGmapsMenuPriest, setOpenGmapsMenuPriest] = useState<number | null>(
     null
   );
+  const [showAutoScheduler, setShowAutoScheduler] = useState<boolean>(false);
+  const [editingHoursDate, setEditingHoursDate] = useState<string | null>(null);
+  const [editingHoursStart, setEditingHoursStart] = useState<string>('15:30');
+  const [editingHoursEnd, setEditingHoursEnd] = useState<string>('20:30');
+  const [returnVisitDate, setReturnVisitDate] = useState<string>('');
 
   const effectiveViewMode = forcedViewMode ?? viewMode;
+
+  const activeWeekdaysSet = useMemo(
+    () => parseWeekdaysMask(seasonConfig?.weekdaysMask ?? '1,2,3,4,5,6'),
+    [seasonConfig?.weekdaysMask]
+  );
+
+  const returnCandidates = useMemo(
+    () => collectReturnVisitCandidates(stops),
+    [stops]
+  );
+
+  const defaultReturnDate = useMemo(() => {
+    const lastPlanned = plannedDays[plannedDays.length - 1]?.date;
+    return addDaysToIsoDate(
+      lastPlanned || seasonConfig?.startDate || '2026-12-28',
+      1
+    );
+  }, [plannedDays, seasonConfig?.startDate]);
+
+  const effectiveReturnDate = returnVisitDate || defaultReturnDate;
 
   const announcementDays = useMemo(
     () => buildAnnouncementDays(plannedDays),
@@ -154,9 +215,9 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   };
 
   return (
-    <div className="max-w-5xl mx-auto p-4 sm:p-6 md:p-8 print:p-0 print:max-w-none space-y-6 print:space-y-4">
+    <div className="max-w-5xl mx-auto p-4 sm:p-6 md:p-8 print:px-1.5 print:py-0 print:max-w-none space-y-6 print:space-y-3">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-5 print:pb-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-5 print:pb-2.5">
         <div>
           <h1 className="text-lg sm:text-xl font-bold text-slate-900">
             Harmonogram odwiedzin duszpasterskich
@@ -236,7 +297,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
 
       {/* View Mode Switcher (Season vs Selected Day vs Announcements) */}
       <div className="no-print flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-grid grid-cols-3 p-1 bg-slate-200/70 rounded-xl">
+        <div className="inline-grid grid-cols-3 p-1 bg-slate-200/70 rounded-xl w-full sm:w-auto">
           <button
             type="button"
             onClick={() => setViewMode('season')}
@@ -246,8 +307,8 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <CalendarDays className="w-3.5 h-3.5 text-amber-700" />
-            <span>Cały okres ({plannedDays.length})</span>
+            <CalendarDays className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            <span className="truncate">Cały okres ({plannedDays.length})</span>
           </button>
           <button
             type="button"
@@ -258,8 +319,8 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Calendar className="w-3.5 h-3.5 text-slate-600" />
-            <span>Wybrany dzień</span>
+            <Calendar className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+            <span className="truncate">Wydruk dnia</span>
           </button>
           <button
             type="button"
@@ -270,8 +331,8 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Megaphone className="w-3.5 h-3.5 text-amber-700" />
-            <span>Ogłoszenia</span>
+            <Megaphone className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            <span className="truncate">Ogłoszenia</span>
           </button>
         </div>
 
@@ -297,219 +358,711 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
 
       {/* WHOLE SEASON VIEW */}
       {effectiveViewMode === 'season' ? (
-        plannedDays.length === 0 ? (
-          <div className="bg-white border border-slate-200 rounded-xl p-8 sm:p-10 text-center space-y-2">
-            <p className="text-sm font-medium text-slate-800">
-              Brak rozpisanych dni kolędy
-            </p>
-            <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Przejdź do sekcji „Układanie planu” i kliknij „Rozpisz całą parafię
-              na okres”, aby automatycznie ułożyć wszystkie dni i godziny kolędy.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {/* Season KPI strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
-                <div className="text-[11px] text-slate-500">Liczba dni kolędy</div>
-                <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {plannedDays.length}
+        <div className="space-y-5">
+          {/* Season Planning Action Bar */}
+          {(onGoToDayPlanner || (seasonConfig && onAutoScheduleSeason)) && (
+            <div className="no-print bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  {onGoToDayPlanner && (
+                    <button
+                      type="button"
+                      onClick={onGoToDayPlanner}
+                      className="min-h-[40px] px-3.5 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <CalendarPlus className="w-4 h-4" />
+                      <span>Zaplanuj konkretny dzień</span>
+                    </button>
+                  )}
+
+                  {seasonConfig && onAutoScheduleSeason && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAutoScheduler((v) => !v)}
+                      className="min-h-[40px] px-3.5 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-700" />
+                      <span>Rozpisz automatycznie cały okres</span>
+                      {showAutoScheduler ? (
+                        <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                      ) : (
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+                      )}
+                    </button>
+                  )}
                 </div>
-                {seasonTotals.firstDate && seasonTotals.lastDate && (
-                  <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
-                    {formatPolishDateChip(seasonTotals.firstDate)} –{' '}
-                    {formatPolishDateChip(seasonTotals.lastDate)}
-                  </div>
+
+                {plannedDays.length > 0 && onClearAllDates && (
+                  <button
+                    type="button"
+                    onClick={onClearAllDates}
+                    className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Usuń wszystkie trasy</span>
+                  </button>
                 )}
               </div>
 
-              <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
-                <div className="text-[11px] text-slate-500">Zaplanowane domy</div>
-                <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {seasonTotals.totalHouses}
-                </div>
-                <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
-                  {unscheduledCount > 0
-                    ? `Bez terminu: ${unscheduledCount}`
-                    : 'Wszystkie przypisane'}
+              {(showAutoScheduler || plannedDays.length === 0) &&
+                seasonConfig &&
+                onChangeSeasonConfig &&
+                onAutoScheduleSeason && (
+                  <div className="pt-3 border-t border-slate-200 space-y-3">
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Automatyczny generator ułoży wszystkie ulice parafii w
+                      kolejne dni kolędy według wybranych godzin i dni tygodnia
+                      (dla {config.priestCount}{' '}
+                      {config.priestCount === 1 ? 'księdza' : 'księży'}).
+                    </p>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      <div>
+                        <label
+                          htmlFor="season-start-date-hub"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Pierwszy dzień
+                        </label>
+                        <input
+                          id="season-start-date-hub"
+                          type="date"
+                          value={seasonConfig.startDate}
+                          onChange={(e) =>
+                            onChangeSeasonConfig({
+                              ...seasonConfig,
+                              startDate: e.target.value,
+                            })
+                          }
+                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="season-daily-end-hub"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Koniec dnia do
+                        </label>
+                        <input
+                          id="season-daily-end-hub"
+                          type="time"
+                          value={seasonConfig.dailyEndTime}
+                          onChange={(e) =>
+                            onChangeSeasonConfig({
+                              ...seasonConfig,
+                              dailyEndTime: e.target.value,
+                            })
+                          }
+                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="season-weekday-start-hub"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Start (robocze)
+                        </label>
+                        <input
+                          id="season-weekday-start-hub"
+                          type="time"
+                          value={seasonConfig.weekdayStartTime}
+                          onChange={(e) =>
+                            onChangeSeasonConfig({
+                              ...seasonConfig,
+                              weekdayStartTime: e.target.value,
+                            })
+                          }
+                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="season-weekend-start-hub"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Start (sob./nd.)
+                        </label>
+                        <input
+                          id="season-weekend-start-hub"
+                          type="time"
+                          value={seasonConfig.weekendStartTime}
+                          onChange={(e) =>
+                            onChangeSeasonConfig({
+                              ...seasonConfig,
+                              weekendStartTime: e.target.value,
+                            })
+                          }
+                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="block text-[11px] font-medium text-slate-600 mb-1.5">
+                        Dni tygodnia z kolędą
+                      </span>
+                      <div className="grid grid-cols-7 gap-1.5">
+                        {WEEKDAY_OPTIONS.map((opt) => {
+                          const checked = activeWeekdaysSet.has(opt.dayIndex);
+                          return (
+                            <button
+                              key={opt.dayIndex}
+                              type="button"
+                              onClick={() =>
+                                onChangeSeasonConfig({
+                                  ...seasonConfig,
+                                  weekdaysMask: toggleWeekdayInMask(
+                                    seasonConfig.weekdaysMask,
+                                    opt.dayIndex
+                                  ),
+                                })
+                              }
+                              aria-pressed={checked}
+                              title={opt.full}
+                              className={`min-h-[38px] rounded-xl text-xs font-semibold transition-colors ${
+                                checked
+                                  ? 'bg-slate-900 text-white'
+                                  : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {opt.short}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={!parish}
+                        onClick={() => {
+                          onAutoScheduleSeason('all');
+                          setShowAutoScheduler(false);
+                        }}
+                        className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                        <span>
+                          {plannedDays.length > 0
+                            ? 'Przeplanuj całą parafię od nowa'
+                            : 'Rozpisz automatycznie całą parafię'}
+                        </span>
+                      </button>
+
+                      {plannedDays.length > 0 && unscheduledCount > 0 && (
+                        <button
+                          type="button"
+                          disabled={!parish}
+                          onClick={() => {
+                            onAutoScheduleSeason('unscheduled');
+                            setShowAutoScheduler(false);
+                          }}
+                          className="min-h-[42px] px-4 py-2 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          Dopisuj brakujące ({unscheduledCount})
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+            </div>
+          )}
+
+          {/* Return Visits Card */}
+          {returnCandidates.length > 0 && onScheduleReturnVisits && (
+            <div className="no-print bg-amber-50/80 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <RotateCcw className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+                <div>
+                  <h3 className="text-xs font-semibold text-amber-950">
+                    Powroty i kolęda na zaproszenie ({returnCandidates.length})
+                  </h3>
+                  <p className="text-[11px] text-amber-800 mt-0.5">
+                    Domy/lokale oznaczone jako „Nieobecni” lub „Zaproszenie” —
+                    wyznacz dla nich osobny dzień dodatkowy.
+                  </p>
                 </div>
               </div>
-
-              <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
-                <div className="text-[11px] text-slate-500">Szacowany dystans</div>
-                <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {formatDistance(seasonTotals.totalMeters)}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  Łącznie dla zespołu
-                </div>
-              </div>
-
-              <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
-                <div className="text-[11px] text-slate-500">Czas samych wizyt</div>
-                <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
-                  {formatMinutesLabel(seasonTotals.totalVisitMins)}
-                </div>
-                <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
-                  Śr. {config.defaultVisitMinutes} min/dom
-                </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <input
+                  type="date"
+                  value={effectiveReturnDate}
+                  onChange={(e) => setReturnVisitDate(e.target.value)}
+                  aria-label="Data dnia powrotów"
+                  className="min-h-[38px] px-2.5 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-amber-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                />
+                <button
+                  type="button"
+                  disabled={!effectiveReturnDate}
+                  onClick={() => onScheduleReturnVisits(effectiveReturnDate)}
+                  className="min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Zaplanuj powroty</span>
+                </button>
               </div>
             </div>
+          )}
 
-            {/* Desktop Full-Season Table */}
-            <div className="hidden md:block print:block bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                    <th className="py-3 px-4">Data</th>
-                    <th className="py-3 px-4">Godziny</th>
-                    <th className="py-3 px-4">Ulice i rejony</th>
-                    <th className="py-3 px-4">Księża</th>
-                    <th className="py-3 px-4 text-right">Domy / Dystans</th>
-                    <th className="py-3 px-4 text-right no-print">Podgląd</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {plannedDays.map((day) => {
-                    const isExact = Boolean(exactDayKeys[day.date]);
-                    return (
-                      <tr key={day.date} className="hover:bg-slate-50/60">
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          <div className="text-xs font-semibold text-slate-900 tabular-nums">
-                            {day.date}
+          {plannedDays.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-xl p-8 sm:p-10 text-center space-y-2">
+              <p className="text-sm font-medium text-slate-800">
+                Brak zaplanowanych dni kolędy
+              </p>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Kliknij „Zaplanuj konkretny dzień” powyżej, aby wybrać pojedynczą
+                datę i ulice, albo użyj automatycznego rozpisania całego okresu.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* Unscheduled houses quick info */}
+              {unscheduledCount > 0 && (
+                <div className="no-print bg-amber-50/70 border border-amber-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
+                  <span className="tabular-nums">
+                    Pozostało <strong>{unscheduledCount}</strong>{' '}
+                    {unscheduledCount === 1
+                      ? 'dom bez wyznaczonej daty'
+                      : 'domów bez wyznaczonej daty'}
+                    .
+                  </span>
+                  {onGoToDayPlanner && (
+                    <button
+                      type="button"
+                      onClick={onGoToDayPlanner}
+                      className="font-semibold text-amber-800 hover:underline whitespace-nowrap"
+                    >
+                      + Zaplanuj kolejny dzień →
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Season KPI strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
+                  <div className="text-[11px] text-slate-500">
+                    Liczba dni kolędy
+                  </div>
+                  <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
+                    {plannedDays.length}
+                  </div>
+                  {seasonTotals.firstDate && seasonTotals.lastDate && (
+                    <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                      {formatPolishDateChip(seasonTotals.firstDate)} –{' '}
+                      {formatPolishDateChip(seasonTotals.lastDate)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
+                  <div className="text-[11px] text-slate-500">
+                    Zaplanowane domy
+                  </div>
+                  <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
+                    {seasonTotals.totalHouses}
+                  </div>
+                  <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                    {unscheduledCount > 0
+                      ? `Bez terminu: ${unscheduledCount}`
+                      : 'Wszystkie przypisane'}
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
+                  <div className="text-[11px] text-slate-500">
+                    Szacowany dystans
+                  </div>
+                  <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
+                    {formatDistance(seasonTotals.totalMeters)}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">
+                    Łącznie dla zespołu
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-white border border-slate-200 rounded-xl">
+                  <div className="text-[11px] text-slate-500">
+                    Czas samych wizyt
+                  </div>
+                  <div className="mt-1 text-lg font-bold text-slate-900 tabular-nums">
+                    {formatMinutesLabel(seasonTotals.totalVisitMins)}
+                  </div>
+                  <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                    Śr. {config.defaultVisitMinutes} min/dom
+                  </div>
+                </div>
+              </div>
+
+              {/* Desktop Full-Season Table */}
+              <div className="hidden md:block print:block bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible print:border-slate-300">
+                <table className="w-full text-left border-collapse text-sm print:text-[11px] print:table-fixed">
+                  <colgroup>
+                    <col className="w-[104px] print:w-[88px]" />
+                    <col className="w-[106px] print:w-[86px]" />
+                    <col />
+                    <col className="w-[160px] print:w-[126px]" />
+                    <col className="w-[110px] print:w-[86px]" />
+                    <col className="w-[116px] no-print" />
+                  </colgroup>
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+                      <th className="py-3 px-4 print:py-1.5 print:px-2">Data</th>
+                      <th className="py-3 px-4 print:py-1.5 print:px-2">Godziny</th>
+                      <th className="py-3 px-4 print:py-1.5 print:px-2">Ulice i rejony</th>
+                      <th className="py-3 px-4 print:py-1.5 print:px-2">Księża</th>
+                      <th className="py-3 px-4 print:py-1.5 print:px-2 text-right">Domy / Dystans</th>
+                      <th className="py-3 px-4 text-right no-print">Akcje</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {plannedDays.map((day) => {
+                      const isExact = Boolean(exactDayKeys[day.date]);
+                      const isEditingHours = editingHoursDate === day.date;
+                      return (
+                        <React.Fragment key={day.date}>
+                          <tr className="hover:bg-slate-50/60">
+                            <td className="py-3 px-4 print:py-1.5 print:px-2 whitespace-nowrap print:whitespace-normal align-top">
+                              <div className="text-xs font-semibold text-slate-900 tabular-nums">
+                                {day.date}
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                {formatPolishWeekdayFull(day.date)}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 print:py-1.5 print:px-2 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap print:whitespace-normal align-top">
+                              <div>
+                                {day.startTime} – {day.estimatedEndTime}
+                              </div>
+                              {onUpdateDayTimeWindow && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isEditingHours) {
+                                      setEditingHoursDate(null);
+                                    } else {
+                                      setEditingHoursStart(day.startTime);
+                                      setEditingHoursEnd(
+                                        day.plannedEndTime ||
+                                          seasonConfig?.dailyEndTime ||
+                                          '20:30'
+                                      );
+                                      setEditingHoursDate(day.date);
+                                    }
+                                  }}
+                                  className="no-print mt-0.5 text-[11px] font-sans font-medium text-amber-800 hover:underline inline-flex items-center gap-1"
+                                >
+                                  <Clock className="w-3 h-3" />
+                                  Zmień
+                                </button>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-xs text-slate-700 max-w-xs print:max-w-none print:py-1.5 print:px-2 align-top break-words">
+                              <div className="font-medium text-slate-900">
+                                {day.streetNames.join(', ')}
+                              </div>
+                              {isExact && (
+                                <span className="text-[11px] text-emerald-700 font-medium">
+                                  Dokładna trasa drogowa
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-xs text-slate-600 tabular-nums print:py-1.5 print:px-2 align-top">
+                              {day.estimatedRoutes.map((r) => (
+                                <div
+                                  key={r.priestId}
+                                  className="flex items-center gap-1.5 whitespace-nowrap print:whitespace-normal"
+                                >
+                                  <span
+                                    className="w-2 h-2 rounded-full shrink-0"
+                                    style={{ backgroundColor: r.color }}
+                                  />
+                                  <span>
+                                    Ks. {r.priestId}: {r.orderedStops.length} (do{' '}
+                                    {r.endTime})
+                                  </span>
+                                </div>
+                              ))}
+                            </td>
+                            <td className="py-3 px-4 print:py-1.5 print:px-2 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap print:whitespace-normal align-top">
+                              <div className="font-semibold text-slate-900">
+                                {day.stops.length} domów
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                {formatDistance(day.totalDistanceMeters)}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-right no-print whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1.5">
+                                {onEditDayInPlanner && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onEditDayInPlanner(day.date)}
+                                    className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
+                                  >
+                                    <Pencil className="w-3 h-3 text-slate-500" />
+                                    Edytuj
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onViewDayOnMap(day.date)}
+                                  className="px-2.5 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
+                                >
+                                  <MapIcon className="w-3.5 h-3.5 text-amber-700" />
+                                  Mapa
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onInspectDay(day.date);
+                                    setViewMode('day');
+                                  }}
+                                  className="px-2.5 py-1.5 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg inline-flex items-center gap-1"
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                  Wydruk
+                                </button>
+                                {onDeleteDayRoute && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onDeleteDayRoute(day.date)}
+                                    title="Usuń trasę tego dnia"
+                                    aria-label={`Usuń trasę z dnia ${day.date}`}
+                                    className="px-2 py-1.5 text-xs font-medium text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 rounded-lg inline-flex items-center gap-1"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {isEditingHours && onUpdateDayTimeWindow && (
+                            <tr className="no-print bg-slate-50">
+                              <td colSpan={6} className="px-4 py-2.5">
+                                <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                                  <span className="font-semibold text-slate-700">
+                                    Godziny dla {day.date}:
+                                  </span>
+                                  <label className="inline-flex items-center gap-1.5">
+                                    <span className="text-slate-500">Od</span>
+                                    <input
+                                      type="time"
+                                      value={editingHoursStart}
+                                      onChange={(e) =>
+                                        setEditingHoursStart(e.target.value)
+                                      }
+                                      className="min-h-[34px] px-2 py-1 text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                                    />
+                                  </label>
+                                  <label className="inline-flex items-center gap-1.5">
+                                    <span className="text-slate-500">Do</span>
+                                    <input
+                                      type="time"
+                                      value={editingHoursEnd}
+                                      onChange={(e) =>
+                                        setEditingHoursEnd(e.target.value)
+                                      }
+                                      className="min-h-[34px] px-2 py-1 text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      onUpdateDayTimeWindow(
+                                        day.date,
+                                        editingHoursStart,
+                                        editingHoursEnd
+                                      );
+                                      setEditingHoursDate(null);
+                                    }}
+                                    className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg"
+                                  >
+                                    Zapisz
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingHoursDate(null)}
+                                    className="min-h-[34px] px-2.5 py-1 text-xs text-slate-500 hover:text-slate-800"
+                                  >
+                                    Anuluj
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Full-Season Cards */}
+              <div className="md:hidden print:hidden space-y-3">
+                {plannedDays.map((day, idx) => {
+                  const isEditingHours = editingHoursDate === day.date;
+                  return (
+                    <div
+                      key={day.date}
+                      className="bg-white border border-slate-200 rounded-xl p-4 space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-[11px] font-mono font-semibold text-amber-800 tabular-nums">
+                            Dzień {idx + 1} · {day.date}
                           </div>
-                          <div className="text-[11px] text-slate-500">
+                          <div className="text-sm font-semibold text-slate-900 mt-0.5">
                             {formatPolishWeekdayFull(day.date)}
                           </div>
-                        </td>
-                        <td className="py-3 px-4 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap">
-                          {day.startTime} – {day.estimatedEndTime}
-                        </td>
-                        <td className="py-3 px-4 text-xs text-slate-700 max-w-xs print:max-w-none print:py-2 print:px-3">
-                          <div className="font-medium text-slate-900">
-                            {day.streetNames.join(', ')}
+                        </div>
+                        <div className="text-right">
+                          <div className="text-xs font-mono font-semibold text-slate-900 tabular-nums">
+                            {day.startTime}–{day.estimatedEndTime}
                           </div>
-                          {isExact && (
-                            <span className="text-[11px] text-emerald-700 font-medium">
-                              Dokładna trasa drogowa
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-xs text-slate-600 tabular-nums print:py-2 print:px-3">
-                          {day.estimatedRoutes.map((r) => (
-                            <div
-                              key={r.priestId}
-                              className="flex items-center gap-1.5 whitespace-nowrap"
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full shrink-0"
-                                style={{ backgroundColor: r.color }}
-                              />
-                              <span>
-                                Ks. {r.priestId}: {r.orderedStops.length} (do{' '}
-                                {r.endTime})
-                              </span>
-                            </div>
-                          ))}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
-                          <div className="font-semibold text-slate-900">
-                            {day.stops.length} domów
-                          </div>
-                          <div className="text-[11px] text-slate-500">
+                          <div className="text-[11px] text-slate-500 tabular-nums">
+                            {day.stops.length} domów ·{' '}
                             {formatDistance(day.totalDistanceMeters)}
                           </div>
-                        </td>
-                        <td className="py-3 px-4 text-right no-print whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => onViewDayOnMap(day.date)}
-                              className="px-2.5 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
-                            >
-                              <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-                              Mapa
-                            </button>
+                        </div>
+                      </div>
+
+                      <div className="text-xs text-slate-700 leading-relaxed">
+                        <span className="text-slate-500">Ulice: </span>
+                        <span className="font-medium text-slate-900">
+                          {day.streetNames.join(', ')}
+                        </span>
+                      </div>
+
+                      {isEditingHours && onUpdateDayTimeWindow && (
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
+                                Od
+                              </label>
+                              <input
+                                type="time"
+                                value={editingHoursStart}
+                                onChange={(e) =>
+                                  setEditingHoursStart(e.target.value)
+                                }
+                                className="w-full min-h-[38px] px-2 py-1 text-base font-mono bg-white border border-slate-200 rounded-lg"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-medium text-slate-500 mb-0.5">
+                                Do
+                              </label>
+                              <input
+                                type="time"
+                                value={editingHoursEnd}
+                                onChange={(e) =>
+                                  setEditingHoursEnd(e.target.value)
+                                }
+                                className="w-full min-h-[38px] px-2 py-1 text-base font-mono bg-white border border-slate-200 rounded-lg"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
                             <button
                               type="button"
                               onClick={() => {
-                                onInspectDay(day.date);
-                                setViewMode('day');
+                                onUpdateDayTimeWindow(
+                                  day.date,
+                                  editingHoursStart,
+                                  editingHoursEnd
+                                );
+                                setEditingHoursDate(null);
                               }}
-                              className="px-2.5 py-1.5 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg"
+                              className="flex-1 min-h-[36px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 rounded-lg"
                             >
-                              Szczegóły
+                              Zapisz godziny
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingHoursDate(null)}
+                              className="min-h-[36px] px-3 py-1 text-xs text-slate-600"
+                            >
+                              Anuluj
                             </button>
                           </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                        </div>
+                      )}
 
-            {/* Mobile Full-Season Cards */}
-            <div className="md:hidden print:hidden space-y-3">
-              {plannedDays.map((day, idx) => (
-                <div
-                  key={day.date}
-                  className="bg-white border border-slate-200 rounded-xl p-4 space-y-3"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-[11px] font-mono font-semibold text-amber-800 tabular-nums">
-                        Dzień {idx + 1} · {day.date}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                        {onEditDayInPlanner && (
+                          <button
+                            type="button"
+                            onClick={() => onEditDayInPlanner(day.date)}
+                            className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg inline-flex items-center justify-center gap-1"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                            Edytuj ulice
+                          </button>
+                        )}
+                        {onUpdateDayTimeWindow && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isEditingHours) {
+                                setEditingHoursDate(null);
+                              } else {
+                                setEditingHoursStart(day.startTime);
+                                setEditingHoursEnd(
+                                  day.plannedEndTime ||
+                                    seasonConfig?.dailyEndTime ||
+                                    '20:30'
+                                );
+                                setEditingHoursDate(day.date);
+                              }
+                            }}
+                            className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg inline-flex items-center justify-center gap-1"
+                          >
+                            <Clock className="w-3.5 h-3.5 text-slate-500" />
+                            Godziny
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onViewDayOnMap(day.date)}
+                          className="min-h-[40px] px-2.5 py-2 text-xs font-medium text-slate-800 bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center justify-center gap-1"
+                        >
+                          <MapIcon className="w-3.5 h-3.5 text-amber-700" />
+                          Mapa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onInspectDay(day.date);
+                            setViewMode('day');
+                          }}
+                          className="min-h-[40px] px-2.5 py-2 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg inline-flex items-center justify-center gap-1"
+                        >
+                          <Route className="w-3.5 h-3.5" />
+                          Wydruk
+                        </button>
                       </div>
-                      <div className="text-sm font-semibold text-slate-900 mt-0.5">
-                        {formatPolishWeekdayFull(day.date)}
-                      </div>
+                      {onDeleteDayRoute && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteDayRoute(day.date)}
+                          className="w-full min-h-[38px] px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50/70 hover:bg-red-100 border border-red-200 rounded-lg inline-flex items-center justify-center gap-1.5"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Usuń trasę tego dnia
+                        </button>
+                      )}
                     </div>
-                    <div className="text-right">
-                      <div className="text-xs font-mono font-semibold text-slate-900 tabular-nums">
-                        {day.startTime}–{day.estimatedEndTime}
-                      </div>
-                      <div className="text-[11px] text-slate-500 tabular-nums">
-                        {day.stops.length} domów ·{' '}
-                        {formatDistance(day.totalDistanceMeters)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-700 leading-relaxed">
-                    <span className="text-slate-500">Ulice: </span>
-                    <span className="font-medium text-slate-900">
-                      {day.streetNames.join(', ')}
-                    </span>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => onViewDayOnMap(day.date)}
-                      className="flex-1 min-h-[40px] px-3 py-2 text-xs font-medium text-slate-800 bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
-                      <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-                      Zobacz na mapie
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onInspectDay(day.date);
-                        setViewMode('day');
-                      }}
-                      className="flex-1 min-h-[40px] px-3 py-2 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
-                      <Route className="w-3.5 h-3.5" />
-                      Plan godzinowy
-                    </button>
-                  </div>
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )
+          )}
+        </div>
       ) : effectiveViewMode === 'announcements' ? (
         /* PARISH BULLETIN ANNOUNCEMENTS VIEW (RODO-SAFE) */
         announcementDays.length === 0 ? (
@@ -787,36 +1340,33 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 )}
 
                 <div className="overflow-x-auto print:overflow-visible">
-                  <table className="w-full text-left border-collapse text-sm print:text-xs">
+                  <table className="w-full text-left border-collapse text-sm print:text-xs print:table-fixed">
                     <colgroup>
-                      <col style={{ width: '32px' }} />
-                      <col style={{ width: '78px' }} />
-                      <col style={{ width: '58px' }} />
+                      <col className="w-[30px] print:w-[24px]" />
+                      <col className="w-[76px] print:w-[68px]" />
+                      <col className="w-[54px] print:w-[46px]" />
                       <col />
-                      <col
-                        className="hidden sm:table-cell print:table-cell"
-                        style={{ width: '30%' }}
-                      />
-                      <col style={{ width: '58px' }} />
+                      <col className="hidden sm:table-cell print:table-cell w-[28%] print:w-[26%]" />
+                      <col className="w-[56px] print:w-[48px]" />
                     </colgroup>
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50/50 text-xs font-semibold text-slate-600">
-                        <th className="py-2.5 print:py-1.5 px-2 text-center whitespace-nowrap">
+                        <th className="py-2.5 print:py-1.5 px-2 print:px-1 text-center whitespace-nowrap">
                           ✓
                         </th>
-                        <th className="py-2.5 print:py-1.5 px-2 whitespace-nowrap">
+                        <th className="py-2.5 print:py-1.5 px-2 print:px-1 whitespace-nowrap">
                           Nr
                         </th>
-                        <th className="py-2.5 print:py-1.5 px-2 whitespace-nowrap">
+                        <th className="py-2.5 print:py-1.5 px-2 print:px-1 whitespace-nowrap">
                           Godz.
                         </th>
-                        <th className="py-2.5 print:py-1.5 px-2.5">
+                        <th className="py-2.5 print:py-1.5 px-2.5 print:px-1.5">
                           Adres domu
                         </th>
-                        <th className="py-2.5 print:py-1.5 px-2.5 hidden sm:table-cell print:table-cell">
+                        <th className="py-2.5 print:py-1.5 px-2.5 print:px-1.5 hidden sm:table-cell print:table-cell">
                           Rodzina / Notatki w terenie
                         </th>
-                        <th className="py-2.5 print:py-1.5 px-2.5 text-right whitespace-nowrap">
+                        <th className="py-2.5 print:py-1.5 px-2.5 print:px-1.5 text-right whitespace-nowrap">
                           Czas
                         </th>
                       </tr>
@@ -863,13 +1413,13 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 : 'hover:bg-slate-50/60'
                             }
                           >
-                            <td className="py-2 print:py-1.5 px-2 text-center align-top whitespace-nowrap">
+                            <td className="py-2 print:py-1.5 px-2 print:px-1 text-center align-top whitespace-nowrap">
                               <span
                                 aria-hidden="true"
                                 className="inline-block w-4 h-4 mt-0.5 rounded border border-slate-400 bg-white"
                               />
                             </td>
-                            <td className="py-2 print:py-1.5 px-2 align-top whitespace-nowrap">
+                            <td className="py-2 print:py-1.5 px-2 print:px-1 align-top whitespace-nowrap">
                               <div className="inline-flex items-center gap-1 whitespace-nowrap">
                                 <span
                                   className={`w-5 h-5 text-[11px] font-mono font-bold text-white inline-flex items-center justify-center shrink-0 tabular-nums ${
@@ -890,10 +1440,10 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 )}
                               </div>
                             </td>
-                            <td className="py-2 print:py-1.5 px-2 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap align-top">
+                            <td className="py-2 print:py-1.5 px-2 print:px-1 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap align-top">
                               {item.arrivalTime}
                             </td>
-                            <td className="py-2 print:py-1.5 px-2.5 text-xs sm:text-sm print:text-xs font-semibold text-slate-900 align-top leading-snug">
+                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs sm:text-sm print:text-xs font-semibold text-slate-900 align-top leading-snug break-words">
                               <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                                 <span>{houseAddress}</span>
                                 {isBlock && (
@@ -913,7 +1463,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 </div>
                               )}
                             </td>
-                            <td className="py-2 print:py-1.5 px-2.5 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top leading-snug">
+                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top leading-snug break-words">
                               {secondaryParts.length > 0 ? (
                                 <span>{secondaryParts.join(' · ')}</span>
                               ) : (
@@ -923,7 +1473,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 />
                               )}
                             </td>
-                            <td className="py-2 print:py-1.5 px-2.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap align-top">
+                            <td className="py-2 print:py-1.5 px-2.5 print:px-1.5 text-right font-mono text-xs text-slate-600 tabular-nums whitespace-nowrap align-top">
                               {item.stop.durationMinutes} min
                             </td>
                           </tr>
