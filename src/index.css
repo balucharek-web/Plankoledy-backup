@@ -27,8 +27,19 @@
   font-variant-numeric: tabular-nums;
 }
 
+.print-offscreen {
+  position: fixed;
+  left: -99999px;
+  top: 0;
+  width: 794px;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+}
+
 @page {
-  margin: 12mm;
+  size: A4 portrait;
+  margin: 10mm 11mm;
 }
 
 @media print {
@@ -43,6 +54,7 @@
     color-adjust: exact;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+    font-size: 11px !important;
   }
 
   header,
@@ -62,17 +74,41 @@
     background: #ffffff !important;
   }
 
-  .print-only {
+  .print-only,
+  .print-offscreen {
     display: block !important;
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    width: 100% !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+    z-index: auto !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    break-inside: auto;
+    page-break-inside: auto;
   }
 
   thead {
     display: table-header-group;
   }
 
+  tbody {
+    break-inside: auto;
+  }
+
   tr,
   .print-break-avoid {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+
+  .print-break-after-avoid {
+    break-after: avoid;
+    page-break-after: avoid;
   }
 }

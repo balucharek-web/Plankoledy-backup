@@ -2607,7 +2607,7 @@ function ParishPlannerWorkspace({
               </div>
             </section>
           </main>
-          <div className="hidden print-only print-reset bg-white w-full">
+          <div className="print-offscreen print-reset bg-white w-full">
             <PrintScheduleSheet
               parish={parish}
               boundary={boundary}
@@ -2621,8 +2621,8 @@ function ParishPlannerWorkspace({
               effectiveEndTime={effectiveEndTime}
               exactDayKeys={exactDayKeys}
               forcedViewMode={
-                activeSection === 'routes' ||
-                (activeSection === 'stops' && selectedDate !== null) ||
+                displayedRoutes.length > 0 ||
+                selectedDate !== null ||
                 plannedDays.length <= 1
                   ? 'day'
                   : 'season'

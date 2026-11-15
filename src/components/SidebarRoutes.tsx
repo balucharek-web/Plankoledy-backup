@@ -1023,7 +1023,37 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => window.print()}
+            onClick={() => {
+              const imgs = Array.from(
+                document.querySelectorAll<HTMLImageElement>(
+                  'img[data-print-map-tile="true"]'
+                )
+              );
+              const pending = imgs.filter((img) => !img.complete);
+              if (pending.length === 0) {
+                window.print();
+                return;
+              }
+              let printed = false;
+              const finish = () => {
+                if (printed) return;
+                printed = true;
+                window.print();
+              };
+              const timer = window.setTimeout(finish, 900);
+              let remaining = pending.length;
+              const onDone = () => {
+                remaining -= 1;
+                if (remaining <= 0) {
+                  window.clearTimeout(timer);
+                  finish();
+                }
+              };
+              pending.forEach((img) => {
+                img.addEventListener('load', onDone, { once: true });
+                img.addEventListener('error', onDone, { once: true });
+              });
+            }}
             className="min-h-[40px] py-2 px-3 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <Printer className="w-3.5 h-3.5" />

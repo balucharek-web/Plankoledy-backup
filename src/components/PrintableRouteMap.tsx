@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   LatLng,
   ParishCenter,
@@ -15,7 +15,7 @@ interface PrintableRouteMapProps {
 }
 
 const VIEW_W = 860;
-const VIEW_H = 420;
+const VIEW_H = 380;
 const TILE_SIZE = 256;
 
 function projectToWorldPx(pt: LatLng, zoom: number): { x: number; y: number } {
@@ -34,7 +34,7 @@ function chooseBestZoom(
   height: number
 ): { zoom: number; centerX: number; centerY: number } {
   const padX = width * 0.82;
-  const padY = height * 0.78;
+  const padY = height * 0.76;
 
   for (let z = 18; z >= 12; z--) {
     let minX = Number.POSITIVE_INFINITY;
@@ -72,6 +72,10 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
   isExactRoute = false,
   title,
 }) => {
+  const [fallbackTiles, setFallbackTiles] = useState<Record<string, boolean>>(
+    {}
+  );
+
   const activeRoutes = useMemo(
     () => routes.filter((r) => r.orderedStops.length > 0),
     [routes]
@@ -87,8 +91,8 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
 
     if (stopPoints.length === 0 && !parish) return null;
 
-    // Fit around stops first so dense streets stay crisp and legible;
-    // include church if it sits naturally near the street(s)
+    // Fit tightly around the route stops first so street layout and numbers are legible;
+    // include church anchor when it is reasonably close.
     const fitPoints: LatLng[] =
       stopPoints.length > 0 ? [...stopPoints] : parish ? [parish.location] : [];
 
@@ -126,7 +130,8 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
 
     const tiles: Array<{
       key: string;
-      url: string;
+      primaryUrl: string;
+      fallbackUrl: string;
       leftPct: number;
       topPct: number;
       widthPct: number;
@@ -141,7 +146,8 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         const topPx = ty * TILE_SIZE - originY;
         tiles.push({
           key: `${zoom}_${tx}_${ty}`,
-          url: `https://tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
+          primaryUrl: `https://basemaps.cartocdn.com/rastertiles/voyager/${zoom}/${wrappedTx}/${ty}.png`,
+          fallbackUrl: `https://tile.openstreetmap.org/${zoom}/${wrappedTx}/${ty}.png`,
           leftPct: (leftPx / VIEW_W) * 100,
           topPct: (topPx / VIEW_H) * 100,
           widthPct: (TILE_SIZE / VIEW_W) * 100,
@@ -177,12 +183,30 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
               ...(parish ? [parish.location] : []),
               ...route.orderedStops.map((s) => s.stop.location),
             ];
-      const polylineStr = pathPts
-        .map((pt) => {
-          const v = toView(pt);
-          return `${v.x.toFixed(1)},${v.y.toFixed(1)}`;
-        })
+      const viewPathPts = pathPts.map(toView);
+      const polylineStr = viewPathPts
+        .map((v) => `${v.x.toFixed(1)},${v.y.toFixed(1)}`)
         .join(' ');
+
+      // Build subtle directional chevrons along the route so print shows walking direction
+      const arrows: Array<{ x: number; y: number; angleDeg: number }> = [];
+      let accumDist = 0;
+      for (let i = 1; i < viewPathPts.length; i++) {
+        const a = viewPathPts[i - 1];
+        const b = viewPathPts[i];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const segLen = Math.hypot(dx, dy);
+        accumDist += segLen;
+        if (segLen >= 34 && accumDist >= 65) {
+          accumDist = 0;
+          arrows.push({
+            x: (a.x + b.x) / 2,
+            y: (a.y + b.y) / 2,
+            angleDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+          });
+        }
+      }
 
       const markers = route.orderedStops.map((item, idx) => {
         const v = toView(item.stop.location);
@@ -211,6 +235,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
       return {
         route,
         polylineStr,
+        arrows,
         markers,
         firstStopAddress: firstStop
           ? firstStop.address || firstStop.label
@@ -229,23 +254,33 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
     };
   }, [activeRoutes, boundary, parish]);
 
+  // Preload raster map tiles into browser cache even when rendered offscreen before window.print()
+  useEffect(() => {
+    if (!mapData) return;
+    mapData.tiles.forEach((tile) => {
+      const img = new window.Image();
+      img.decoding = 'sync';
+      img.src = tile.primaryUrl;
+    });
+  }, [mapData]);
+
   if (!mapData || activeRoutes.length === 0) return null;
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden print-break-avoid">
-      <div className="px-4 py-2.5 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2">
+    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden print:border-slate-300 print-break-avoid">
+      <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2 print:py-1.5 print:px-3">
         <div className="text-xs font-bold text-slate-900">
           {title || 'Mapa trasy kolędy (START i wszystkie punkty do odwiedzenia)'}
         </div>
         <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-3">
-          <span className="inline-flex items-center gap-1">
+          <span className="inline-flex items-center gap-1 whitespace-nowrap">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-700 border border-white shadow-xs" />
             <span>Punkt START</span>
           </span>
           {mapData.projectedRoutes.map(({ route }) => (
             <span
               key={route.priestId}
-              className="inline-flex items-center gap-1 font-medium text-slate-800"
+              className="inline-flex items-center gap-1 font-medium text-slate-800 whitespace-nowrap"
             >
               <span
                 className="inline-block w-2.5 h-2.5 rounded-full"
@@ -259,15 +294,12 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         </div>
       </div>
 
-      {/* Map Viewport */}
-      <div
-        className="relative w-full overflow-hidden bg-slate-100"
-        style={{ aspectRatio: `${VIEW_W} / ${VIEW_H}` }}
-      >
+      {/* Map Viewport — explicit intrinsic SVG dimensions guarantee height in all print engines */}
+      <div className="relative w-full overflow-hidden bg-slate-50">
         {/* Subtle fallback grid if offline or tiles blocked */}
         <div
           aria-hidden="true"
-          className="absolute inset-0 opacity-35"
+          className="absolute inset-0 z-0 opacity-35"
           style={{
             backgroundImage:
               'linear-gradient(to right, #CBD5E1 1px, transparent 1px), linear-gradient(to bottom, #CBD5E1 1px, transparent 1px)',
@@ -275,36 +307,48 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
           }}
         />
 
-        {/* OSM Static Tiles aligned to exact Web-Mercator viewport */}
-        {mapData.tiles.map((tile) => (
-          <img
-            key={tile.key}
-            src={tile.url}
-            alt=""
-            aria-hidden="true"
-            loading="eager"
-            decoding="sync"
-            onError={(e) => {
-              e.currentTarget.style.display = 'none';
-            }}
-            style={{
-              position: 'absolute',
-              left: `${tile.leftPct}%`,
-              top: `${tile.topPct}%`,
-              width: `${tile.widthPct}%`,
-              height: `${tile.heightPct}%`,
-              maxWidth: 'none',
-              maxHeight: 'none',
-              opacity: 0.88,
-              pointerEvents: 'none',
-            }}
-          />
-        ))}
+        {/* Raster street map tiles aligned to exact Web-Mercator viewport */}
+        <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+          {mapData.tiles.map((tile) => {
+            const useFallback = Boolean(fallbackTiles[tile.key]);
+            return (
+              <img
+                key={tile.key}
+                data-print-map-tile="true"
+                src={useFallback ? tile.fallbackUrl : tile.primaryUrl}
+                alt=""
+                aria-hidden="true"
+                loading="eager"
+                decoding="sync"
+                onError={(e) => {
+                  if (!useFallback) {
+                    setFallbackTiles((prev) => ({
+                      ...prev,
+                      [tile.key]: true,
+                    }));
+                  } else {
+                    e.currentTarget.style.display = 'none';
+                  }
+                }}
+                style={{
+                  position: 'absolute',
+                  left: `${tile.leftPct}%`,
+                  top: `${tile.topPct}%`,
+                  width: `${tile.widthPct}%`,
+                  height: `${tile.heightPct}%`,
+                  maxWidth: 'none',
+                  maxHeight: 'none',
+                  opacity: 0.92,
+                }}
+              />
+            );
+          })}
+        </div>
 
         {/* Crisp Vector Route & Numbered Points Overlay */}
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-          className="absolute inset-0 w-full h-full"
+          className="relative z-10 block w-full h-auto"
           preserveAspectRatio="xMidYMid meet"
         >
           {/* Subtle parish boundary */}
@@ -318,8 +362,8 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
             />
           )}
 
-          {/* White halo under routes + colored path lines */}
-          {mapData.projectedRoutes.map(({ route, polylineStr }) => (
+          {/* White halo under routes + colored path lines + direction chevrons */}
+          {mapData.projectedRoutes.map(({ route, polylineStr, arrows }) => (
             <g key={`path-${route.priestId}`}>
               <polyline
                 points={polylineStr}
@@ -328,18 +372,31 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
                 strokeWidth="6"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                opacity="0.88"
+                opacity="0.92"
               />
               <polyline
                 points={polylineStr}
                 fill="none"
                 stroke={route.color}
-                strokeWidth="3.5"
+                strokeWidth="3.2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                strokeDasharray={isExactRoute ? undefined : '7 6'}
+                strokeDasharray={isExactRoute ? undefined : '7 5'}
                 opacity="0.95"
               />
+              {arrows.map((arr, aIdx) => (
+                <g
+                  key={`arr-${route.priestId}-${aIdx}`}
+                  transform={`translate(${arr.x.toFixed(1)}, ${arr.y.toFixed(1)}) rotate(${arr.angleDeg.toFixed(1)})`}
+                >
+                  <polygon
+                    points="-4,-3.5 5,0 -4,3.5"
+                    fill={route.color}
+                    stroke="#FFFFFF"
+                    strokeWidth="1"
+                  />
+                </g>
+              ))}
             </g>
           ))}
 
@@ -349,17 +406,17 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
               transform={`translate(${mapData.parishPos.x.toFixed(1)}, ${mapData.parishPos.y.toFixed(1)})`}
             >
               <circle
-                r="13"
+                r="12"
                 fill="#B45309"
                 stroke="#FEF3C7"
                 strokeWidth="2.5"
               />
               <text
                 x="0"
-                y="4.5"
+                y="4.2"
                 textAnchor="middle"
                 fill="#FEF3C7"
-                fontSize="13"
+                fontSize="12"
                 fontWeight="700"
               >
                 ✝
@@ -371,9 +428,9 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
           {mapData.projectedRoutes.map(({ route, markers }) =>
             [...markers].reverse().map(({ item, x, y, isFirst, isBlock }) => {
               const fill = isFirst ? '#15803D' : route.color;
-              const r = isFirst ? 12 : 9.5;
+              const r = isFirst ? 11.5 : 9;
               const fontSize =
-                item.orderIndex >= 100 ? 7.5 : item.orderIndex >= 10 ? 8.5 : 9.5;
+                item.orderIndex >= 100 ? 7 : item.orderIndex >= 10 ? 8 : 9;
               const labelStr = String(item.orderIndex);
 
               return (
@@ -382,7 +439,7 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
                   transform={`translate(${x.toFixed(1)}, ${y.toFixed(1)})`}
                 >
                   {isFirst && (
-                    <g transform="translate(0, -19)">
+                    <g transform="translate(0, -18)">
                       <rect
                         x="-20"
                         y="-10"
@@ -413,23 +470,23 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
                       y={-r}
                       width={r * 2}
                       height={r * 2}
-                      rx="4.5"
+                      rx="4"
                       fill={fill}
                       stroke="#FFFFFF"
-                      strokeWidth={isFirst ? 2.5 : 1.8}
+                      strokeWidth={isFirst ? 2.5 : 1.6}
                     />
                   ) : (
                     <circle
                       r={r}
                       fill={fill}
                       stroke="#FFFFFF"
-                      strokeWidth={isFirst ? 2.5 : 1.8}
+                      strokeWidth={isFirst ? 2.5 : 1.6}
                     />
                   )}
 
                   <text
                     x="0"
-                    y="3.2"
+                    y="3"
                     textAnchor="middle"
                     fill="#FFFFFF"
                     fontSize={fontSize}
@@ -445,13 +502,13 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
         </svg>
 
         {/* Map attribution */}
-        <div className="absolute bottom-1.5 right-2 px-1.5 py-0.5 bg-white/85 rounded text-[9px] text-slate-600">
-          © OpenStreetMap contributors
+        <div className="absolute bottom-1.5 right-2 z-20 px-1.5 py-0.5 bg-white/90 rounded text-[9px] text-slate-600">
+          © OpenStreetMap / CARTO
         </div>
       </div>
 
       {/* Clear Street & Start Point Legend Footer */}
-      <div className="px-4 py-2.5 border-t border-slate-200 bg-slate-50/50 space-y-1 text-xs">
+      <div className="px-4 py-2 border-t border-slate-200 bg-slate-50/60 space-y-1 text-xs print:px-3 print:py-1.5">
         {mapData.projectedRoutes.map(({ route, firstStopAddress, streets }) => (
           <div
             key={`legend-${route.priestId}`}
@@ -463,8 +520,8 @@ export const PrintableRouteMap: React.FC<PrintableRouteMapProps> = ({
               </span>
               <span>{firstStopAddress}</span>
             </span>
-            <span className="text-slate-500">
-              Ulice: <strong className="text-slate-800">{streets.join(', ')}</strong>
+            <span className="text-slate-600">
+              Ulice: <strong className="text-slate-900">{streets.join(', ')}</strong>
             </span>
           </div>
         ))}
