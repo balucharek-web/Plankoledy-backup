@@ -20,6 +20,23 @@ export interface PriestProfile {
   textColor: string;
 }
 
+export type UnitVisitStatus =
+  | 'pending'
+  | 'accepted'
+  | 'absent'
+  | 'declined'
+  | 'invited';
+
+export interface BuildingUnit {
+  id: string;
+  unitNumber: string;
+  staircase?: string;
+  familyName?: string;
+  notes?: string;
+  status?: UnitVisitStatus;
+  durationMinutes?: number;
+}
+
 export interface VisitStop {
   id: string;
   label: string;
@@ -32,6 +49,10 @@ export interface VisitStop {
   inBoundary?: boolean;
   included?: boolean;
   visitDate?: string; // 'YYYY-MM-DD' or '' if unassigned
+  isMultiUnit?: boolean;
+  unitsCount?: number;
+  minutesPerUnit?: number;
+  units?: BuildingUnit[];
 }
 
 export interface ScheduledStopItem {

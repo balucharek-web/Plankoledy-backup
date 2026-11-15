@@ -16,6 +16,8 @@ export interface SelectedPlaceData {
   location: LatLng;
   placeId: string;
   placeType?: 'parish' | 'place' | 'address';
+  isMultiUnit?: boolean;
+  unitsCount?: number;
 }
 
 interface PlaceSearchInputProps {

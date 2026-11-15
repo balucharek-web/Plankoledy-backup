@@ -10,6 +10,8 @@ export interface OsmHousePoint {
   label: string;
   fullAddress: string;
   location: LatLng;
+  isMultiUnit?: boolean;
+  suggestedUnitsCount?: number;
 }
 
 export interface OsmStreetGroup {
@@ -704,6 +706,21 @@ out center tags qt;
           city
         );
 
+        const flatsRaw = Number.parseInt(
+          tags['building:flats'] || tags['addr:flats'] || '',
+          10
+        );
+        const isApartments =
+          tags.building === 'apartments' ||
+          tags.building === 'dormitory' ||
+          (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+        const suggestedUnitsCount =
+          !Number.isNaN(flatsRaw) && flatsRaw > 1
+            ? Math.min(500, flatsRaw)
+            : isApartments
+              ? 15
+              : undefined;
+
         group.housesByNumber[houseKey] = {
           id: `${el.type}-${el.id}`,
           street: group.streetName,
@@ -713,6 +730,7 @@ out center tags qt;
           label,
           fullAddress,
           location: pt,
+          ...(isApartments ? { isMultiUnit: true, suggestedUnitsCount } : {}),
         };
       }
     }
@@ -1034,6 +1052,21 @@ out center tags qt;
         city
       );
 
+      const flatsRaw = Number.parseInt(
+        tags['building:flats'] || tags['addr:flats'] || '',
+        10
+      );
+      const isApartments =
+        tags.building === 'apartments' ||
+        tags.building === 'dormitory' ||
+        (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+      const suggestedUnitsCount =
+        !Number.isNaN(flatsRaw) && flatsRaw > 1
+          ? Math.min(500, flatsRaw)
+          : isApartments
+            ? 15
+            : undefined;
+
       byNumber[key] = {
         id: `${el.type}-${el.id}`,
         street: canonicalStreet,
@@ -1043,6 +1076,7 @@ out center tags qt;
         label,
         fullAddress,
         location: { lat, lng },
+        ...(isApartments ? { isMultiUnit: true, suggestedUnitsCount } : {}),
       };
 
       sumLat += lat;

@@ -10,7 +10,6 @@ import {
   VisitStop,
 } from '../types/parish';
 import {
-  MAX_ROUTES_API_INTERMEDIATES,
   addMinutesToHHMM,
   extractStreetName,
   partitionStopsBySector,
@@ -637,12 +636,8 @@ export function autoScheduleSeason({
       (acc, s) => acc + s.durationMinutes + perStopTravelEstimate,
       0
     );
-    const maxStopsOnDay = priestCount * MAX_ROUTES_API_INTERMEDIATES;
 
-    if (
-      alreadyOnDay.length >= maxStopsOnDay ||
-      usedMinutesOnDay >= totalDayTeamBudget - 15
-    ) {
+    if (usedMinutesOnDay >= totalDayTeamBudget - 15) {
       continue;
     }
 
@@ -650,7 +645,6 @@ export function autoScheduleSeason({
     let dayMinutesAccum = usedMinutesOnDay;
 
     while (cursorIdx < orderedQueue.length) {
-      if (alreadyOnDay.length + dayBatch.length >= maxStopsOnDay) break;
       const nextStop = orderedQueue[cursorIdx];
       const cost = nextStop.durationMinutes + perStopTravelEstimate;
 
@@ -721,7 +715,15 @@ export function exportFullSeasonToCsv(
     for (const route of day.estimatedRoutes) {
       for (const item of route.orderedStops) {
         const houseAddress = item.stop.address || item.stop.label;
+        const unitCount = item.stop.units?.length || item.stop.unitsCount || 0;
+        const blockLabel =
+          item.stop.isMultiUnit && unitCount > 0
+            ? `Blok (${unitCount} lok.)`
+            : item.stop.isMultiUnit
+              ? 'Blok'
+              : '';
         const notes = [
+          blockLabel,
           item.stop.label && item.stop.label !== houseAddress
             ? item.stop.label
             : '',

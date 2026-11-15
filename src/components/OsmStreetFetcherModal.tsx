@@ -188,6 +188,12 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
         address: house.fullAddress,
         location: house.location,
         placeId: '',
+        ...(house.isMultiUnit
+          ? {
+              isMultiUnit: true,
+              unitsCount: house.suggestedUnitsCount ?? 15,
+            }
+          : {}),
       });
     }
 

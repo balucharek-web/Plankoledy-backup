@@ -11,6 +11,7 @@ import {
 } from '@vis.gl/react-google-maps';
 import {
   AlertCircle,
+  Building2,
   Check,
   CheckCircle2,
   Church,
@@ -57,6 +58,7 @@ interface ParishMapProps {
   onMapPickStreet: (location: LatLng) => void;
   onSelectStop: (stopId: string | null) => void;
   onDeleteStop: (stopId: string) => void;
+  onOpenBlockUnits?: (stopId: string) => void;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -72,6 +74,7 @@ interface StopMarkerProps {
   onSelect: () => void;
   onClose: () => void;
   onDelete: () => void;
+  onOpenBlockUnits?: () => void;
 }
 
 const StopMarker: React.FC<StopMarkerProps> = ({
@@ -85,9 +88,12 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   onSelect,
   onClose,
   onDelete,
+  onOpenBlockUnits,
 }) => {
   const [markerRef, marker] = useAdvancedMarkerRef();
-  const size = !isActiveInView ? 12 : orderNumber ? 28 : 22;
+  const isBlock = Boolean(stop.isMultiUnit || (stop.units && stop.units.length > 0));
+  const unitsTotal = stop.units?.length || stop.unitsCount || 0;
+  const size = !isActiveInView ? 12 : orderNumber ? 28 : isBlock ? 25 : 22;
   const opacity = !isActiveInView ? 0.32 : isDimmedByPriest ? 0.38 : 1;
 
   return (
@@ -110,7 +116,9 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         onClick={onSelect}
       >
         <div
-          className="flex items-center justify-center rounded-full text-xs font-mono font-semibold shadow-md transition-transform hover:scale-110 cursor-pointer select-none"
+          className={`flex items-center justify-center text-xs font-mono font-semibold shadow-md transition-transform hover:scale-110 cursor-pointer select-none ${
+            isBlock ? 'rounded-md' : 'rounded-full'
+          }`}
           style={{
             width: size,
             height: size,
@@ -122,12 +130,12 @@ const StopMarker: React.FC<StopMarkerProps> = ({
             opacity,
           }}
         >
-          {isActiveInView ? (orderNumber ?? '') : ''}
+          {isActiveInView ? (orderNumber ?? (isBlock ? 'B' : '')) : ''}
         </div>
       </AdvancedMarker>
 
       {isSelected && marker && (
-        <InfoWindow anchor={marker} onCloseClick={onClose} maxWidth={260}>
+        <InfoWindow anchor={marker} onCloseClick={onClose} maxWidth={280}>
           <div className="p-1 text-slate-900">
             <div className="text-xs font-medium text-slate-500">
               {isActiveInView
@@ -137,7 +145,15 @@ const StopMarker: React.FC<StopMarkerProps> = ({
                   }${orderNumber ? ` · Przystanek #${orderNumber}` : ''}`
                 : 'Poza wybranym dniem / bieżącym planem'}
             </div>
-            <div className="text-sm font-semibold mt-0.5">{stop.address}</div>
+            <div className="text-sm font-semibold mt-0.5 flex items-center gap-1.5">
+              {isBlock && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[11px] font-semibold shrink-0">
+                  <Building2 className="w-3 h-3" />
+                  Blok{unitsTotal > 0 ? ` · ${unitsTotal} lok.` : ''}
+                </span>
+              )}
+              <span>{stop.address}</span>
+            </div>
             {stop.visitDate && (
               <div className="text-xs text-amber-800 font-medium mt-0.5 tabular-nums">
                 Zaplanowano: {stop.visitDate}
@@ -155,18 +171,49 @@ const StopMarker: React.FC<StopMarkerProps> = ({
                 </span>
               )}
             </div>
+            {stop.units && stop.units.length > 0 && (
+              <div className="mt-1.5 p-1.5 bg-slate-50 border border-slate-200 rounded text-[11px] text-slate-700 space-y-0.5">
+                <div className="font-semibold text-slate-800">
+                  Lokale w bloku ({stop.units.length}):
+                </div>
+                {stop.units.slice(0, 4).map((u) => (
+                  <div key={u.id} className="truncate">
+                    {u.staircase ? `kl. ${u.staircase} ` : ''}m. {u.unitNumber}
+                    {u.familyName ? ` — ${u.familyName}` : ''}
+                  </div>
+                ))}
+                {stop.units.length > 4 && (
+                  <div className="text-slate-500">
+                    +{stop.units.length - 4} kolejnych lokali...
+                  </div>
+                )}
+              </div>
+            )}
             {stop.notes && (
               <div className="text-xs text-slate-600 mt-1 border-t border-slate-100 pt-1">
                 {stop.notes}
               </div>
             )}
-            <button
-              type="button"
-              onClick={onDelete}
-              className="mt-2 text-xs font-medium text-red-600 hover:text-red-700"
-            >
-              Usuń adres z parafii
-            </button>
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              {onOpenBlockUnits && (
+                <button
+                  type="button"
+                  onClick={onOpenBlockUnits}
+                  className="text-xs font-semibold text-amber-800 hover:text-amber-900 underline"
+                >
+                  {isBlock
+                    ? `Rozpiska lokali (${unitsTotal})`
+                    : 'Konfiguruj lokale / blok'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onDelete}
+                className="text-xs font-medium text-red-600 hover:text-red-700"
+              >
+                Usuń adres
+              </button>
+            </div>
           </div>
         </InfoWindow>
       )}
@@ -476,6 +523,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   onMapPickStreet,
   onSelectStop,
   onDeleteStop,
+  onOpenBlockUnits,
 }) => {
   const orderByStopId = useMemo(() => {
     const dict: Record<string, number> = {};
@@ -550,6 +598,14 @@ export const ParishMap: React.FC<ParishMapProps> = ({
                 onSelectStop(null);
                 onDeleteStop(stop.id);
               }}
+              onOpenBlockUnits={
+                onOpenBlockUnits
+                  ? () => {
+                      onSelectStop(null);
+                      onOpenBlockUnits(stop.id);
+                    }
+                  : undefined
+              }
             />
           );
         })}

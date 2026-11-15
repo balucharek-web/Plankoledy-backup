@@ -519,38 +519,72 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                   <tbody className="divide-y divide-slate-100">
                     {route.orderedStops.map((item) => {
                       const houseAddress = item.stop.address || item.stop.label;
+                      const isBlock = Boolean(
+                        item.stop.isMultiUnit ||
+                          (item.stop.units && item.stop.units.length > 0)
+                      );
+                      const unitsTotal =
+                        item.stop.units?.length || item.stop.unitsCount || 0;
+                      const blockLabel = isBlock
+                        ? `Blok${unitsTotal > 0 ? ` (${unitsTotal} lok.)` : ''}`
+                        : '';
                       const secondaryParts = [
+                        blockLabel,
                         item.stop.label && item.stop.label !== houseAddress
                           ? item.stop.label
                           : '',
                         item.stop.notes || '',
                       ].filter(Boolean);
 
+                      const unitsSummary =
+                        item.stop.units && item.stop.units.length > 0
+                          ? item.stop.units
+                              .map(
+                                (u) =>
+                                  `${u.staircase ? `kl. ${u.staircase} ` : ''}m. ${u.unitNumber}${
+                                    u.familyName ? ` (${u.familyName})` : ''
+                                  }`
+                              )
+                              .join(', ')
+                          : '';
+
                       return (
                         <tr key={item.stop.id} className="hover:bg-slate-50/60">
-                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs text-slate-500 tabular-nums">
+                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs text-slate-500 tabular-nums align-top">
                             {item.orderIndex}.
                           </td>
-                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs font-medium text-slate-900 tabular-nums whitespace-nowrap">
+                          <td className="py-2.5 px-3 sm:px-4 font-mono text-xs font-medium text-slate-900 tabular-nums whitespace-nowrap align-top">
                             {item.arrivalTime}–{item.departureTime}
                           </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-xs sm:text-sm font-medium text-slate-900">
-                            <div>{houseAddress}</div>
+                          <td className="py-2.5 px-3 sm:px-4 text-xs sm:text-sm font-medium text-slate-900 align-top">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span>{houseAddress}</span>
+                              {isBlock && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold tabular-nums">
+                                  {blockLabel}
+                                </span>
+                              )}
+                            </div>
+                            {unitsSummary && (
+                              <div className="text-[11px] font-normal text-slate-600 mt-1 leading-relaxed">
+                                Lokale: {unitsSummary}
+                              </div>
+                            )}
                             {secondaryParts.length > 0 && (
                               <div className="sm:hidden text-[11px] font-normal text-slate-500 mt-0.5">
                                 {secondaryParts.join(' · ')}
                               </div>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-xs text-slate-600 hidden sm:table-cell print:table-cell">
+                          <td className="py-2.5 px-3 sm:px-4 text-xs text-slate-600 hidden sm:table-cell print:table-cell align-top">
                             {secondaryParts.length > 0
                               ? secondaryParts.join(' · ')
                               : '—'}
                           </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-500 tabular-nums whitespace-nowrap hidden sm:table-cell print:table-cell">
+                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-500 tabular-nums whitespace-nowrap hidden sm:table-cell print:table-cell align-top">
                             {formatDistance(item.legDistanceMeters)}
                           </td>
-                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap">
+                          <td className="py-2.5 px-3 sm:px-4 text-right font-mono text-xs text-slate-700 tabular-nums whitespace-nowrap align-top">
                             {item.stop.durationMinutes} min
                           </td>
                         </tr>

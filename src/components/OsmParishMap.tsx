@@ -40,6 +40,7 @@ interface OsmParishMapProps {
   onMapPickStreet: (location: LatLng) => void;
   onSelectStop: (stopId: string | null) => void;
   onDeleteStop: (stopId: string) => void;
+  onOpenBlockUnits?: (stopId: string) => void;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -71,6 +72,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onMapPickStreet,
   onSelectStop,
   onDeleteStop,
+  onOpenBlockUnits,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -95,6 +97,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onSelectStopRef.current = onSelectStop;
   const onDeleteStopRef = useRef(onDeleteStop);
   onDeleteStopRef.current = onDeleteStop;
+  const onOpenBlockUnitsRef = useRef(onOpenBlockUnits);
+  onOpenBlockUnitsRef.current = onOpenBlockUnits;
   const onBoundaryCompleteRef = useRef(onBoundaryComplete);
   onBoundaryCompleteRef.current = onBoundaryComplete;
   const onBoundaryUpdateRef = useRef(onBoundaryUpdate);
@@ -356,18 +360,22 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         : stop.included !== false;
       const isDimmedByPriest =
         focusedPriestId !== null && stop.priestId !== focusedPriestId;
-      const size = !isActiveInView ? 12 : orderNum ? 28 : 22;
+      const isBlock = Boolean(
+        stop.isMultiUnit || (stop.units && stop.units.length > 0)
+      );
+      const unitsTotal = stop.units?.length || stop.unitsCount || 0;
+      const size = !isActiveInView ? 12 : orderNum ? 28 : isBlock ? 25 : 22;
       const opacity = !isActiveInView ? 0.32 : isDimmedByPriest ? 0.38 : 1;
+      const borderRadius = isBlock ? '6px' : '9999px';
+      const markerLabel = isActiveInView ? (orderNum ?? (isBlock ? 'B' : '')) : '';
 
       const icon = L.divIcon({
         className: '',
-        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${
+        html: `<div style="width:${size}px;height:${size}px;border-radius:${borderRadius};background:${
           isActiveInView ? palette.color : '#CBD5E1'
         };border:2.5px solid ${
           isSelected ? '#0F172A' : isActiveInView ? palette.borderColor : '#64748B'
-        };opacity:${opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${
-          isActiveInView ? (orderNum ?? '') : ''
-        }</div>`,
+        };opacity:${opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,0.28);cursor:pointer;">${markerLabel}</div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       });
@@ -385,9 +393,32 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
                 : 100,
       }).addTo(layer);
 
+      const unitsPreviewHtml =
+        stop.units && stop.units.length > 0
+          ? `<div style="margin-top:6px;padding:5px 6px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;font-size:11px;color:#334155;">
+              <div style="font-weight:700;color:#0F172A;margin-bottom:2px;">Lokale w bloku (${stop.units.length}):</div>
+              ${stop.units
+                .slice(0, 4)
+                .map(
+                  (u) =>
+                    `<div>${
+                      u.staircase ? `kl. ${escapeHtml(u.staircase)} ` : ''
+                    }m. ${escapeHtml(u.unitNumber)}${
+                      u.familyName ? ` — ${escapeHtml(u.familyName)}` : ''
+                    }</div>`
+                )
+                .join('')}
+              ${
+                stop.units.length > 4
+                  ? `<div style="color:#64748B;">+${stop.units.length - 4} kolejnych lokali...</div>`
+                  : ''
+              }
+            </div>`
+          : '';
+
       const popupEl = document.createElement('div');
       popupEl.style.fontSize = '12px';
-      popupEl.style.maxWidth = '240px';
+      popupEl.style.maxWidth = '260px';
       popupEl.innerHTML = `
         <div style="color:#64748B;font-weight:500;">${
           isActiveInView
@@ -396,9 +427,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
               }`
             : 'Poza wybranym dniem / bieżącym planem'
         }</div>
-        <div style="font-weight:700;color:#0F172A;margin-top:2px;">${escapeHtml(
-          stop.address
-        )}</div>
+        <div style="font-weight:700;color:#0F172A;margin-top:2px;">${
+          isBlock
+            ? `<span style="display:inline-block;background:#FEF3C7;color:#92400E;border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;margin-right:4px;">BLOK${
+                unitsTotal > 0 ? ` · ${unitsTotal} lok.` : ''
+              }</span>`
+            : ''
+        }${escapeHtml(stop.address)}</div>
         ${
           stop.visitDate
             ? `<div style="color:#92400E;font-weight:600;margin-top:2px;">Zaplanowano: ${escapeHtml(
@@ -413,6 +448,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
             ? ' · <span style="color:#B45309;font-weight:600;">Poza terenem parafii</span>'
             : ''
         }</div>
+        ${unitsPreviewHtml}
         ${
           stop.notes
             ? `<div style="color:#475569;margin-top:4px;border-top:1px solid #F1F5F9;padding-top:4px;">${escapeHtml(
@@ -421,16 +457,37 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
             : ''
         }
       `;
+
+      const actionsRow = document.createElement('div');
+      actionsRow.style.cssText =
+        'margin-top:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;';
+
+      if (onOpenBlockUnitsRef.current) {
+        const unitsBtn = document.createElement('button');
+        unitsBtn.type = 'button';
+        unitsBtn.textContent = isBlock
+          ? `Rozpiska lokali (${unitsTotal})`
+          : 'Lokale / Zmień w blok';
+        unitsBtn.style.cssText =
+          'font-size:12px;font-weight:700;color:#92400E;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline;';
+        unitsBtn.onclick = () => {
+          marker.closePopup();
+          onOpenBlockUnitsRef.current?.(stop.id);
+        };
+        actionsRow.appendChild(unitsBtn);
+      }
+
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.textContent = 'Usuń adres z parafii';
+      deleteBtn.textContent = 'Usuń adres';
       deleteBtn.style.cssText =
-        'margin-top:6px;font-size:12px;font-weight:600;color:#DC2626;background:none;border:none;padding:0;cursor:pointer;';
+        'font-size:12px;font-weight:600;color:#DC2626;background:none;border:none;padding:0;cursor:pointer;';
       deleteBtn.onclick = () => {
         onSelectStopRef.current(null);
         onDeleteStopRef.current(stop.id);
       };
-      popupEl.appendChild(deleteBtn);
+      actionsRow.appendChild(deleteBtn);
+      popupEl.appendChild(actionsRow);
 
       marker.bindPopup(popupEl);
       marker.on('click', () => onSelectStopRef.current(stop.id));

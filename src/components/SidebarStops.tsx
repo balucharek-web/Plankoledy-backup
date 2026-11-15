@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
   Calendar,
   CalendarPlus,
   CheckSquare,
@@ -63,6 +64,7 @@ interface SidebarStopsProps {
   onClearStops: () => void;
   onAutoPartition: () => void;
   onSelectStop: (id: string) => void;
+  onOpenBlockUnits: (id: string) => void;
   onViewDayOnMap: (date: string) => void;
   onComputeDayRoute: (date: string | null) => void;
   onGoToSetup: () => void;
@@ -93,6 +95,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   onClearStops,
   onAutoPartition,
   onSelectStop,
+  onOpenBlockUnits,
   onViewDayOnMap,
   onComputeDayRoute,
   onGoToSetup,
@@ -861,7 +864,26 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                           </div>
                           <div className="text-[11px] text-slate-500 tabular-nums">
                             {allStops.length}{' '}
-                            {allStops.length === 1 ? 'dom' : 'domów'}
+                            {allStops.length === 1 ? 'budynek' : 'budynków'}
+                            {(() => {
+                              const blockCount = allStops.filter(
+                                (s) => s.isMultiUnit || (s.units && s.units.length > 0)
+                              ).length;
+                              const blockUnitsSum = allStops.reduce(
+                                (acc, s) =>
+                                  acc + (s.units?.length || s.unitsCount || 0),
+                                0
+                              );
+                              if (blockCount === 0) return null;
+                              return (
+                                <span className="text-amber-800 font-medium">
+                                  {' '}
+                                  · {blockCount}{' '}
+                                  {blockCount === 1 ? 'blok' : 'bloki/ów'}
+                                  {blockUnitsSum > 0 ? ` (${blockUnitsSum} lok.)` : ''}
+                                </span>
+                              );
+                            })()}
                             {streetDates.length > 0 && (
                               <>
                                 {' '}
@@ -1002,6 +1024,12 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                             PRIEST_PALETTE.find(
                               (p) => p.id === stop.priestId
                             ) ?? PRIEST_PALETTE[0];
+                          const isBlock = Boolean(
+                            stop.isMultiUnit ||
+                              (stop.units && stop.units.length > 0)
+                          );
+                          const unitCount =
+                            stop.units?.length || stop.unitsCount || 0;
                           return (
                             <div
                               key={stop.id}
@@ -1022,7 +1050,9 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                   className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 shrink-0"
                                 />
                                 <span
-                                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                                  className={`w-2.5 h-2.5 shrink-0 ${
+                                    isBlock ? 'rounded-xs' : 'rounded-full'
+                                  }`}
                                   style={{
                                     backgroundColor: isIncluded
                                       ? palette.color
@@ -1031,10 +1061,42 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                 />
                                 <button
                                   type="button"
-                                  onClick={() => onSelectStop(stop.id)}
-                                  className="flex-1 min-w-0 text-left text-xs font-medium text-slate-900 hover:text-amber-800 truncate"
+                                  onClick={() =>
+                                    isBlock
+                                      ? onOpenBlockUnits(stop.id)
+                                      : onSelectStop(stop.id)
+                                  }
+                                  title={
+                                    isBlock
+                                      ? 'Kliknij, aby otworzyć rozpiskę lokali w bloku'
+                                      : 'Pokaż na mapie'
+                                  }
+                                  className="flex-1 min-w-0 text-left text-xs font-medium text-slate-900 hover:text-amber-800 truncate inline-flex items-center gap-1.5"
                                 >
-                                  {stop.address}
+                                  <span className="truncate">{stop.address}</span>
+                                  {isBlock && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0 tabular-nums">
+                                      <Building2 className="w-2.5 h-2.5" />
+                                      Blok{unitCount > 0 ? ` (${unitCount})` : ''}
+                                    </span>
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenBlockUnits(stop.id)}
+                                  title={
+                                    isBlock
+                                      ? 'Edytuj lokale i adresy w bloku'
+                                      : 'Oznacz jako blok i dodaj lokale'
+                                  }
+                                  className={`px-2 py-1 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1 ${
+                                    isBlock
+                                      ? 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+                                      : 'bg-white border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <Building2 className="w-3 h-3" />
+                                  <span>{isBlock ? 'Lokale' : 'Blok'}</span>
                                 </button>
                                 <button
                                   type="button"
@@ -1071,28 +1133,35 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                     })
                                   }
                                   aria-label="Rodzina lub uwagi"
-                                  placeholder="Rodzina / uwagi"
+                                  placeholder={
+                                    isBlock
+                                      ? 'Uwagi do bloku (klatki, kod)'
+                                      : 'Rodzina / uwagi'
+                                  }
                                   className="flex-1 min-w-[100px] px-2 py-1 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-amber-600"
                                 />
                                 <div className="flex items-center gap-1">
                                   <input
                                     type="number"
                                     min={3}
-                                    max={120}
+                                    max={1440}
                                     value={stop.durationMinutes}
                                     onChange={(e) =>
                                       onUpdateStop(stop.id, {
                                         durationMinutes: Math.max(
                                           3,
-                                          Number.parseInt(
-                                            e.target.value || '15',
-                                            10
+                                          Math.min(
+                                            1440,
+                                            Number.parseInt(
+                                              e.target.value || '15',
+                                              10
+                                            )
                                           )
                                         ),
                                       })
                                     }
                                     aria-label="Czas wizyty w minutach"
-                                    className="w-12 px-1.5 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-800 text-right focus:outline-none focus:border-amber-600"
+                                    className="w-14 px-1.5 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-800 text-right focus:outline-none focus:border-amber-600"
                                   />
                                   <span className="text-[11px] text-slate-500">
                                     min

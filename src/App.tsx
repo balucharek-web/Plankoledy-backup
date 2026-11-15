@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
+import { BlockUnitsModal } from './components/BlockUnitsModal';
 import { OsmParishMap } from './components/OsmParishMap';
 import { ParishMap, RoutePolylineEntry } from './components/ParishMap';
 import { PlanDashboard, WorkspaceSection } from './components/PlanDashboard';
@@ -167,6 +168,9 @@ function ParishPlannerWorkspace({
   const [streetPickFeedback, setStreetPickFeedback] =
     useState<StreetPickFeedback | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [editingBlockStopId, setEditingBlockStopId] = useState<string | null>(
+    null
+  );
 
   const boundaryDebounceRef = useRef<number | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
@@ -565,15 +569,30 @@ function ParishPlannerWorkspace({
       let createdStop: VisitStop | null = null;
 
       setStops((prev) => {
+        const isBlock = Boolean(place.isMultiUnit);
+        const unitsCount = isBlock ? Math.max(1, place.unitsCount ?? 15) : 0;
+        const perUnit = Math.min(12, Math.max(5, config.defaultVisitMinutes || 10));
+        const durationMinutes = isBlock
+          ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * perUnit))
+          : config.defaultVisitMinutes;
+
         const nextStop: VisitStop = {
           id: newStopId,
           label: place.name,
           address: place.address,
           location: place.location,
           placeId: place.placeId,
-          durationMinutes: config.defaultVisitMinutes,
+          durationMinutes,
           priestId: nextPriestRoundRobin(prev.length),
           inBoundary: isPointInsideBoundary(place.location, boundary),
+          ...(isBlock
+            ? {
+                isMultiUnit: true,
+                unitsCount,
+                minutesPerUnit: perUnit,
+                units: [],
+              }
+            : {}),
         };
         createdStop = nextStop;
         return [...prev, nextStop];
@@ -603,18 +622,35 @@ function ParishPlannerWorkspace({
 
       setStops((prev) => {
         const baseTs = Date.now();
-        addedStops = places.map((place, idx) => ({
-          id: sanitizeDocId(
-            `s_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 6)}`
-          ),
-          label: place.name,
-          address: place.address,
-          location: place.location,
-          placeId: place.placeId,
-          durationMinutes: config.defaultVisitMinutes,
-          priestId: ((prev.length + idx) % config.priestCount) + 1,
-          inBoundary: isPointInsideBoundary(place.location, boundary),
-        }));
+        const perUnit = Math.min(12, Math.max(5, config.defaultVisitMinutes || 10));
+        addedStops = places.map((place, idx) => {
+          const isBlock = Boolean(place.isMultiUnit);
+          const unitsCount = isBlock ? Math.max(1, place.unitsCount ?? 15) : 0;
+          const durationMinutes = isBlock
+            ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * perUnit))
+            : config.defaultVisitMinutes;
+
+          return {
+            id: sanitizeDocId(
+              `s_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 6)}`
+            ),
+            label: place.name,
+            address: place.address,
+            location: place.location,
+            placeId: place.placeId,
+            durationMinutes,
+            priestId: ((prev.length + idx) % config.priestCount) + 1,
+            inBoundary: isPointInsideBoundary(place.location, boundary),
+            ...(isBlock
+              ? {
+                  isMultiUnit: true,
+                  unitsCount,
+                  minutesPerUnit: perUnit,
+                  units: [],
+                }
+              : {}),
+          };
+        });
         const combined = [...prev, ...addedStops];
         if (parish && config.priestCount > 1) {
           repartitionedStops = partitionStopsBySector(
@@ -784,6 +820,12 @@ function ParishPlannerWorkspace({
           address: h.fullAddress,
           location: h.location,
           placeId: '',
+          ...(h.isMultiUnit
+            ? {
+                isMultiUnit: true,
+                unitsCount: h.suggestedUnitsCount ?? 15,
+              }
+            : {}),
         }));
 
         handleBatchAddStops(placesToAdd);
@@ -1524,10 +1566,11 @@ function ParishPlannerWorkspace({
                     onDeleteStop={handleDeleteStop}
                     onClearStops={handleClearStops}
                     onAutoPartition={handleAutoPartition}
-                    onSelectStop={(id) => {
+                      onSelectStop={(id) => {
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
+                    onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                     onViewDayOnMap={(d) => handleViewDayOnMap(d)}
                     onComputeDayRoute={(d) =>
                       void handleComputeRoutesForDate(d)
@@ -1559,6 +1602,7 @@ function ParishPlannerWorkspace({
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
+                    onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                     onViewRouteOnMap={(priestId) => {
                       if (priestId !== undefined) setFocusedPriestId(priestId);
                       setInteractionMode('pan');
@@ -1609,6 +1653,7 @@ function ParishPlannerWorkspace({
                   onMapPickStreet={handleMapPickStreet}
                   onSelectStop={setHighlightedStopId}
                   onDeleteStop={handleDeleteStop}
+                  onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                 />
               ) : (
                 <OsmParishMap
@@ -1632,6 +1677,7 @@ function ParishPlannerWorkspace({
                   onMapPickStreet={handleMapPickStreet}
                   onSelectStop={setHighlightedStopId}
                   onDeleteStop={handleDeleteStop}
+                  onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                 />
               )}
 
@@ -1975,6 +2021,13 @@ function ParishPlannerWorkspace({
       <ArchitectureGuideModal
         open={guideOpen}
         onClose={() => setGuideOpen(false)}
+      />
+
+      <BlockUnitsModal
+        stop={stops.find((s) => s.id === editingBlockStopId) ?? null}
+        defaultVisitMinutes={config.defaultVisitMinutes}
+        onClose={() => setEditingBlockStopId(null)}
+        onSave={(updated) => handleUpdateStop(updated.id, updated)}
       />
     </div>
   );

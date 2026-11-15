@@ -223,7 +223,27 @@ export function exportScheduleToCsv(
   for (const route of routes) {
     for (const item of route.orderedStops) {
       const houseAddress = item.stop.address || item.stop.label;
+      const unitCount = item.stop.units?.length || item.stop.unitsCount || 0;
+      const blockLabel =
+        item.stop.isMultiUnit && unitCount > 0
+          ? `Blok (${unitCount} lok.)`
+          : item.stop.isMultiUnit
+            ? 'Blok'
+            : '';
+      const unitsSummary =
+        item.stop.units && item.stop.units.length > 0
+          ? item.stop.units
+              .map(
+                (u) =>
+                  `${u.staircase ? `kl. ${u.staircase} ` : ''}m. ${u.unitNumber}${
+                    u.familyName ? ` (${u.familyName})` : ''
+                  }`
+              )
+              .join(', ')
+          : '';
       const notes = [
+        blockLabel,
+        unitsSummary,
         item.stop.label && item.stop.label !== houseAddress
           ? item.stop.label
           : '',

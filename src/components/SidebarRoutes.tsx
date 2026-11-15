@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   AlertCircle,
+  Building2,
   CalendarCheck,
   Download,
   ExternalLink,
@@ -44,6 +45,7 @@ interface SidebarRoutesProps {
   onFocusPriestOnMap: (priestId: number | null) => void;
   onRecompute: () => void;
   onSelectStop: (stopId: string) => void;
+  onOpenBlockUnits: (stopId: string) => void;
   onViewRouteOnMap: (priestId?: number | null) => void;
   onOpenSchedule: () => void;
 }
@@ -63,6 +65,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
   onFocusPriestOnMap,
   onRecompute,
   onSelectStop,
+  onOpenBlockUnits,
   onViewRouteOnMap,
   onOpenSchedule,
 }) => {
@@ -289,44 +292,75 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
 
                 {route.orderedStops.length > 0 && (
                   <ol className="divide-y divide-slate-100 border border-slate-200 rounded-lg bg-white overflow-hidden">
-                    {route.orderedStops.map((item) => (
-                      <li key={item.stop.id}>
-                        <button
-                          type="button"
-                          onClick={() => onSelectStop(item.stop.id)}
-                          className="w-full text-left px-3 py-2.5 hover:bg-slate-50 transition-colors flex items-start gap-3"
+                    {route.orderedStops.map((item) => {
+                      const isBlock = Boolean(
+                        item.stop.isMultiUnit ||
+                          (item.stop.units && item.stop.units.length > 0)
+                      );
+                      const unitsTotal =
+                        item.stop.units?.length || item.stop.unitsCount || 0;
+                      return (
+                        <li
+                          key={item.stop.id}
+                          className="flex items-start justify-between gap-2 px-3 py-2.5 hover:bg-slate-50 transition-colors"
                         >
-                          <span
-                            className="w-5 h-5 rounded-full text-[11px] font-mono font-semibold text-white flex items-center justify-center shrink-0 mt-0.5 tabular-nums"
-                            style={{ backgroundColor: route.color }}
+                          <button
+                            type="button"
+                            onClick={() => onSelectStop(item.stop.id)}
+                            className="flex-1 min-w-0 text-left flex items-start gap-3"
                           >
-                            {item.orderIndex}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline justify-between gap-2">
-                              <span className="text-xs font-semibold text-slate-900 truncate">
-                                {item.stop.address || item.stop.label}
-                              </span>
-                              <span className="text-xs font-mono text-slate-700 tabular-nums shrink-0">
-                                {item.arrivalTime}–{item.departureTime}
-                              </span>
-                            </div>
-                            {(item.stop.notes ||
-                              (item.stop.label &&
-                                item.stop.label !== item.stop.address)) && (
-                              <div className="text-xs text-slate-500 truncate mt-0.5">
-                                {item.stop.notes || item.stop.label}
+                            <span
+                              className={`w-5 h-5 text-[11px] font-mono font-semibold text-white flex items-center justify-center shrink-0 mt-0.5 tabular-nums ${
+                                isBlock ? 'rounded-md' : 'rounded-full'
+                              }`}
+                              style={{ backgroundColor: route.color }}
+                            >
+                              {item.orderIndex}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="text-xs font-semibold text-slate-900 truncate inline-flex items-center gap-1.5">
+                                  <span className="truncate">
+                                    {item.stop.address || item.stop.label}
+                                  </span>
+                                  {isBlock && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0 tabular-nums">
+                                      <Building2 className="w-2.5 h-2.5" />
+                                      Blok{unitsTotal > 0 ? ` (${unitsTotal})` : ''}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="text-xs font-mono text-slate-700 tabular-nums shrink-0">
+                                  {item.arrivalTime}–{item.departureTime}
+                                </span>
                               </div>
-                            )}
-                            <div className="text-[11px] text-slate-400 mt-0.5 tabular-nums">
-                              Dojazd: {formatDistance(item.legDistanceMeters)} ·{' '}
-                              {formatDurationMillis(item.legDurationMillis)} ·
-                              Wizyta: {item.stop.durationMinutes} min
+                              {(item.stop.notes ||
+                                (item.stop.label &&
+                                  item.stop.label !== item.stop.address)) && (
+                                <div className="text-xs text-slate-500 truncate mt-0.5">
+                                  {item.stop.notes || item.stop.label}
+                                </div>
+                              )}
+                              <div className="text-[11px] text-slate-400 mt-0.5 tabular-nums">
+                                Dojazd: {formatDistance(item.legDistanceMeters)} ·{' '}
+                                {formatDurationMillis(item.legDurationMillis)} ·
+                                Wizyta: {item.stop.durationMinutes} min
+                              </div>
                             </div>
-                          </div>
-                        </button>
-                      </li>
-                    ))}
+                          </button>
+
+                          {isBlock && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenBlockUnits(item.stop.id)}
+                              className="px-2 py-1 text-[11px] font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg whitespace-nowrap shrink-0 self-center"
+                            >
+                              Lokale ({unitsTotal})
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
                     {config.returnToParish && parish && (
                       <li className="px-3 py-2 bg-slate-50 text-xs text-slate-600 flex items-center justify-between tabular-nums">
                         <span>Powrót: {parish.name}</span>

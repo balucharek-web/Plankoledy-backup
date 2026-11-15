@@ -537,7 +537,7 @@ function haversineMeters(a: LatLng, b: LatLng): number {
 /**
  * Nearest-neighbor + 2-opt TSP ordering around parish center.
  */
-function orderStopsTsp(
+export function orderStopsTsp(
   origin: LatLng,
   stops: VisitStop[],
   returnToParish: boolean
@@ -733,6 +733,59 @@ async function fetchOsrmGeometry(
   };
 }
 
+const MAX_OSRM_CHUNK_WAYPOINTS = 50;
+
+async function fetchOsrmGeometryChunked(
+  waypoints: LatLng[],
+  travelMode: PlanConfig['travelMode']
+): Promise<{
+  path: LatLng[];
+  totalDistanceMeters: number;
+  totalDurationMillis: number;
+  legs: Array<{ distanceMeters: number; durationMillis: number }>;
+}> {
+  if (waypoints.length <= MAX_OSRM_CHUNK_WAYPOINTS) {
+    return fetchOsrmGeometry(waypoints, travelMode);
+  }
+
+  const combinedPath: LatLng[] = [];
+  const combinedLegs: Array<{ distanceMeters: number; durationMillis: number }> =
+    [];
+  let totalDistanceMeters = 0;
+  let totalDurationMillis = 0;
+
+  let startIdx = 0;
+  while (startIdx < waypoints.length - 1) {
+    const endIdx = Math.min(
+      waypoints.length,
+      startIdx + MAX_OSRM_CHUNK_WAYPOINTS
+    );
+    const chunk = waypoints.slice(startIdx, endIdx);
+    const res = await fetchOsrmGeometry(chunk, travelMode);
+
+    if (combinedPath.length > 0 && res.path.length > 1) {
+      combinedPath.push(...res.path.slice(1));
+    } else {
+      combinedPath.push(...res.path);
+    }
+
+    combinedLegs.push(...res.legs);
+    totalDistanceMeters += res.totalDistanceMeters;
+    totalDurationMillis += res.totalDurationMillis;
+
+    if (endIdx >= waypoints.length) break;
+    // Overlap by 1 boundary waypoint so legs remain contiguous
+    startIdx = endIdx - 1;
+  }
+
+  return {
+    path: combinedPath,
+    totalDistanceMeters,
+    totalDurationMillis,
+    legs: combinedLegs,
+  };
+}
+
 export async function computeOsmParishRoutes(
   parish: ParishCenter,
   stops: VisitStop[],
@@ -756,13 +809,9 @@ export async function computeOsmParishRoutes(
     const priestStops = normalizedStops.filter((s) => s.priestId === priestId);
     if (priestStops.length === 0) continue;
 
-    // Limit single OSRM URL request to 60 points for smooth reliability
-    const cappedStops = priestStops.slice(0, 60);
-    const truncatedCount = priestStops.length - cappedStops.length;
-
     const orderedStops = orderStopsTsp(
       parish.location,
-      cappedStops,
+      priestStops,
       config.returnToParish
     );
 
@@ -772,7 +821,7 @@ export async function computeOsmParishRoutes(
       ...(config.returnToParish ? [parish.location] : []),
     ];
 
-    const osrm = await fetchOsrmGeometry(waypoints, config.travelMode);
+    const osrm = await fetchOsrmGeometryChunked(waypoints, config.travelMode);
 
     let elapsedMinutes = 0;
     let totalVisitMinutes = 0;
@@ -827,10 +876,6 @@ export async function computeOsmParishRoutes(
       returnLegDistanceMeters,
       returnLegDurationMillis,
       encodedPathPoints: osrm.path,
-      error:
-        truncatedCount > 0
-          ? `Uwzględniono pierwsze ${cappedStops.length} punktów na trasie (pominięto ${truncatedCount}).`
-          : undefined,
     });
   }
 

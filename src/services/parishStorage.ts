@@ -15,11 +15,13 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import {
+  BuildingUnit,
   LatLng,
   ParishCenter,
   PlanConfig,
   SavedParishRecord,
   SeasonPlanConfig,
+  UnitVisitStatus,
   VisitStop,
 } from '../types/parish';
 import { OperationType, handleFirestoreError } from '../utils/firestoreError';
@@ -133,6 +135,48 @@ function cleanVisitDate(raw: string | undefined | null): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
 }
 
+const VALID_UNIT_STATUSES = new Set<UnitVisitStatus>([
+  'pending',
+  'accepted',
+  'absent',
+  'declined',
+  'invited',
+]);
+
+function sanitizeUnitsList(units: BuildingUnit[] | undefined | null): BuildingUnit[] {
+  if (!Array.isArray(units)) return [];
+  const out: BuildingUnit[] = [];
+  for (let i = 0; i < units.length && out.length < 200; i++) {
+    const u = units[i];
+    if (!u || typeof u !== 'object') continue;
+    const unitNumber = cleanStr(u.unitNumber, 30);
+    if (!unitNumber) continue;
+    const id = cleanStr(u.id, 80) || `u_${i + 1}`;
+    const staircase = cleanStr(u.staircase || '', 30);
+    const familyName = cleanStr(u.familyName || '', 120);
+    const notes = cleanStr(u.notes || '', 200);
+    const status: UnitVisitStatus =
+      u.status && VALID_UNIT_STATUSES.has(u.status) ? u.status : 'pending';
+
+    const item: BuildingUnit = {
+      id,
+      unitNumber,
+      staircase,
+      familyName,
+      notes,
+      status,
+    };
+    if (
+      typeof u.durationMinutes === 'number' &&
+      !Number.isNaN(u.durationMinutes)
+    ) {
+      item.durationMinutes = clampInt(u.durationMinutes, 1, 120, 10);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 function sanitizeStopPayload(
   uid: string,
   parishId: string,
@@ -140,6 +184,18 @@ function sanitizeStopPayload(
 ): Record<string, unknown> {
   const address = cleanStr(stop.address || stop.label, 350) || 'Adres domu';
   const label = cleanStr(stop.label || address, 250) || address;
+  const units = sanitizeUnitsList(stop.units);
+  const isMultiUnit = Boolean(stop.isMultiUnit || units.length > 0);
+  const unitsCount = isMultiUnit
+    ? clampInt(
+        units.length > 0 ? Math.max(units.length, stop.unitsCount ?? 0) : stop.unitsCount,
+        0,
+        500,
+        units.length
+      )
+    : 0;
+  const minutesPerUnit = clampInt(stop.minutesPerUnit, 1, 60, 10);
+
   return {
     ownerId: uid,
     parishId,
@@ -150,12 +206,16 @@ function sanitizeStopPayload(
       lat: Number(stop.location.lat),
       lng: Number(stop.location.lng),
     },
-    durationMinutes: clampInt(stop.durationMinutes, 1, 240, 15),
+    durationMinutes: clampInt(stop.durationMinutes, 1, 1440, 15),
     priestId: clampInt(stop.priestId, 1, 4, 1),
     inBoundary: stop.inBoundary ?? true,
     included: stop.included !== false,
     visitDate: cleanVisitDate(stop.visitDate),
     notes: cleanStr(stop.notes || '', 500),
+    isMultiUnit,
+    unitsCount,
+    minutesPerUnit,
+    units,
   };
 }
 
@@ -246,6 +306,16 @@ export function subscribeParishStops(
               included: d.included !== false,
               visitDate: d.visitDate ? String(d.visitDate) : undefined,
               notes: d.notes ? String(d.notes) : undefined,
+              isMultiUnit: Boolean(d.isMultiUnit),
+              unitsCount:
+                typeof d.unitsCount === 'number' ? d.unitsCount : undefined,
+              minutesPerUnit:
+                typeof d.minutesPerUnit === 'number'
+                  ? d.minutesPerUnit
+                  : undefined,
+              units: Array.isArray(d.units)
+                ? sanitizeUnitsList(d.units as BuildingUnit[])
+                : undefined,
             },
           };
         });
@@ -438,15 +508,31 @@ export async function updateStopInFirestore(
   try {
     const address = cleanStr(stop.address || stop.label, 350) || 'Adres domu';
     const label = cleanStr(stop.label || address, 250) || address;
+    const units = sanitizeUnitsList(stop.units);
+    const isMultiUnit = Boolean(stop.isMultiUnit || units.length > 0);
+    const unitsCount = isMultiUnit
+      ? clampInt(
+          units.length > 0 ? Math.max(units.length, stop.unitsCount ?? 0) : stop.unitsCount,
+          0,
+          500,
+          units.length
+        )
+      : 0;
+    const minutesPerUnit = clampInt(stop.minutesPerUnit, 1, 60, 10);
+
     await updateDoc(doc(db, 'parishes', safeParishId, 'stops', safeStopId), {
       label,
       address,
-      durationMinutes: clampInt(stop.durationMinutes, 1, 240, 15),
+      durationMinutes: clampInt(stop.durationMinutes, 1, 1440, 15),
       priestId: clampInt(stop.priestId, 1, 4, 1),
       inBoundary: stop.inBoundary ?? true,
       included: stop.included !== false,
       visitDate: cleanVisitDate(stop.visitDate),
       notes: cleanStr(stop.notes || '', 500),
+      isMultiUnit,
+      unitsCount,
+      minutesPerUnit,
+      units,
       updatedAt: serverTimestamp(),
     });
   } catch (error) {

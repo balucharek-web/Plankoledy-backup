@@ -73,44 +73,41 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                   Wyznacz optymalne trasy i nawiguj
                 </strong>{' '}
                 — kliknij <strong>Wyznacz optymalne trasy</strong>. Algorytm
-                podzieli domy między 1–4 księży, ułoży najkrótszą kolejność
-                odwiedzin, wyliczy godziny wizyt i wygeneruje gotowe linki do
-                nawigacji Google Maps oraz wydruk harmonogramu.
+                podzieli domy między 1–4 księży (bez limitu punktów na jednego
+                księdza), ułoży najkrótszą kolejność odwiedzin, wyliczy godziny
+                wizyt (w tym z podziałem na mieszkania w blokach) i wygeneruje
+                gotowe linki do nawigacji oraz wydruk harmonogramu.
               </li>
             </ol>
           </div>
 
           <div className="space-y-2.5 border-t border-slate-100 pt-4">
             <h3 className="text-sm font-semibold text-slate-900">
-              Wykorzystane technologie i mapy
+              Wykorzystane technologie i obsługa bloków
             </h3>
             <ul className="space-y-2 text-xs text-slate-600 list-disc pl-4">
               <li>
                 <strong className="text-slate-900">
-                  Google Maps JavaScript + Places (New)
+                  Bezpłatne mapy OpenStreetMap + GUGiK + OSRM
                 </strong>{' '}
-                — interaktywna mapa z warstwą granic parafii oraz wyszukiwaniem
-                kościołów i adresów domów.
-              </li>
-              <li>
-                <strong className="text-slate-900">Google Routes API</strong> —
-                optymalizacja kolejności przystanków (problem komiwojażera) w
-                trybie pieszym lub samochodowym (do 25 przystanków na jedną
-                trasę księdza).
+                — wyszukiwanie adresów i kościołów w całej Polsce, pobieranie
+                numerów budynków oraz wyznaczanie tras bez limitu punktów na
+                jednego księdza (automatyczne dzielenie długich tras na odcinki).
               </li>
               <li>
                 <strong className="text-slate-900">
-                  OpenStreetMap (Overpass API + Nominatim)
+                  Bloki i budynki wielorodzinne
                 </strong>{' '}
-                — szybkie rozpoznawanie klikniętej ulicy na mapie i masowe
-                pobieranie wszystkich numerów budynków na tej ulicy.
+                — cały blok zajmuje 1 punkt na mapie, a po kliknięciu w budynek
+                lub przycisk „Lokale” możesz wygenerować klatki i numery mieszkań,
+                dopisać nazwiska rodzin oraz oznaczać statusy wizyt.
               </li>
               <li>
                 <strong className="text-slate-900">
                   Firebase Auth + Firestore
                 </strong>{' '}
-                — prywatne zapamiętywanie parafii i domów w chmurze wyłącznie
-                dla zalogowanego właściciela konta Google.
+                — prywatne zapamiętywanie parafii, domów i rozpisanych lokali
+                w chmurze wyłącznie dla zalogowanego właściciela konta Google.
               </li>
             </ul>
           </div>
