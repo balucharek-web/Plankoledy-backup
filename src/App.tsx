@@ -22,6 +22,7 @@ import {
   X,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
+import { AuthModal } from './components/AuthModal';
 import { BlockUnitsModal } from './components/BlockUnitsModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -139,12 +140,14 @@ function clearLegacyLocalStorage() {
 
 function ParishPlannerWorkspace({
   authUser,
+  pendingVerificationEmail,
   onSignInGoogle,
   onSignOutGoogle,
   optimizer,
   useGoogleMaps,
 }: {
   authUser: User | null;
+  pendingVerificationEmail: string | null;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
   optimizer: RouteOptimizerHandle;
@@ -1656,7 +1659,7 @@ function ParishPlannerWorkspace({
     activeSection === 'schedule' && mobilePane === 'panel';
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-slate-50">
+    <div className="flex flex-col h-full min-h-0 bg-slate-50 print-reset">
       {/* Three-Zone Top Bar */}
       <header className="no-print h-14 px-3 sm:px-5 bg-white border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
@@ -1702,6 +1705,15 @@ function ParishPlannerWorkspace({
               <span className="hidden sm:inline text-slate-400">·</span>
               <span>Wyloguj</span>
             </button>
+          ) : pendingVerificationEmail ? (
+            <button
+              type="button"
+              onClick={onSignInGoogle}
+              className="min-h-[38px] px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-amber-950 bg-amber-100 border border-amber-300 hover:bg-amber-200 rounded-xl inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <LogIn className="w-3.5 h-3.5 text-amber-800" />
+              <span>Potwierdź e-mail</span>
+            </button>
           ) : (
             <button
               type="button"
@@ -1710,7 +1722,7 @@ function ParishPlannerWorkspace({
             >
               <LogIn className="w-3.5 h-3.5 text-amber-700" />
               <span>Zaloguj</span>
-              <span className="hidden sm:inline">Google</span>
+              <span className="hidden sm:inline">/ Konto</span>
             </button>
           )}
 
@@ -1725,25 +1737,51 @@ function ParishPlannerWorkspace({
         </div>
       </header>
 
+      {/* Pending Email Verification Banner */}
+      {pendingVerificationEmail && (
+        <div className="no-print bg-amber-100 border-b border-amber-300 px-3 sm:px-5 py-2 flex items-center justify-between gap-2 text-xs text-amber-950 shrink-0">
+          <span className="truncate">
+            Konto <strong>{pendingVerificationEmail}</strong> oczekuje na
+            kliknięcie linku w e-mailu, aby zapisać dane w chmurze.
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={onSignInGoogle}
+              className="px-2.5 py-1 text-[11px] font-semibold bg-amber-800 hover:bg-amber-900 text-white rounded-lg whitespace-nowrap"
+            >
+              Potwierdź teraz
+            </button>
+            <button
+              type="button"
+              onClick={onSignOutGoogle}
+              className="px-2 py-1 text-[11px] font-medium bg-white border border-amber-300 text-amber-900 hover:bg-amber-50 rounded-lg whitespace-nowrap"
+            >
+              Wyloguj
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Guest Mode Warning Banner */}
-      {!authUser && parish && activeSection !== 'schedule' && (
+      {!authUser && !pendingVerificationEmail && parish && activeSection !== 'schedule' && (
         <div className="no-print bg-amber-50 border-b border-amber-200 px-3 sm:px-5 py-2 flex items-center justify-between gap-2 text-xs text-amber-950 shrink-0">
           <span className="truncate">
-            <strong>Tryb gościa</strong> — zmiany nie zapisują się na koncie
-            Google po odświeżeniu.
+            <strong>Tryb gościa</strong> — zmiany nie zapisują się na stałe po
+            odświeżeniu.
           </span>
           <button
             type="button"
             onClick={onSignInGoogle}
             className="px-2.5 py-1 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg whitespace-nowrap shrink-0"
           >
-            Zaloguj Google
+            Zaloguj / Załóż konto
           </button>
         </div>
       )}
 
       {/* Main App Body: Desktop Left Menu Rail + Panel + Map */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden print-reset">
         {/* Desktop App Sidebar Menu */}
         <nav
           aria-label="Menu główne"
@@ -1798,15 +1836,17 @@ function ParishPlannerWorkspace({
             </button>
             <div className="px-3 py-1.5 text-[11px] text-slate-400 truncate">
               {authUser
-                ? authUser.email || 'Konto Google'
-                : 'Tryb bez logowania'}
+                ? authUser.email || 'Konto aktywne'
+                : pendingVerificationEmail
+                  ? `Czeka na weryfikację: ${pendingVerificationEmail}`
+                  : 'Tryb bez logowania'}
             </div>
           </div>
         </nav>
 
         {/* Active Workspace or Schedule */}
         {isScheduleView ? (
-          <main className="flex-1 min-h-0 overflow-y-auto bg-slate-50">
+          <main className="flex-1 min-h-0 overflow-y-auto bg-slate-50 print-reset">
             <PrintScheduleSheet
               parish={parish}
               config={config}
@@ -1831,7 +1871,8 @@ function ParishPlannerWorkspace({
             />
           </main>
         ) : (
-          <main className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+          <>
+          <main className="no-print flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
             {/* Left Detail Panel (hidden on mobile when Map pane is active) */}
             <aside
               className={`no-print w-full lg:w-[400px] xl:w-[430px] bg-white lg:border-r border-slate-200 flex-col min-h-0 shrink-0 ${
@@ -2295,6 +2336,36 @@ function ParishPlannerWorkspace({
               )}
             </section>
           </main>
+          <div className="hidden print-only print-reset bg-white w-full">
+            <PrintScheduleSheet
+              parish={parish}
+              config={config}
+              routes={displayedRoutes}
+              isExactRoute={isExactRoute}
+              plannedDays={plannedDays}
+              unscheduledCount={unscheduledStops.length}
+              selectedDate={selectedDate}
+              effectiveStartTime={effectiveStartTime}
+              exactDayKeys={exactDayKeys}
+              forcedViewMode={
+                activeSection === 'routes' || plannedDays.length === 0
+                  ? 'day'
+                  : 'season'
+              }
+              onSelectDate={setSelectedDate}
+              onInspectDay={(date) => {
+                setSelectedDate(date);
+                setFocusedPriestId(null);
+              }}
+              onViewDayOnMap={handleViewDayOnMap}
+              onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
+              onBackToMap={() => {
+                setActiveSection('overview');
+                setMobilePane('map');
+              }}
+            />
+          </div>
+          </>
         )}
       </div>
 
@@ -2497,7 +2568,7 @@ function ParishPlannerWorkspace({
                   className="w-full min-h-[42px] px-3 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl inline-flex items-center justify-center gap-2"
                 >
                   <LogIn className="w-3.5 h-3.5 text-amber-400" />
-                  Zaloguj Google, aby zapisywać parafie
+                  Zaloguj / Załóż konto (e-mail lub Google)
                 </button>
               )}
             </div>
@@ -2567,10 +2638,12 @@ function ParishPlannerWorkspace({
 
 function GoogleMapsWorkspace({
   authUser,
+  pendingVerificationEmail,
   onSignInGoogle,
   onSignOutGoogle,
 }: {
   authUser: User | null;
+  pendingVerificationEmail: string | null;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
 }) {
@@ -2579,6 +2652,7 @@ function GoogleMapsWorkspace({
     <MapEngineProvider engine="google">
       <ParishPlannerWorkspace
         authUser={authUser}
+        pendingVerificationEmail={pendingVerificationEmail}
         onSignInGoogle={onSignInGoogle}
         onSignOutGoogle={onSignOutGoogle}
         optimizer={optimizer}
@@ -2590,10 +2664,12 @@ function GoogleMapsWorkspace({
 
 function OsmFreeWorkspace({
   authUser,
+  pendingVerificationEmail,
   onSignInGoogle,
   onSignOutGoogle,
 }: {
   authUser: User | null;
+  pendingVerificationEmail: string | null;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
 }) {
@@ -2602,6 +2678,7 @@ function OsmFreeWorkspace({
     <MapEngineProvider engine="osm">
       <ParishPlannerWorkspace
         authUser={authUser}
+        pendingVerificationEmail={pendingVerificationEmail}
         onSignInGoogle={onSignInGoogle}
         onSignOutGoogle={onSignOutGoogle}
         optimizer={optimizer}
@@ -2615,6 +2692,8 @@ export default function App() {
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
   const [firebaseQuotaExceeded, setFirebaseQuotaExceeded] = useState(false);
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [, setAuthRefreshTick] = useState(0);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -2631,22 +2710,15 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setAuthUser(user);
+      setAuthRefreshTick((n) => n + 1);
     });
     return () => unsub();
   }, []);
 
   const handleSignInGoogle = useCallback(async () => {
-    try {
-      setAuthError(null);
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('popup-closed-by-user')) {
-        setAuthError(
-          'Nie udało się zalogować przez Google. Upewnij się, że wyskakujące okna nie są zablokowane.'
-        );
-      }
-    }
+    setAuthError(null);
+    await signInWithPopup(auth, googleProvider);
+    setAuthModalOpen(false);
   }, []);
 
   const handleSignOutGoogle = useCallback(async () => {
@@ -2657,8 +2729,12 @@ export default function App() {
     }
   }, []);
 
+  const verifiedAuthUser = authUser && authUser.emailVerified ? authUser : null;
+  const pendingVerificationEmail =
+    authUser && !authUser.emailVerified ? authUser.email || 'Twój e-mail' : null;
+
   return (
-    <div className="h-full flex flex-col bg-slate-50">
+    <div className="h-full flex flex-col bg-slate-50 print-reset">
       {mapsQuotaExceeded && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
           <span>
@@ -2710,8 +2786,9 @@ export default function App() {
 
       {!MAPS_API_KEY ? (
         <OsmFreeWorkspace
-          authUser={authUser}
-          onSignInGoogle={handleSignInGoogle}
+          authUser={verifiedAuthUser}
+          pendingVerificationEmail={pendingVerificationEmail}
+          onSignInGoogle={() => setAuthModalOpen(true)}
           onSignOutGoogle={handleSignOutGoogle}
         />
       ) : (
@@ -2722,12 +2799,24 @@ export default function App() {
           libraries={['places', 'routes', 'marker', 'geometry']}
         >
           <GoogleMapsWorkspace
-            authUser={authUser}
-            onSignInGoogle={handleSignInGoogle}
+            authUser={verifiedAuthUser}
+            pendingVerificationEmail={pendingVerificationEmail}
+            onSignInGoogle={() => setAuthModalOpen(true)}
             onSignOutGoogle={handleSignOutGoogle}
           />
         </APIProvider>
       )}
+
+      <AuthModal
+        open={authModalOpen}
+        authUser={authUser}
+        onClose={() => setAuthModalOpen(false)}
+        onSignInGoogle={handleSignInGoogle}
+        onUserVerified={(user) => {
+          setAuthUser(user);
+          setAuthRefreshTick((n) => n + 1);
+        }}
+      />
     </div>
   );
 }

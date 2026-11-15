@@ -20,8 +20,10 @@ import {
   SlidersHorizontal,
   Users,
 } from 'lucide-react';
+import { getCurrentPositionResilient } from '../hooks/useUserGpsLocation';
 import {
   NearbyParishCandidate,
+  describeLocationForGpsFallback,
   fetchNearbyParishesOsm,
 } from '../services/overpassStreets';
 import {
@@ -157,36 +159,52 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
     };
   }, [routes]);
 
-  const handleFindGps = () => {
-    if (!navigator.geolocation) {
-      setGpsError('Przeglądarka nie obsługuje lokalizacji GPS.');
-      return;
-    }
+  const [lastGpsLocation, setLastGpsLocation] = useState<{
+    location: LatLng;
+    address: string;
+    city: string;
+  } | null>(null);
+
+  const handleFindGps = async () => {
     setGpsLoading(true);
     setGpsError(null);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        try {
-          const items = await fetchNearbyParishesOsm(
-            { lat: pos.coords.latitude, lng: pos.coords.longitude },
-            6000
-          );
-          setNearbyList(items);
-          if (items.length === 0) {
-            setGpsError('Nie znaleziono kościołów w promieniu 6 km.');
-          }
-        } catch {
-          setGpsError('Nie udało się pobrać kościołów w okolicy.');
-        } finally {
-          setGpsLoading(false);
-        }
-      },
-      () => {
-        setGpsLoading(false);
-        setGpsError('Brak zgody na GPS. Wpisz nazwę parafii lub miasta powyżej.');
-      },
-      { enableHighAccuracy: true, timeout: 8000 }
-    );
+    setLastGpsLocation(null);
+    try {
+      const gps = await getCurrentPositionResilient();
+      const [itemsResult, descResult] = await Promise.allSettled([
+        fetchNearbyParishesOsm(gps.location, 7000),
+        describeLocationForGpsFallback(gps.location),
+      ]);
+      const items =
+        itemsResult.status === 'fulfilled' ? itemsResult.value : [];
+      const desc =
+        descResult.status === 'fulfilled'
+          ? descResult.value
+          : {
+              city: '',
+              address: `${gps.location.lat.toFixed(5)}, ${gps.location.lng.toFixed(5)}`,
+            };
+
+      setLastGpsLocation({
+        location: gps.location,
+        city: desc.city,
+        address: desc.address,
+      });
+      setNearbyList(items);
+      if (items.length === 0) {
+        setGpsError(
+          'Nie znaleziono kościołów w promieniu 7 km. Możesz użyć swojej obecnej pozycji GPS poniżej lub wpisać nazwę parafii.'
+        );
+      }
+    } catch (err) {
+      setGpsError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się odczytać lokalizacji GPS.'
+      );
+    } finally {
+      setGpsLoading(false);
+    }
   };
 
   if (!parish) {
@@ -215,7 +233,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
           <button
             type="button"
             disabled={gpsLoading}
-            onClick={handleFindGps}
+            onClick={() => void handleFindGps()}
             className="w-full min-h-[42px] py-2 px-3 text-xs font-medium rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 inline-flex items-center justify-center gap-2 transition-colors"
           >
             {gpsLoading ? (
@@ -243,6 +261,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
                         placeType: 'parish',
                       });
                       setNearbyList(null);
+                      setLastGpsLocation(null);
                     }}
                     className="w-full min-h-[46px] px-3 py-2.5 text-left hover:bg-amber-50/60 flex items-start justify-between gap-2 transition-colors"
                   >
@@ -264,6 +283,38 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
                 </li>
               ))}
             </ul>
+          )}
+
+          {lastGpsLocation && (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectParish({
+                  name: lastGpsLocation.city
+                    ? `Parafia — ${lastGpsLocation.city}`
+                    : 'Moja parafia (punkt GPS)',
+                  address: lastGpsLocation.address,
+                  location: lastGpsLocation.location,
+                  placeId: `gps_${lastGpsLocation.location.lat.toFixed(5)}_${lastGpsLocation.location.lng.toFixed(5)}`,
+                  placeType: 'parish',
+                });
+                setNearbyList(null);
+                setLastGpsLocation(null);
+                setGpsError(null);
+                onNavigateSection('parish');
+              }}
+              className="w-full min-h-[42px] px-3 py-2 text-left rounded-xl border border-amber-200 bg-amber-50/70 hover:bg-amber-100/70 flex items-center justify-between gap-2 transition-colors"
+            >
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-amber-950 truncate">
+                  Użyj mojej bieżącej pozycji GPS
+                </div>
+                <div className="text-[11px] text-amber-800 truncate">
+                  {lastGpsLocation.address}
+                </div>
+              </div>
+              <ArrowRight className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            </button>
           )}
         </div>
 
@@ -302,7 +353,8 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
               Zapisuj swoje parafie i plany kolędy w chmurze
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Po zalogowaniu przez Google wszystkie wyznaczone tereny, ulice i
+              Zaloguj się przez Google lub załóż darmowe konto na dowolny
+              adres e-mail (np. wp.pl, o2.pl, parafia.pl) — wszystkie tereny i
               plany będą przypisane wyłącznie do Twojego konta.
             </p>
             <button
@@ -311,7 +363,7 @@ export const PlanDashboard: React.FC<PlanDashboardProps> = ({
               className="w-full min-h-[42px] py-2 px-3 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
             >
               <LogIn className="w-4 h-4 text-amber-400" />
-              Zaloguj przez Google
+              Zaloguj się lub załóż konto
             </button>
           </div>
         )}

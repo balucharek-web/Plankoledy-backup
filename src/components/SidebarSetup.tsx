@@ -19,8 +19,10 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { getCurrentPositionResilient } from '../hooks/useUserGpsLocation';
 import {
   NearbyParishCandidate,
+  describeLocationForGpsFallback,
   fetchNearbyParishesOsm,
 } from '../services/overpassStreets';
 import {
@@ -123,14 +125,22 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
     );
   }, [stops]);
 
+  const [lastGpsLocation, setLastGpsLocation] = useState<{
+    location: LatLng;
+    city: string;
+    address: string;
+  } | null>(null);
+
   const loadChurchesAround = async (center: LatLng) => {
     setNearbyLoading(true);
     setNearbyError(null);
     try {
-      const list = await fetchNearbyParishesOsm(center, 6000);
+      const list = await fetchNearbyParishesOsm(center, 7000);
       setNearbyChurches(list);
       if (list.length === 0) {
-        setNearbyError('Nie znaleziono kościołów w promieniu 6 km.');
+        setNearbyError(
+          'Nie znaleziono kościołów w promieniu 7 km. Możesz użyć bieżącej pozycji GPS lub wpisać nazwę parafii.'
+        );
       }
     } catch (err) {
       setNearbyError(
@@ -143,28 +153,45 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
     }
   };
 
-  const handleFindNearbyGps = () => {
-    if (!navigator.geolocation) {
-      setNearbyError('Twoja przeglądarka nie obsługuje lokalizacji GPS.');
-      return;
-    }
+  const handleFindNearbyGps = async () => {
     setNearbyLoading(true);
     setNearbyError(null);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        void loadChurchesAround({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-        });
-      },
-      () => {
-        setNearbyLoading(false);
+    setLastGpsLocation(null);
+    try {
+      const gps = await getCurrentPositionResilient();
+      const [listRes, descRes] = await Promise.allSettled([
+        fetchNearbyParishesOsm(gps.location, 7000),
+        describeLocationForGpsFallback(gps.location),
+      ]);
+      const list = listRes.status === 'fulfilled' ? listRes.value : [];
+      const desc =
+        descRes.status === 'fulfilled'
+          ? descRes.value
+          : {
+              city: '',
+              address: `${gps.location.lat.toFixed(5)}, ${gps.location.lng.toFixed(5)}`,
+            };
+
+      setLastGpsLocation({
+        location: gps.location,
+        city: desc.city,
+        address: desc.address,
+      });
+      setNearbyChurches(list);
+      if (list.length === 0) {
         setNearbyError(
-          'Brak zgody na lokalizację GPS. Wpisz nazwę miasta powyżej (np. Mikołów).'
+          'Nie znaleziono kościołów w promieniu 7 km. Możesz użyć bieżącej pozycji GPS poniżej.'
         );
-      },
-      { enableHighAccuracy: true, timeout: 8000 }
-    );
+      }
+    } catch (err) {
+      setNearbyError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się odczytać lokalizacji GPS.'
+      );
+    } finally {
+      setNearbyLoading(false);
+    }
   };
 
   return (
@@ -205,7 +232,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           <button
             type="button"
             disabled={nearbyLoading}
-            onClick={handleFindNearbyGps}
+            onClick={() => void handleFindNearbyGps()}
             className="flex-1 min-w-[140px] min-h-[40px] py-1.5 px-3 text-xs font-medium rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             {nearbyLoading ? (
@@ -237,7 +264,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           <div className="mt-3 border border-slate-200 rounded-xl bg-white overflow-hidden">
             <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
               <span className="text-xs font-medium text-slate-700">
-                Kościoły i parafie w promieniu 6 km ({nearbyChurches.length})
+                Kościoły i parafie w promieniu 7 km ({nearbyChurches.length})
               </span>
               <button
                 type="button"
@@ -262,6 +289,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                         placeType: 'parish',
                       });
                       setNearbyChurches(null);
+                      setLastGpsLocation(null);
                     }}
                     className="w-full min-h-[46px] px-3 py-2 text-left hover:bg-amber-50/60 flex items-start justify-between gap-2 transition-colors"
                   >
@@ -284,6 +312,37 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
               ))}
             </ul>
           </div>
+        )}
+
+        {lastGpsLocation && (
+          <button
+            type="button"
+            onClick={() => {
+              onSelectParish({
+                name: lastGpsLocation.city
+                  ? `Parafia — ${lastGpsLocation.city}`
+                  : 'Moja parafia (punkt GPS)',
+                address: lastGpsLocation.address,
+                location: lastGpsLocation.location,
+                placeId: `gps_${lastGpsLocation.location.lat.toFixed(5)}_${lastGpsLocation.location.lng.toFixed(5)}`,
+                placeType: 'parish',
+              });
+              setNearbyChurches(null);
+              setLastGpsLocation(null);
+              setNearbyError(null);
+            }}
+            className="mt-2 w-full min-h-[42px] px-3 py-2 text-left rounded-xl border border-amber-200 bg-amber-50/70 hover:bg-amber-100/70 flex items-center justify-between gap-2 transition-colors"
+          >
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-amber-950 truncate">
+                Użyj mojej bieżącej pozycji GPS
+              </div>
+              <div className="text-[11px] text-amber-800 truncate">
+                {lastGpsLocation.address}
+              </div>
+            </div>
+            <ArrowRight className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+          </button>
         )}
 
         {parish && (
@@ -360,8 +419,8 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         ) : (
           <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
             <p className="text-xs text-slate-600">
-              Zaloguj się przez Google, aby zapamiętywać parafie, granice i
-              pobrane ulice na stałe.
+              Zaloguj się przez Google lub dowolny adres e-mail, aby
+              zapamiętywać parafie, granice i pobrane ulice na stałe.
             </p>
             <button
               type="button"
@@ -369,7 +428,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
               className="w-full min-h-[42px] py-2 px-3 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
             >
               <LogIn className="w-3.5 h-3.5 text-amber-700" />
-              Zaloguj Google, aby zapisywać parafie
+              Zaloguj się lub załóż konto
             </button>
           </div>
         )}

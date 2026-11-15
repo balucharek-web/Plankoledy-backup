@@ -10,6 +10,85 @@ export interface UserGpsState {
   stop: () => void;
 }
 
+export interface GpsPositionResult {
+  location: LatLng;
+  accuracyMeters: number | null;
+}
+
+export async function getCurrentPositionResilient(): Promise<GpsPositionResult> {
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    throw new Error('Przeglądarka nie obsługuje lokalizacji GPS.');
+  }
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    throw new Error('Lokalizacja GPS wymaga bezpiecznego połączenia HTTPS.');
+  }
+
+  const readOnce = (opts: PositionOptions) =>
+    new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, opts);
+    });
+
+  try {
+    // Szybka ścieżka (Wi-Fi / sieć / ostatnia zapisana pozycja) — niezawodna w budynkach
+    const pos = await readOnce({
+      enableHighAccuracy: false,
+      maximumAge: 120000,
+      timeout: 7000,
+    });
+    return {
+      location: { lat: pos.coords.latitude, lng: pos.coords.longitude },
+      accuracyMeters:
+        typeof pos.coords.accuracy === 'number'
+          ? Math.round(pos.coords.accuracy)
+          : null,
+    };
+  } catch (firstErr) {
+    const firstCode =
+      firstErr && typeof firstErr === 'object' && 'code' in firstErr
+        ? Number((firstErr as GeolocationPositionError).code)
+        : 0;
+    if (firstCode === 1) {
+      throw new Error(
+        'Brak zgody na lokalizację. Zezwól aplikacji na dostęp do lokalizacji w ustawieniach przeglądarki/telefonu lub wpisz parafię ręcznie powyżej.'
+      );
+    }
+
+    // Druga próba: moduł GPS z dłuższym limitem czasu
+    try {
+      const pos = await readOnce({
+        enableHighAccuracy: true,
+        maximumAge: 300000,
+        timeout: 12000,
+      });
+      return {
+        location: { lat: pos.coords.latitude, lng: pos.coords.longitude },
+        accuracyMeters:
+          typeof pos.coords.accuracy === 'number'
+            ? Math.round(pos.coords.accuracy)
+            : null,
+      };
+    } catch (secondErr) {
+      const secondCode =
+        secondErr && typeof secondErr === 'object' && 'code' in secondErr
+          ? Number((secondErr as GeolocationPositionError).code)
+          : 0;
+      if (secondCode === 1) {
+        throw new Error(
+          'Brak zgody na lokalizację. Zezwól aplikacji na dostęp do lokalizacji w ustawieniach telefonu lub wpisz parafię ręcznie powyżej.'
+        );
+      }
+      if (secondCode === 2) {
+        throw new Error(
+          'Telefon nie może teraz ustalić pozycji. Włącz „Lokalizację” w panelu Androida lub wpisz parafię powyżej.'
+        );
+      }
+      throw new Error(
+        'Przekroczono czas oczekiwania na GPS. Upewnij się, że „Lokalizacja” w telefonie jest włączona, lub wpisz parafię powyżej.'
+      );
+    }
+  }
+}
+
 export function useUserGpsLocation(): UserGpsState {
   const [active, setActive] = useState(false);
   const [position, setPosition] = useState<LatLng | null>(null);
@@ -18,7 +97,11 @@ export function useUserGpsLocation(): UserGpsState {
   const watchIdRef = useRef<number | null>(null);
 
   const stop = useCallback(() => {
-    if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+    if (
+      watchIdRef.current !== null &&
+      typeof navigator !== 'undefined' &&
+      navigator.geolocation
+    ) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
@@ -55,8 +138,8 @@ export function useUserGpsLocation(): UserGpsState {
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 12000,
+        maximumAge: 10000,
+        timeout: 15000,
       }
     );
   }, [stop]);
@@ -68,7 +151,11 @@ export function useUserGpsLocation(): UserGpsState {
 
   useEffect(() => {
     return () => {
-      if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+      if (
+        watchIdRef.current !== null &&
+        typeof navigator !== 'undefined' &&
+        navigator.geolocation
+      ) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
     };

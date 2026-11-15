@@ -1191,90 +1191,320 @@ export interface NearbyParishCandidate {
   distanceMeters: number;
 }
 
+interface NearbyPhotonFeature {
+  geometry?: { coordinates?: [number, number] };
+  properties?: {
+    osm_id?: number;
+    osm_type?: string;
+    osm_key?: string;
+    osm_value?: string;
+    name?: string;
+    street?: string;
+    housenumber?: string;
+    locality?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+    county?: string;
+    postcode?: string;
+    countrycode?: string;
+  };
+}
+
+async function queryPhotonChurchesNear(
+  query: string,
+  center: LatLng,
+  maxRadiusMeters: number,
+  timeoutMs = 5500
+): Promise<NearbyParishCandidate[]> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      lat: center.lat.toFixed(5),
+      lon: center.lng.toFixed(5),
+      limit: '20',
+    });
+    const res = await fetch(`https://photon.komoot.io/api/?${params.toString()}`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { features?: NearbyPhotonFeature[] };
+    const out: NearbyParishCandidate[] = [];
+
+    for (const f of data.features ?? []) {
+      const coords = f.geometry?.coordinates;
+      const props = f.properties;
+      if (!coords || coords.length < 2 || !props) continue;
+      if (props.countrycode && props.countrycode.toUpperCase() !== 'PL') continue;
+
+      const isChurch =
+        (props.osm_key === 'amenity' &&
+          props.osm_value === 'place_of_worship') ||
+        (props.osm_key === 'building' &&
+          ['church', 'cathedral', 'chapel'].includes(props.osm_value || '')) ||
+        /(parafi|kościół|kosciol|bazylika|sanktuarium|katedra|kaplica)/i.test(
+          props.name || ''
+        );
+      if (!isChurch) continue;
+
+      const [lng, lat] = coords;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const pt = { lat, lng };
+      const dist = Math.round(haversineMeters(center, pt));
+      if (dist > maxRadiusMeters) continue;
+
+      const name = (props.name || '').trim();
+      if (!name) continue;
+
+      const streetPart = [props.street, props.housenumber]
+        .filter(Boolean)
+        .join(' ');
+      const city = props.city || props.town || props.village || props.county || '';
+      const cityPart = [props.postcode, city].filter(Boolean).join(' ');
+      const address =
+        [streetPart, cityPart].filter(Boolean).join(', ') ||
+        city ||
+        `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+      out.push({
+        id: `photon_worship_${props.osm_type || 'N'}_${props.osm_id || `${lat}_${lng}`}`,
+        name,
+        address,
+        location: pt,
+        distanceMeters: dist,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function queryNominatimChurchesNear(
+  center: LatLng,
+  radiusMeters: number,
+  cityHint?: string,
+  timeoutMs = 5000
+): Promise<NearbyParishCandidate[]> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const latDelta = radiusMeters / 111320;
+    const lngDelta =
+      radiusMeters /
+      (111320 * Math.max(0.2, Math.cos((center.lat * Math.PI) / 180)));
+    const qText = cityHint ? `kościół ${cityHint}` : 'kościół';
+    const params = new URLSearchParams({
+      format: 'jsonv2',
+      q: qText,
+      countrycodes: 'pl',
+      addressdetails: '1',
+      'accept-language': 'pl',
+      limit: '15',
+      viewbox: `${(center.lng - lngDelta).toFixed(4)},${(center.lat + latDelta).toFixed(4)},${(center.lng + lngDelta).toFixed(4)},${(center.lat - latDelta).toFixed(4)}`,
+      bounded: '1',
+    });
+
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?${params.toString()}`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) return [];
+    const items = (await res.json()) as Array<{
+      place_id: number;
+      name?: string;
+      display_name: string;
+      lat: string;
+      lon: string;
+      type?: string;
+      address?: Record<string, string>;
+    }>;
+
+    const out: NearbyParishCandidate[] = [];
+    for (const item of items) {
+      const lat = Number.parseFloat(item.lat);
+      const lng = Number.parseFloat(item.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const pt = { lat, lng };
+      const dist = Math.round(haversineMeters(center, pt));
+      if (dist > radiusMeters) continue;
+
+      const name =
+        item.name?.trim() || item.display_name.split(',')[0]?.trim() || '';
+      if (!name) continue;
+      const isChurch =
+        item.type === 'place_of_worship' ||
+        /(parafi|kościół|kosciol|bazylika|sanktuarium|katedra|kaplica)/i.test(
+          name
+        );
+      if (!isChurch) continue;
+
+      const addr = item.address ?? {};
+      const streetPart = [addr.road || '', addr.house_number || '']
+        .filter(Boolean)
+        .join(' ');
+      const city = addr.city || addr.town || addr.village || addr.municipality || '';
+      const cityPart = [addr.postcode || '', city].filter(Boolean).join(' ');
+      const address =
+        [streetPart, cityPart].filter(Boolean).join(', ') ||
+        item.display_name;
+
+      out.push({
+        id: `nom_worship_${item.place_id}`,
+        name,
+        address,
+        location: pt,
+        distanceMeters: dist,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export async function describeLocationForGpsFallback(
+  center: LatLng
+): Promise<{ city: string; address: string }> {
+  const rev = await queryNominatimReverse(center, 4000);
+  const city = rev?.city || '';
+  const streetPart = [rev?.road, rev?.houseNumber].filter(Boolean).join(' ');
+  const cityPart = [rev?.postcode, city].filter(Boolean).join(' ');
+  const address =
+    [streetPart, cityPart].filter(Boolean).join(', ') ||
+    rev?.displayName?.split(',').slice(0, 2).join(',').trim() ||
+    `${center.lat.toFixed(5)}, ${center.lng.toFixed(5)}`;
+  return { city, address };
+}
+
 /**
- * Finds churches, chapels and parish locations around a given coordinate using Overpass API.
+ * Finds churches, chapels and parish locations around a given coordinate using Overpass API
+ * with parallel Photon & Nominatim fallback so it remains reliable even when Overpass rate-limits.
  * Sorted by distance.
  */
 export async function fetchNearbyParishesOsm(
   center: LatLng,
-  radiusMeters = 5500
+  radiusMeters = 6000
 ): Promise<NearbyParishCandidate[]> {
   const safeRadius = Math.min(Math.max(radiusMeters, 500), 12000);
   const query = `
-[out:json][timeout:12];
-(
-  nwr["amenity"="place_of_worship"](around:${Math.round(safeRadius)},${center.lat.toFixed(
+[out:json][timeout:8];
+nwr["amenity"="place_of_worship"](around:${Math.round(safeRadius)},${center.lat.toFixed(
     5
   )},${center.lng.toFixed(5)});
-  nwr["building"~"^(church|cathedral|chapel)$"]["name"](around:${Math.round(
-    safeRadius
-  )},${center.lat.toFixed(5)},${center.lng.toFixed(5)});
-);
 out center tags qt;
 `.trim();
 
-  const elements = await runOverpassQuery(query, 13000);
+  const [overpassRes, photonChurchRes, photonParishRes, reverseRes] =
+    await Promise.allSettled([
+      runOverpassQuery(query, 7000),
+      queryPhotonChurchesNear('kościół', center, Math.max(safeRadius, 8500), 5500),
+      queryPhotonChurchesNear('parafia', center, Math.max(safeRadius, 8500), 5500),
+      queryNominatimReverse(center, 4000),
+    ]);
+
+  const rawList: NearbyParishCandidate[] = [];
+
+  if (overpassRes.status === 'fulfilled') {
+    for (const el of overpassRes.value) {
+      const lat = el.lat ?? el.center?.lat;
+      const lng = el.lon ?? el.center?.lon;
+      if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+
+      const tags = el.tags ?? {};
+      const rawName =
+        tags.name ||
+        tags['name:pl'] ||
+        tags.official_name ||
+        tags.alt_name ||
+        '';
+      const trimmedName = rawName.trim();
+      if (!trimmedName) continue;
+
+      const street = tags['addr:street']?.trim() || '';
+      const houseNum = tags['addr:housenumber']?.trim() || '';
+      const city = tags['addr:city']?.trim() || tags['addr:place']?.trim() || '';
+      const postcode = tags['addr:postcode']?.trim() || '';
+
+      const streetPart = [street, houseNum].filter(Boolean).join(' ');
+      const cityPart = [postcode, city].filter(Boolean).join(' ');
+      const address =
+        [streetPart, cityPart].filter(Boolean).join(', ') ||
+        city ||
+        `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+      const pt = { lat, lng };
+      rawList.push({
+        id: `osm_worship_${el.type}_${el.id}`,
+        name: trimmedName,
+        address,
+        location: pt,
+        distanceMeters: Math.round(haversineMeters(center, pt)),
+      });
+    }
+  }
+
+  if (photonChurchRes.status === 'fulfilled') {
+    rawList.push(...photonChurchRes.value);
+  }
+  if (photonParishRes.status === 'fulfilled') {
+    rawList.push(...photonParishRes.value);
+  }
+
+  const cityHint =
+    reverseRes.status === 'fulfilled' ? reverseRes.value?.city : undefined;
+
+  // Fallback with city name + Nominatim bounded search if primary sources found nothing
+  if (rawList.length === 0) {
+    const extraFetches: Array<Promise<NearbyParishCandidate[]>> = [
+      queryNominatimChurchesNear(center, Math.max(safeRadius, 8500), cityHint, 5000),
+    ];
+    if (cityHint) {
+      extraFetches.push(
+        queryPhotonChurchesNear(
+          `kościół ${cityHint}`,
+          center,
+          Math.max(safeRadius, 10000),
+          5000
+        )
+      );
+    }
+    const extraSettled = await Promise.allSettled(extraFetches);
+    for (const s of extraSettled) {
+      if (s.status === 'fulfilled') rawList.push(...s.value);
+    }
+  }
 
   const candidates: NearbyParishCandidate[] = [];
-  for (const el of elements) {
-    const lat = el.lat ?? el.center?.lat;
-    const lng = el.lon ?? el.center?.lon;
-    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
-
-    const tags = el.tags ?? {};
-    const rawName =
-      tags.name ||
-      tags['name:pl'] ||
-      tags.official_name ||
-      tags.alt_name ||
-      '';
-    const trimmedName = rawName.trim();
-    if (!trimmedName) continue;
-
-    const street = tags['addr:street']?.trim() || '';
-    const houseNum = tags['addr:housenumber']?.trim() || '';
-    const city = tags['addr:city']?.trim() || tags['addr:place']?.trim() || '';
-    const postcode = tags['addr:postcode']?.trim() || '';
-
-    const streetPart = [street, houseNum].filter(Boolean).join(' ');
-    const cityPart = [postcode, city].filter(Boolean).join(' ');
-    const address =
-      [streetPart, cityPart].filter(Boolean).join(', ') ||
-      city ||
-      `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-
-    const pt = { lat, lng };
-    const dist = Math.round(haversineMeters(center, pt));
-
-    const normTitle = trimmedName.toLowerCase();
+  for (const item of rawList) {
+    const normTitle = item.name.toLowerCase();
     const existingIdx = candidates.findIndex(
       (c) =>
         (c.name.toLowerCase() === normTitle ||
           c.name.toLowerCase().includes(normTitle) ||
-          normTitle.includes(c.name.toLowerCase())) &&
-        haversineMeters(c.location, pt) < 90
+          normTitle.includes(c.name.toLowerCase()) ||
+          haversineMeters(c.location, item.location) < 45) &&
+        haversineMeters(c.location, item.location) < 95
     );
 
     if (existingIdx >= 0) {
-      if (address.length > candidates[existingIdx].address.length) {
-        candidates[existingIdx] = {
-          id: `osm_worship_${el.type}_${el.id}`,
-          name: trimmedName,
-          address,
-          location: pt,
-          distanceMeters: dist,
-        };
+      if (item.address.length > candidates[existingIdx].address.length) {
+        candidates[existingIdx] = item;
       }
       continue;
     }
 
-    candidates.push({
-      id: `osm_worship_${el.type}_${el.id}`,
-      name: trimmedName,
-      address,
-      location: pt,
-      distanceMeters: dist,
-    });
+    candidates.push(item);
   }
 
   return candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);

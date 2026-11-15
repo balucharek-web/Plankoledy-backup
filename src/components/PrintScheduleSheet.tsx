@@ -48,6 +48,7 @@ interface PrintScheduleSheetProps {
   onViewDayOnMap: (date: string | null) => void;
   onComputeDayRoute: (date: string | null) => void;
   onBackToMap: () => void;
+  forcedViewMode?: 'season' | 'day' | 'announcements';
 }
 
 export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
@@ -65,11 +66,14 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   onViewDayOnMap,
   onComputeDayRoute,
   onBackToMap,
+  forcedViewMode,
 }) => {
   const [viewMode, setViewMode] = useState<'season' | 'day' | 'announcements'>(
     plannedDays.length > 0 ? 'season' : 'day'
   );
   const [copiedAnnouncements, setCopiedAnnouncements] = useState(false);
+
+  const effectiveViewMode = forcedViewMode ?? viewMode;
 
   const announcementDays = useMemo(
     () => buildAnnouncementDays(plannedDays),
@@ -128,7 +132,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             Wróć do mapy
           </button>
 
-          {viewMode === 'season' && plannedDays.length > 0 && (
+          {effectiveViewMode === 'season' && plannedDays.length > 0 && (
             <button
               type="button"
               onClick={() => exportFullSeasonToCsv(parish, plannedDays)}
@@ -139,7 +143,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </button>
           )}
 
-          {viewMode === 'day' && routes.length > 0 && (
+          {effectiveViewMode === 'day' && routes.length > 0 && (
             <button
               type="button"
               onClick={() => exportScheduleToCsv(parish, routes)}
@@ -150,7 +154,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </button>
           )}
 
-          {viewMode === 'announcements' && plannedDays.length > 0 && (
+          {effectiveViewMode === 'announcements' && plannedDays.length > 0 && (
             <button
               type="button"
               onClick={() => void handleCopyAnnouncements()}
@@ -225,7 +229,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
           </button>
         </div>
 
-        {viewMode === 'day' && plannedDays.length > 0 && (
+        {effectiveViewMode === 'day' && plannedDays.length > 0 && (
           <div className="flex items-center gap-1.5 overflow-x-auto max-w-full pb-1">
             {plannedDays.map((d) => (
               <button
@@ -246,7 +250,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
       </div>
 
       {/* WHOLE SEASON VIEW */}
-      {viewMode === 'season' ? (
+      {effectiveViewMode === 'season' ? (
         plannedDays.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-xl p-8 sm:p-10 text-center space-y-2">
             <p className="text-sm font-medium text-slate-800">
@@ -308,7 +312,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </div>
 
             {/* Desktop Full-Season Table */}
-            <div className="hidden md:block print:block bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="hidden md:block print:block bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible">
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
@@ -460,7 +464,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
             </div>
           </div>
         )
-      ) : viewMode === 'announcements' ? (
+      ) : effectiveViewMode === 'announcements' ? (
         /* PARISH BULLETIN ANNOUNCEMENTS VIEW (RODO-SAFE) */
         announcementDays.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-2">
@@ -584,7 +588,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
           {routes.map((route) => (
             <section
               key={route.priestId}
-              className="bg-white border border-slate-200 rounded-xl overflow-hidden"
+              className="bg-white border border-slate-200 rounded-xl overflow-hidden print:overflow-visible"
             >
               <div className="px-4 sm:px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
                 <div>
@@ -638,7 +642,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 })()}
               </div>
 
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto print:overflow-visible">
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
