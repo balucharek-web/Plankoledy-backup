@@ -55,6 +55,237 @@ export function scaleBoundaryFromCenter(
   }));
 }
 
+function rdpSimplifyMetric(
+  pts: Array<{ lat: number; lng: number; x: number; y: number }>,
+  toleranceMeters: number
+): Array<{ lat: number; lng: number; x: number; y: number }> {
+  if (pts.length <= 2) return pts;
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  const dx = last.x - first.x;
+  const dy = last.y - first.y;
+  const lenSq = dx * dx + dy * dy;
+
+  let maxDistSq = -1;
+  let maxIdx = 0;
+
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    let distSq: number;
+    if (lenSq < 1e-6) {
+      distSq = (p.x - first.x) ** 2 + (p.y - first.y) ** 2;
+    } else {
+      const t = Math.max(
+        0,
+        Math.min(1, ((p.x - first.x) * dx + (p.y - first.y) * dy) / lenSq)
+      );
+      const px = first.x + t * dx;
+      const py = first.y + t * dy;
+      distSq = (p.x - px) ** 2 + (p.y - py) ** 2;
+    }
+    if (distSq > maxDistSq) {
+      maxDistSq = distSq;
+      maxIdx = i;
+    }
+  }
+
+  if (maxDistSq > toleranceMeters * toleranceMeters) {
+    const left = rdpSimplifyMetric(pts.slice(0, maxIdx + 1), toleranceMeters);
+    const right = rdpSimplifyMetric(pts.slice(maxIdx), toleranceMeters);
+    return [...left.slice(0, -1), ...right];
+  }
+  return [first, last];
+}
+
+export function simplifyPolygonRDP(
+  points: LatLng[],
+  toleranceMeters = 18,
+  maxPoints = 26
+): LatLng[] {
+  if (points.length <= 3) return points;
+
+  const avgLat = points.reduce((s, p) => s + p.lat, 0) / points.length;
+  const latScale = 111320;
+  const lngScale = 111320 * Math.max(0.2, Math.cos((avgLat * Math.PI) / 180));
+
+  const metricPts: Array<{ lat: number; lng: number; x: number; y: number }> = [];
+  for (const p of points) {
+    const x = p.lng * lngScale;
+    const y = p.lat * latScale;
+    const prev = metricPts[metricPts.length - 1];
+    if (!prev || (x - prev.x) ** 2 + (y - prev.y) ** 2 >= 9) {
+      metricPts.push({ lat: p.lat, lng: p.lng, x, y });
+    }
+  }
+
+  // Drop closing duplicate vertex if present
+  if (metricPts.length > 3) {
+    const first = metricPts[0];
+    const last = metricPts[metricPts.length - 1];
+    if ((last.x - first.x) ** 2 + (last.y - first.y) ** 2 < 25) {
+      metricPts.pop();
+    }
+  }
+
+  if (metricPts.length <= 3) {
+    return metricPts.map(({ lat, lng }) => ({ lat, lng }));
+  }
+
+  // Split ring cleanly at farthest point from index 0 so closed RDP preserves overall shape
+  let farIdx = Math.floor(metricPts.length / 2);
+  let farDistSq = -1;
+  for (let i = 1; i < metricPts.length; i++) {
+    const dSq =
+      (metricPts[i].x - metricPts[0].x) ** 2 +
+      (metricPts[i].y - metricPts[0].y) ** 2;
+    if (dSq > farDistSq) {
+      farDistSq = dSq;
+      farIdx = i;
+    }
+  }
+
+  const arc1 = metricPts.slice(0, farIdx + 1);
+  const arc2 = [...metricPts.slice(farIdx), metricPts[0]];
+
+  let tol = Math.max(4, toleranceMeters);
+  let result: Array<{ lat: number; lng: number; x: number; y: number }> = [];
+
+  for (let pass = 0; pass < 14; pass++) {
+    const s1 = rdpSimplifyMetric(arc1, tol);
+    const s2 = rdpSimplifyMetric(arc2, tol);
+    result = [...s1.slice(0, -1), ...s2.slice(0, -1)];
+    if (result.length <= maxPoints || result.length <= 4) {
+      break;
+    }
+    tol *= 1.35;
+  }
+
+  if (result.length < 3) {
+    return metricPts.slice(0, Math.min(maxPoints, metricPts.length)).map(({ lat, lng }) => ({ lat, lng }));
+  }
+
+  return result.slice(0, maxPoints).map(({ lat, lng }) => ({ lat, lng }));
+}
+
+export function computePolygonAreaSqMeters(boundary: LatLng[]): number {
+  if (boundary.length < 3) return 0;
+  const avgLat = boundary.reduce((s, p) => s + p.lat, 0) / boundary.length;
+  const latScale = 111320;
+  const lngScale = 111320 * Math.max(0.2, Math.cos((avgLat * Math.PI) / 180));
+
+  const x0 = boundary[0].lng * lngScale;
+  const y0 = boundary[0].lat * latScale;
+  let twiceArea = 0;
+
+  for (let i = 0; i < boundary.length; i++) {
+    const p1 = boundary[i];
+    const p2 = boundary[(i + 1) % boundary.length];
+    const x1 = p1.lng * lngScale - x0;
+    const y1 = p1.lat * latScale - y0;
+    const x2 = p2.lng * lngScale - x0;
+    const y2 = p2.lat * latScale - y0;
+    twiceArea += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(twiceArea) / 2;
+}
+
+export function formatPolygonArea(areaSqMeters: number): string {
+  if (!Number.isFinite(areaSqMeters) || areaSqMeters <= 0) return '';
+  if (areaSqMeters < 100000) {
+    const ha = areaSqMeters / 10000;
+    return `${ha.toFixed(ha < 10 ? 1 : 0).replace('.', ',')} ha`;
+  }
+  const km2 = areaSqMeters / 1000000;
+  return `${km2.toFixed(km2 < 10 ? 2 : 1).replace('.', ',')} km²`;
+}
+
+export function createBufferedHullBoundary(
+  points: LatLng[],
+  bufferMeters = 90
+): LatLng[] {
+  if (points.length === 0) return [];
+
+  const unique: LatLng[] = [];
+  for (const pt of points) {
+    const exists = unique.some(
+      (u) => Math.abs(u.lat - pt.lat) < 1e-6 && Math.abs(u.lng - pt.lng) < 1e-6
+    );
+    if (!exists) unique.push(pt);
+  }
+
+  if (unique.length === 1) {
+    return createPresetBoundaryPolygon(unique[0], Math.max(160, bufferMeters), 10);
+  }
+
+  const avgLat = unique.reduce((s, p) => s + p.lat, 0) / unique.length;
+  const latScale = 111320;
+  const lngScale = 111320 * Math.max(0.2, Math.cos((avgLat * Math.PI) / 180));
+
+  if (unique.length === 2) {
+    const [a, b] = unique;
+    const mid: LatLng = {
+      lat: (a.lat + b.lat) / 2,
+      lng: (a.lng + b.lng) / 2,
+    };
+    const dx = (b.lng - a.lng) * lngScale;
+    const dy = (b.lat - a.lat) * latScale;
+    const radius = Math.max(150, Math.hypot(dx, dy) / 2 + bufferMeters);
+    return createPresetBoundaryPolygon(mid, radius, 10);
+  }
+
+  const sorted = [...unique].sort((a, b) => a.lng - b.lng || a.lat - b.lat);
+  const cross = (o: LatLng, a: LatLng, b: LatLng) =>
+    (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng);
+
+  const lower: LatLng[] = [];
+  for (const p of sorted) {
+    while (
+      lower.length >= 2 &&
+      cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
+    ) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper: LatLng[] = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (
+      upper.length >= 2 &&
+      cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
+    ) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
+  if (hull.length < 3) {
+    const center = {
+      lat: unique.reduce((s, p) => s + p.lat, 0) / unique.length,
+      lng: unique.reduce((s, p) => s + p.lng, 0) / unique.length,
+    };
+    return createPresetBoundaryPolygon(center, Math.max(200, bufferMeters), 10);
+  }
+
+  const centroid = {
+    lat: hull.reduce((s, p) => s + p.lat, 0) / hull.length,
+    lng: hull.reduce((s, p) => s + p.lng, 0) / hull.length,
+  };
+
+  const expanded = hull.map((pt) => {
+    const vx = (pt.lng - centroid.lng) * lngScale;
+    const vy = (pt.lat - centroid.lat) * latScale;
+    const len = Math.hypot(vx, vy) || 1;
+    return {
+      lat: pt.lat + ((vy / len) * bufferMeters) / latScale,
+      lng: pt.lng + ((vx / len) * bufferMeters) / lngScale,
+    };
+  });
+
+  return simplifyPolygonRDP(expanded, 12, 24);
+}
+
 export function formatDistance(meters: number): string {
   if (meters < 1000) {
     return `${Math.round(meters)} m`;

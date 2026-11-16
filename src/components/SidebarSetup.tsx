@@ -24,7 +24,9 @@ import { getCurrentPositionResilient } from '../hooks/useUserGpsLocation';
 import {
   NearbyParishCandidate,
   describeLocationForGpsFallback,
+  extractLocalityQueryHint,
   fetchNearbyParishesOsm,
+  fetchPlaceBoundaryPolygonOsm,
 } from '../services/overpassStreets';
 import {
   LatLng,
@@ -34,7 +36,11 @@ import {
   StreetPickFeedback,
   VisitStop,
 } from '../types/parish';
-import { extractStreetName } from '../utils/spatial';
+import {
+  computePolygonAreaSqMeters,
+  extractStreetName,
+  formatPolygonArea,
+} from '../utils/spatial';
 import { CsvImportModal } from './CsvImportModal';
 import { OsmStreetFetcherModal } from './OsmStreetFetcherModal';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
@@ -57,6 +63,9 @@ interface SidebarSetupProps {
   onCreatePresetBoundary: (radiusMeters?: number) => void;
   onScaleBoundary: (factor: number) => void;
   onToggleDrawBoundary: () => void;
+  onToggleEditBoundary: () => void;
+  onWrapStopsBoundary: () => void;
+  onApplyLocalityBoundary: (points: LatLng[], placeName: string) => void;
   onClearBoundary: () => void;
   onTogglePickStreetMode: () => void;
   onToggleMapAddMode: () => void;
@@ -92,6 +101,9 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onCreatePresetBoundary,
   onScaleBoundary,
   onToggleDrawBoundary,
+  onToggleEditBoundary,
+  onWrapStopsBoundary,
+  onApplyLocalityBoundary,
   onClearBoundary,
   onTogglePickStreetMode,
   onToggleMapAddMode,
@@ -101,9 +113,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onViewMap,
   onNextStep,
 }) => {
-  const [territoryTab, setTerritoryTab] = useState<TerritoryTab>(
-    boundary.length >= 3 ? 'area' : 'area'
-  );
+  const [territoryTab, setTerritoryTab] = useState<TerritoryTab>('area');
   const [areaScannerOpen, setAreaScannerOpen] = useState(false);
   const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
@@ -111,10 +121,48 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   const [nearbyChurches, setNearbyChurches] = useState<
     NearbyParishCandidate[] | null
   >(null);
+  const [localityQuery, setLocalityQuery] = useState('');
+  const [localityLoading, setLocalityLoading] = useState(false);
+  const [localityError, setLocalityError] = useState<string | null>(null);
 
   const isDrawing = interactionMode === 'draw_boundary';
+  const isEditingBoundary = interactionMode === 'edit_boundary';
   const isPickingStreet = interactionMode === 'pick_street';
   const isAddingHouse = interactionMode === 'add_stop';
+
+  const localityHint = useMemo(
+    () => extractLocalityQueryHint(parish?.address, parish?.name),
+    [parish?.address, parish?.name]
+  );
+
+  const boundaryAreaText = useMemo(
+    () => formatPolygonArea(computePolygonAreaSqMeters(boundary)),
+    [boundary]
+  );
+
+  const handleFetchLocalityBoundary = async () => {
+    const query = (localityQuery || localityHint).trim();
+    if (!query || localityLoading) return;
+    setLocalityLoading(true);
+    setLocalityError(null);
+    try {
+      const result = await fetchPlaceBoundaryPolygonOsm(query, parish?.location);
+      if (!result) {
+        setLocalityError(
+          `Nie znaleziono oficjalnego obrysu granic dla „${query}”. Spróbuj innej nazwy (np. miasta lub sołectwa) albo zakreśl teren na mapie.`
+        );
+        return;
+      }
+      onApplyLocalityBoundary(result.polygon, result.name);
+      if (!localityQuery.trim()) setLocalityQuery(result.name);
+    } catch {
+      setLocalityError(
+        'Nie udało się pobrać granic miejscowości — sprawdź połączenie lub narysuj obszar ręcznie.'
+      );
+    } finally {
+      setLocalityLoading(false);
+    }
+  };
 
   const savedStreets = useMemo(() => {
     const groups: Record<string, VisitStop[]> = {};
@@ -444,8 +492,9 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
             2. Teren i adresy parafii
           </h2>
           {boundary.length >= 3 && (
-            <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
-              Obszar: {boundary.length} pkt
+            <span className="text-xs text-emerald-700 font-medium tabular-nums">
+              {boundaryAreaText ? `${boundaryAreaText} · ` : ''}
+              {boundary.length} pkt
             </span>
           )}
         </div>
@@ -479,41 +528,97 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         </div>
 
         {territoryTab === 'area' ? (
-          <div className="space-y-2.5">
+          <div className="space-y-3">
             <p className="text-xs text-slate-500 leading-relaxed">
-              Wyznacz granice parafii na mapie (możesz je później dowolnie
-              edytować przyciskami lub przesuwając punkty), a następnie wykryj
-              wszystkie ulice i numery domów w tym obszarze.
+              Zakreśl teren palcem/myszą, ustaw punkty celownikiem albo pobierz
+              gotowe granice miejscowości — a potem wykryj domy w środku.
             </p>
 
             {boundary.length < 3 ? (
-              <div className="grid grid-cols-3 gap-1.5">
-                {[
-                  { label: '300 m', radius: 300 },
-                  { label: '500 m', radius: 500 },
-                  { label: '1 km', radius: 1000 },
-                ].map((opt) => (
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  disabled={!parish}
+                  onClick={onToggleDrawBoundary}
+                  className={`w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
+                    isDrawing
+                      ? 'bg-amber-700 border-amber-700 text-white'
+                      : 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:bg-slate-300 disabled:border-slate-300'
+                  }`}
+                >
+                  <Pentagon className="w-4 h-4 shrink-0" />
+                  <span>
+                    {isDrawing
+                      ? 'Rysujesz obszar na mapie...'
+                      : 'Zakreśl lub narysuj teren na mapie'}
+                  </span>
+                </button>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { label: '300 m', radius: 300 },
+                    { label: '500 m', radius: 500 },
+                    { label: '1 km', radius: 1000 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.radius}
+                      type="button"
+                      disabled={!parish || isDrawing}
+                      onClick={() => onCreatePresetBoundary(opt.radius)}
+                      className="min-h-[38px] py-1.5 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
+                    >
+                      Promień {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {stops.length > 0 && (
                   <button
-                    key={opt.radius}
                     type="button"
                     disabled={!parish || isDrawing}
-                    onClick={() => onCreatePresetBoundary(opt.radius)}
-                    className="min-h-[40px] py-2 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
+                    onClick={onWrapStopsBoundary}
+                    className="w-full min-h-[38px] py-2 px-3 text-xs font-medium rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 inline-flex items-center justify-center gap-1.5 transition-colors"
                   >
-                    Promień {opt.label}
+                    <Layers className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Otocz już dodane ulice ({stops.length} pkt)</span>
                   </button>
-                ))}
+                )}
               </div>
             ) : (
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="text-[11px] font-medium text-slate-700">
-                  Edycja wyznaczonego obszaru (przesuwaj białe punkty na mapie):
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-slate-800">
+                    Zapisany obszar parafii
+                  </span>
+                  <span className="text-slate-500 tabular-nums">
+                    {boundaryAreaText ? `${boundaryAreaText} · ` : ''}
+                    {boundary.length} pkt
+                  </span>
                 </div>
+
+                <button
+                  type="button"
+                  disabled={isDrawing}
+                  onClick={onToggleEditBoundary}
+                  className={`w-full min-h-[42px] py-2 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
+                    isEditingBoundary
+                      ? 'bg-slate-900 border-slate-900 text-white'
+                      : 'bg-white border-slate-300 text-slate-900 hover:bg-slate-100'
+                  }`}
+                >
+                  <Pentagon className="w-3.5 h-3.5" />
+                  <span>
+                    {isEditingBoundary
+                      ? 'Kończysz poprawianie punktów...'
+                      : 'Popraw narożniki i boki na mapie'}
+                  </span>
+                </button>
+
                 <div className="grid grid-cols-2 gap-1.5">
                   <button
                     type="button"
                     disabled={isDrawing}
-                    onClick={() => onScaleBoundary(0.84)}
+                    onClick={() => onScaleBoundary(0.86)}
                     className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <Minimize2 className="w-3.5 h-3.5 text-amber-700" />
@@ -522,45 +627,102 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                   <button
                     type="button"
                     disabled={isDrawing}
-                    onClick={() => onScaleBoundary(1.2)}
+                    onClick={() => onScaleBoundary(1.16)}
                     className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <Maximize2 className="w-3.5 h-3.5 text-amber-700" />
                     Powiększ
                   </button>
                 </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={!parish}
+                    onClick={onToggleDrawBoundary}
+                    className={`flex-1 min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
+                      isDrawing
+                        ? 'bg-amber-700 border-amber-700 text-white'
+                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Pentagon className="w-3.5 h-3.5" />
+                    <span>{isDrawing ? 'Rysujesz...' : 'Przerysuj od zera'}</span>
+                  </button>
+
+                  {stops.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isDrawing}
+                      onClick={onWrapStopsBoundary}
+                      title="Dopasuj obszar wokół dodanych domów"
+                      className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-100 inline-flex items-center justify-center gap-1 whitespace-nowrap"
+                    >
+                      <Layers className="w-3.5 h-3.5 text-amber-700" />
+                      <span>Otocz ulice</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onClearBoundary}
+                    title="Usuń obszar"
+                    aria-label="Usuń obszar"
+                    className="min-w-[38px] min-h-[38px] inline-flex items-center justify-center text-slate-500 hover:text-red-600 bg-white border border-slate-200 rounded-xl hover:bg-red-50 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={!parish}
-                onClick={onToggleDrawBoundary}
-                className={`flex-1 min-h-[42px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
-                  isDrawing
-                    ? 'bg-amber-700 border-amber-700 text-white'
-                    : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50'
-                }`}
+            {/* Quick 1-click locality / district border lookup */}
+            <div className="pt-2 border-t border-slate-100 space-y-1.5">
+              <label
+                htmlFor="locality-boundary-input"
+                className="block text-[11px] font-medium text-slate-600"
               >
-                <Pentagon className="w-3.5 h-3.5" />
-                {isDrawing
-                  ? 'Rysujesz obszar na mapie...'
-                  : boundary.length >= 3
-                    ? 'Przerysuj granice ręcznie'
-                    : 'Narysuj obszar ręcznie na mapie'}
-              </button>
-
-              {boundary.length >= 3 && (
+                Lub pobierz granice miejscowości / osiedla:
+              </label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  id="locality-boundary-input"
+                  type="text"
+                  value={localityQuery}
+                  onChange={(e) => {
+                    setLocalityQuery(e.target.value);
+                    if (localityError) setLocalityError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void handleFetchLocalityBoundary();
+                    }
+                  }}
+                  placeholder={localityHint || 'np. Reta, Mikołów'}
+                  disabled={!parish || localityLoading}
+                  className="flex-1 min-w-0 min-h-[38px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-600/30 focus:border-amber-600"
+                />
                 <button
                   type="button"
-                  onClick={onClearBoundary}
-                  title="Usuń obszar"
-                  aria-label="Usuń obszar"
-                  className="min-w-[42px] min-h-[42px] inline-flex items-center justify-center text-slate-500 hover:text-red-600 bg-white border border-slate-200 rounded-xl hover:bg-red-50 transition-colors"
+                  disabled={
+                    !parish ||
+                    localityLoading ||
+                    !(localityQuery || localityHint).trim()
+                  }
+                  onClick={() => void handleFetchLocalityBoundary()}
+                  className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  {localityLoading && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
+                  )}
+                  <span>Pobierz obrys</span>
                 </button>
+              </div>
+              {localityError && (
+                <p className="text-[11px] text-red-600 leading-snug">
+                  {localityError}
+                </p>
               )}
             </div>
 

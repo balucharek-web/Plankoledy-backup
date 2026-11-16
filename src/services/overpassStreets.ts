@@ -1509,3 +1509,198 @@ out center tags qt;
 
   return candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
+
+export interface PlaceBoundaryResult {
+  name: string;
+  displayName: string;
+  polygon: LatLng[];
+}
+
+export function extractLocalityQueryHint(
+  address?: string | null,
+  parishName?: string | null
+): string {
+  const addr = (address || '').trim();
+  if (addr) {
+    const parts = addr
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const part = parts[i]
+        .replace(/^\d{2}-\d{3}\s*/g, '')
+        .trim();
+      if (
+        part &&
+        part.toLowerCase() !== 'polska' &&
+        part.toLowerCase() !== 'poland' &&
+        !/^powiat\b/i.test(part) &&
+        !/^gmina\b/i.test(part) &&
+        !/^województwo\b/i.test(part)
+      ) {
+        return part;
+      }
+    }
+  }
+  const name = (parishName || '').trim();
+  return name.replace(/^parafia\s+/i, '').trim();
+}
+
+function extractOuterRingFromGeoJson(
+  geojson?: { type?: string; coordinates?: unknown }
+): LatLng[] | null {
+  if (!geojson || !geojson.coordinates) return null;
+
+  const toLatLngList = (ring: unknown): LatLng[] => {
+    if (!Array.isArray(ring)) return [];
+    const pts: LatLng[] = [];
+    for (const pair of ring) {
+      if (
+        Array.isArray(pair) &&
+        pair.length >= 2 &&
+        typeof pair[0] === 'number' &&
+        typeof pair[1] === 'number'
+      ) {
+        pts.push({ lat: pair[1], lng: pair[0] });
+      }
+    }
+    return pts;
+  };
+
+  if (geojson.type === 'Polygon' && Array.isArray(geojson.coordinates)) {
+    const outer = toLatLngList(geojson.coordinates[0]);
+    return outer.length >= 3 ? outer : null;
+  }
+
+  if (geojson.type === 'MultiPolygon' && Array.isArray(geojson.coordinates)) {
+    let best: LatLng[] | null = null;
+    for (const poly of geojson.coordinates) {
+      if (!Array.isArray(poly)) continue;
+      const candidate = toLatLngList(poly[0]);
+      if (candidate.length >= 3 && (!best || candidate.length > best.length)) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  return null;
+}
+
+export async function fetchPlaceBoundaryPolygonOsm(
+  query: string,
+  biasCenter?: LatLng
+): Promise<PlaceBoundaryResult | null> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return null;
+
+  const { simplifyPolygonRDP } = await import('../utils/spatial');
+
+  const params = new URLSearchParams({
+    format: 'jsonv2',
+    polygon_geojson: '1',
+    polygon_threshold: '0.0003',
+    addressdetails: '1',
+    limit: '6',
+    countrycodes: 'pl',
+    'accept-language': 'pl',
+    q: trimmed,
+  });
+
+  if (biasCenter) {
+    const dLat = 0.28;
+    const dLng = 0.35;
+    params.set(
+      'viewbox',
+      `${(biasCenter.lng - dLng).toFixed(4)},${(biasCenter.lat + dLat).toFixed(
+        4
+      )},${(biasCenter.lng + dLng).toFixed(4)},${(biasCenter.lat - dLat).toFixed(4)}`
+    );
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 9000);
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?${params.toString()}`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return null;
+    const items = (await res.json()) as Array<{
+      name?: string;
+      display_name?: string;
+      category?: string;
+      type?: string;
+      boundingbox?: [string, string, string, string];
+      geojson?: { type?: string; coordinates?: unknown };
+    }>;
+
+    if (!Array.isArray(items) || items.length === 0) return null;
+
+    // Prefer administrative boundaries / localities with real polygon geometry
+    const ranked = [...items].sort((a, b) => {
+      const aHasPoly =
+        a.geojson?.type === 'Polygon' || a.geojson?.type === 'MultiPolygon'
+          ? 1
+          : 0;
+      const bHasPoly =
+        b.geojson?.type === 'Polygon' || b.geojson?.type === 'MultiPolygon'
+          ? 1
+          : 0;
+      if (aHasPoly !== bHasPoly) return bHasPoly - aHasPoly;
+      const aAdmin =
+        a.category === 'boundary' || a.category === 'place' ? 1 : 0;
+      const bAdmin =
+        b.category === 'boundary' || b.category === 'place' ? 1 : 0;
+      return bAdmin - aAdmin;
+    });
+
+    for (const item of ranked) {
+      const ring = extractOuterRingFromGeoJson(item.geojson);
+      if (ring && ring.length >= 3) {
+        const simplified = simplifyPolygonRDP(ring, 24, 30);
+        if (simplified.length >= 3) {
+          return {
+            name: item.name || trimmed,
+            displayName: item.display_name || trimmed,
+            polygon: simplified,
+          };
+        }
+      }
+    }
+
+    // Fallback: use bounding box rectangle if locality returned a real area (> 300 m span)
+    for (const item of ranked) {
+      if (!item.boundingbox || item.boundingbox.length !== 4) continue;
+      const s = Number.parseFloat(item.boundingbox[0]);
+      const n = Number.parseFloat(item.boundingbox[1]);
+      const w = Number.parseFloat(item.boundingbox[2]);
+      const e = Number.parseFloat(item.boundingbox[3]);
+      if (
+        !Number.isFinite(s) ||
+        !Number.isFinite(n) ||
+        !Number.isFinite(w) ||
+        !Number.isFinite(e)
+      ) {
+        continue;
+      }
+      const spanMeters = haversineMeters({ lat: s, lng: w }, { lat: n, lng: e });
+      if (spanMeters >= 300 && spanMeters <= 45000) {
+        return {
+          name: item.name || trimmed,
+          displayName: item.display_name || trimmed,
+          polygon: [
+            { lat: n, lng: w },
+            { lat: n, lng: e },
+            { lat: s, lng: e },
+            { lat: s, lng: w },
+          ],
+        };
+      }
+    }
+
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}

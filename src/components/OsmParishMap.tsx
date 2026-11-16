@@ -5,15 +5,23 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Crosshair,
   Loader2,
   LocateFixed,
   MapPinPlus,
+  Maximize2,
+  Minimize2,
+  MousePointerClick,
+  Pencil,
+  Plus,
   Route,
+  Trash2,
   Undo2,
   X,
 } from 'lucide-react';
 import { useUserGpsLocation } from '../hooks/useUserGpsLocation';
 import {
+  BoundaryDrawTool,
   LatLng,
   MapInteractionMode,
   MarkerLabelMode,
@@ -25,8 +33,11 @@ import {
 } from '../types/parish';
 import {
   buildRouteStopLookup,
+  computePolygonAreaSqMeters,
   computeStopMarkerAppearance,
   extractStreetName,
+  formatPolygonArea,
+  simplifyPolygonRDP,
 } from '../utils/spatial';
 
 interface OsmParishMapProps {
@@ -47,6 +58,8 @@ interface OsmParishMapProps {
   onDismissStreetFeedback: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
+  onEnterEditBoundary?: () => void;
+  onScaleBoundary?: (factor: number) => void;
   onCancelInteraction: () => void;
   onMapAddStop: (location: LatLng) => void;
   onMapPickStreet: (location: LatLng) => void;
@@ -83,6 +96,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onDismissStreetFeedback,
   onBoundaryComplete,
   onBoundaryUpdate,
+  onEnterEditBoundary,
+  onScaleBoundary,
   onCancelInteraction,
   onMapAddStop,
   onMapPickStreet,
@@ -95,6 +110,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const parishLayerRef = useRef<L.LayerGroup | null>(null);
   const boundaryLayerRef = useRef<L.LayerGroup | null>(null);
   const draftLayerRef = useRef<L.LayerGroup | null>(null);
+  const rubberBandLayerRef = useRef<L.LayerGroup | null>(null);
   const stopsLayerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
   const gpsLayerRef = useRef<L.LayerGroup | null>(null);
@@ -105,11 +121,25 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
   const gps = useUserGpsLocation();
   const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
+  const [drawTool, setDrawTool] = useState<BoundaryDrawTool>(() =>
+    typeof window !== 'undefined' && window.innerWidth < 768
+      ? 'crosshair'
+      : 'lasso'
+  );
+  const drawToolRef = useRef<BoundaryDrawTool>(drawTool);
+  drawToolRef.current = drawTool;
+
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
   const draftPointsRef = useRef<LatLng[]>([]);
+  const [lassoHint, setLassoHint] = useState<string | null>(null);
+  const [selectedVertexIdx, setSelectedVertexIdx] = useState<number | null>(
+    null
+  );
 
   const interactionModeRef = useRef(interactionMode);
   interactionModeRef.current = interactionMode;
+  const boundaryRef = useRef(boundary);
+  boundaryRef.current = boundary;
   const onMapAddStopRef = useRef(onMapAddStop);
   onMapAddStopRef.current = onMapAddStop;
   const onMapPickStreetRef = useRef(onMapPickStreet);
@@ -124,12 +154,19 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onBoundaryCompleteRef.current = onBoundaryComplete;
   const onBoundaryUpdateRef = useRef(onBoundaryUpdate);
   onBoundaryUpdateRef.current = onBoundaryUpdate;
+  const onCancelInteractionRef = useRef(onCancelInteraction);
+  onCancelInteractionRef.current = onCancelInteraction;
   const highlightedStopIdRef = useRef(highlightedStopId);
   highlightedStopIdRef.current = highlightedStopId;
 
   const routeMetaByStopId = useMemo(
     () => buildRouteStopLookup(routes),
     [routes]
+  );
+
+  const boundaryAreaLabel = useMemo(
+    () => formatPolygonArea(computePolygonAreaSqMeters(boundary)),
+    [boundary]
   );
 
   const activeVisibleCount = useMemo(() => {
@@ -170,6 +207,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     routesLayerRef.current = L.layerGroup().addTo(map);
     boundaryLayerRef.current = L.layerGroup().addTo(map);
     draftLayerRef.current = L.layerGroup().addTo(map);
+    rubberBandLayerRef.current = L.layerGroup().addTo(map);
     stopsLayerRef.current = L.layerGroup().addTo(map);
     parishLayerRef.current = L.layerGroup().addTo(map);
     gpsLayerRef.current = L.layerGroup().addTo(map);
@@ -182,24 +220,91 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         onMapAddStopRef.current(coords);
       } else if (mode === 'pick_street') {
         onMapPickStreetRef.current(coords);
-      } else if (mode === 'draw_boundary') {
+      } else if (mode === 'draw_boundary' && drawToolRef.current === 'points') {
         const next = [...draftPointsRef.current, coords];
         draftPointsRef.current = next;
         setDraftPoints(next);
+      } else if (mode === 'edit_boundary') {
+        setSelectedVertexIdx(null);
       } else if (highlightedStopIdRef.current) {
         onSelectStopRef.current(null);
+      }
+    });
+
+    const updateRubberBand = (cursorCoords: LatLng) => {
+      const rb = rubberBandLayerRef.current;
+      if (!rb) return;
+      rb.clearLayers();
+      const pts = draftPointsRef.current;
+      if (
+        interactionModeRef.current !== 'draw_boundary' ||
+        pts.length === 0 ||
+        drawToolRef.current === 'lasso'
+      ) {
+        return;
+      }
+      const last = pts[pts.length - 1];
+      L.polyline(
+        [
+          [last.lat, last.lng],
+          [cursorCoords.lat, cursorCoords.lng],
+        ],
+        {
+          color: '#B45309',
+          weight: 2,
+          dashArray: '5, 6',
+          opacity: 0.85,
+          interactive: false,
+        }
+      ).addTo(rb);
+      if (pts.length >= 2) {
+        const first = pts[0];
+        L.polyline(
+          [
+            [cursorCoords.lat, cursorCoords.lng],
+            [first.lat, first.lng],
+          ],
+          {
+            color: '#D97706',
+            weight: 1.5,
+            dashArray: '4, 6',
+            opacity: 0.5,
+            interactive: false,
+          }
+        ).addTo(rb);
+      }
+    };
+
+    map.on('mousemove', (ev: L.LeafletMouseEvent) => {
+      if (
+        interactionModeRef.current === 'draw_boundary' &&
+        drawToolRef.current === 'points'
+      ) {
+        updateRubberBand({ lat: ev.latlng.lat, lng: ev.latlng.lng });
+      }
+    });
+
+    map.on('move', () => {
+      if (
+        interactionModeRef.current === 'draw_boundary' &&
+        drawToolRef.current === 'crosshair'
+      ) {
+        const c = map.getCenter();
+        updateRubberBand({ lat: c.lat, lng: c.lng });
       }
     });
 
     map.on('dblclick', (ev: L.LeafletMouseEvent) => {
       if (
         interactionModeRef.current === 'draw_boundary' &&
+        drawToolRef.current === 'points' &&
         draftPointsRef.current.length >= 3
       ) {
         L.DomEvent.stop(ev);
         const pts = draftPointsRef.current;
         draftPointsRef.current = [];
         setDraftPoints([]);
+        rubberBandLayerRef.current?.clearLayers();
         onBoundaryCompleteRef.current(pts);
       }
     });
@@ -228,22 +333,258 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     const container = containerRef.current;
     if (!map || !container) return;
 
-    if (interactionMode === 'pan') {
+    if (interactionMode === 'draw_boundary') {
+      setLassoHint(null);
+      if (drawTool === 'lasso') {
+        container.style.cursor = 'crosshair';
+        container.style.touchAction = 'none';
+        map.dragging.disable();
+        map.doubleClickZoom.disable();
+      } else if (drawTool === 'crosshair') {
+        container.style.cursor = 'grab';
+        container.style.touchAction = '';
+        map.dragging.enable();
+        map.doubleClickZoom.enable();
+      } else {
+        container.style.cursor = 'crosshair';
+        container.style.touchAction = '';
+        map.dragging.enable();
+        map.doubleClickZoom.disable();
+      }
+    } else if (interactionMode === 'edit_boundary') {
       container.style.cursor = '';
+      container.style.touchAction = '';
+      map.dragging.enable();
       map.doubleClickZoom.enable();
-    } else if (interactionMode === 'draw_boundary') {
-      container.style.cursor = 'crosshair';
-      map.doubleClickZoom.disable();
+    } else if (interactionMode === 'pan') {
+      container.style.cursor = '';
+      container.style.touchAction = '';
+      map.dragging.enable();
+      map.doubleClickZoom.enable();
     } else {
       container.style.cursor = 'crosshair';
+      container.style.touchAction = '';
+      map.dragging.enable();
       map.doubleClickZoom.enable();
     }
 
     if (interactionMode !== 'draw_boundary') {
       draftPointsRef.current = [];
       setDraftPoints([]);
+      setLassoHint(null);
+      rubberBandLayerRef.current?.clearLayers();
     }
-  }, [interactionMode]);
+    if (interactionMode !== 'edit_boundary') {
+      setSelectedVertexIdx(null);
+    }
+  }, [interactionMode, drawTool]);
+
+  // Freehand lasso pointer capture (works uniformly for finger touch and mouse drag)
+  useEffect(() => {
+    const map = mapRef.current;
+    const container = containerRef.current;
+    const layer = draftLayerRef.current;
+    if (!map || !container || !layer) return;
+    if (interactionMode !== 'draw_boundary' || drawTool !== 'lasso') return;
+
+    let drawing = false;
+    let activePointerId: number | null = null;
+    let lastClientX = 0;
+    let lastClientY = 0;
+    let rawPoints: LatLng[] = [];
+    let strokeLine: L.Polyline | null = null;
+    let strokeFill: L.Polygon | null = null;
+
+    const toLatLng = (clientX: number, clientY: number): LatLng => {
+      const rect = container.getBoundingClientRect();
+      const pt = L.point(clientX - rect.left, clientY - rect.top);
+      const ll = map.containerPointToLatLng(pt);
+      return { lat: ll.lat, lng: ll.lng };
+    };
+
+    const cleanupStroke = () => {
+      drawing = false;
+      activePointerId = null;
+      rawPoints = [];
+      if (strokeLine) {
+        layer.removeLayer(strokeLine);
+        strokeLine = null;
+      }
+      if (strokeFill) {
+        layer.removeLayer(strokeFill);
+        strokeFill = null;
+      }
+    };
+
+    const onPointerDown = (ev: PointerEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest('.no-print, .leaflet-control')) return;
+      if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+
+      ev.preventDefault();
+      setLassoHint(null);
+      drawing = true;
+      activePointerId = ev.pointerId;
+      lastClientX = ev.clientX;
+      lastClientY = ev.clientY;
+      const startPt = toLatLng(ev.clientX, ev.clientY);
+      rawPoints = [startPt];
+
+      layer.clearLayers();
+      strokeFill = L.polygon([[startPt.lat, startPt.lng]], {
+        color: '#B45309',
+        weight: 0,
+        fillColor: '#F59E0B',
+        fillOpacity: 0.16,
+        interactive: false,
+      }).addTo(layer);
+      strokeLine = L.polyline([[startPt.lat, startPt.lng]], {
+        color: '#B45309',
+        weight: 3.5,
+        opacity: 0.95,
+        interactive: false,
+      }).addTo(layer);
+
+      try {
+        container.setPointerCapture(ev.pointerId);
+      } catch {
+        // Ignore if capture is unsupported
+      }
+    };
+
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!drawing || ev.pointerId !== activePointerId) return;
+      const distPx = Math.hypot(
+        ev.clientX - lastClientX,
+        ev.clientY - lastClientY
+      );
+      if (distPx < 6) return;
+      lastClientX = ev.clientX;
+      lastClientY = ev.clientY;
+
+      const pt = toLatLng(ev.clientX, ev.clientY);
+      rawPoints.push(pt);
+      const coords = rawPoints.map((p) => [p.lat, p.lng] as [number, number]);
+      strokeLine?.setLatLngs(coords);
+      if (rawPoints.length >= 3) {
+        strokeFill?.setLatLngs(coords);
+      }
+    };
+
+    const finishStroke = (ev: PointerEvent) => {
+      if (!drawing || ev.pointerId !== activePointerId) return;
+      try {
+        container.releasePointerCapture(ev.pointerId);
+      } catch {
+        // Ignore
+      }
+      const captured = [...rawPoints];
+      cleanupStroke();
+
+      if (captured.length < 5) {
+        setLassoHint(
+          'Przytrzymaj i zakreśl pętlę wokół parafii jednym ruchem (lub przełącz na Celownik).'
+        );
+        return;
+      }
+
+      const lats = captured.map((p) => p.lat);
+      const lngs = captured.map((p) => p.lng);
+      const spanLatM = (Math.max(...lats) - Math.min(...lats)) * 111320;
+      const spanLngM =
+        (Math.max(...lngs) - Math.min(...lngs)) *
+        111320 *
+        Math.max(0.2, Math.cos((captured[0].lat * Math.PI) / 180));
+      if (Math.hypot(spanLatM, spanLngM) < 45) {
+        setLassoHint(
+          'Zakreślony kształt był za mały — obrysuj większy fragment mapy.'
+        );
+        return;
+      }
+
+      const simplified = simplifyPolygonRDP(captured, 18, 22);
+      if (simplified.length >= 3) {
+        onBoundaryCompleteRef.current(simplified);
+      }
+    };
+
+    container.addEventListener('pointerdown', onPointerDown);
+    container.addEventListener('pointermove', onPointerMove);
+    container.addEventListener('pointerup', finishStroke);
+    container.addEventListener('pointercancel', cleanupStroke);
+
+    return () => {
+      cleanupStroke();
+      container.removeEventListener('pointerdown', onPointerDown);
+      container.removeEventListener('pointermove', onPointerMove);
+      container.removeEventListener('pointerup', finishStroke);
+      container.removeEventListener('pointercancel', cleanupStroke);
+    };
+  }, [interactionMode, drawTool]);
+
+  // PC keyboard shortcuts while drawing or editing boundary
+  useEffect(() => {
+    if (interactionMode !== 'draw_boundary' && interactionMode !== 'edit_boundary') {
+      return;
+    }
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        draftPointsRef.current = [];
+        setDraftPoints([]);
+        rubberBandLayerRef.current?.clearLayers();
+        onCancelInteractionRef.current();
+        return;
+      }
+
+      if (interactionMode === 'draw_boundary') {
+        if (
+          ev.key === 'Backspace' ||
+          ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z')
+        ) {
+          if (draftPointsRef.current.length > 0) {
+            ev.preventDefault();
+            const next = draftPointsRef.current.slice(0, -1);
+            draftPointsRef.current = next;
+            setDraftPoints(next);
+          }
+        } else if (ev.key === 'Enter' && draftPointsRef.current.length >= 3) {
+          ev.preventDefault();
+          const pts = draftPointsRef.current;
+          draftPointsRef.current = [];
+          setDraftPoints([]);
+          rubberBandLayerRef.current?.clearLayers();
+          onBoundaryCompleteRef.current(pts);
+        }
+      } else if (
+        interactionMode === 'edit_boundary' &&
+        (ev.key === 'Delete' || ev.key === 'Backspace') &&
+        selectedVertexIdx !== null &&
+        boundaryRef.current.length > 3
+      ) {
+        ev.preventDefault();
+        const updated = boundaryRef.current.filter(
+          (_, i) => i !== selectedVertexIdx
+        );
+        setSelectedVertexIdx(null);
+        onBoundaryUpdateRef.current(updated);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [interactionMode, selectedVertexIdx]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -287,31 +628,46 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
     if (interactionMode === 'draw_boundary' || boundary.length < 3) return;
 
+    const isActivelyEditing = interactionMode === 'edit_boundary';
     const latLngs = boundary.map((p) => [p.lat, p.lng] as [number, number]);
     const polygon = L.polygon(latLngs, {
       color: '#B45309',
-      weight: canEditBoundary ? 2.2 : 1.5,
-      opacity: canEditBoundary ? 0.85 : 0.42,
+      weight: isActivelyEditing ? 2.8 : canEditBoundary ? 2.2 : 1.5,
+      opacity: isActivelyEditing ? 0.95 : canEditBoundary ? 0.85 : 0.42,
       fillColor: '#F59E0B',
-      fillOpacity: canEditBoundary ? 0.11 : 0.03,
+      fillOpacity: isActivelyEditing ? 0.16 : canEditBoundary ? 0.1 : 0.03,
       interactive: false,
     }).addTo(layer);
 
-    if (!canEditBoundary) return;
+    if (!isActivelyEditing) return;
 
+    // Tactile vertex handles (big hit area for fingers + clear selected indicator)
     boundary.forEach((pt, idx) => {
+      const isSelected = selectedVertexIdx === idx;
       const handleIcon = L.divIcon({
         className: '',
-        html: `<div style="width:14px;height:14px;border-radius:9999px;background:#FFFFFF;border:2.5px solid #B45309;box-shadow:0 1px 4px rgba(0,0,0,0.3);"></div>`,
-        iconSize: [14, 14],
-        iconAnchor: [7, 7],
+        html: `<div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;touch-action:none;cursor:grab;"><div style="width:${
+          isSelected ? 24 : 20
+        }px;height:${
+          isSelected ? 24 : 20
+        }px;border-radius:9999px;background:${
+          isSelected ? '#0F172A' : '#FFFFFF'
+        };border:${
+          isSelected ? '3px solid #F59E0B' : '3px solid #B45309'
+        };box-shadow:0 2px 6px rgba(0,0,0,0.32);"></div></div>`,
+        iconSize: [40, 40],
+        iconAnchor: [20, 20],
       });
       const handle = L.marker([pt.lat, pt.lng], {
         icon: handleIcon,
         draggable: true,
-        zIndexOffset: 300,
+        zIndexOffset: isSelected ? 450 : 350,
       }).addTo(layer);
 
+      let moved = false;
+      handle.on('dragstart', () => {
+        moved = true;
+      });
       handle.on('drag', () => {
         const ll = handle.getLatLng();
         const updated = boundary.map((b, i) =>
@@ -329,15 +685,106 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         );
         onBoundaryUpdateRef.current(updated);
       });
+
+      handle.on('click', (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        if (moved) {
+          moved = false;
+          return;
+        }
+        setSelectedVertexIdx((cur) => (cur === idx ? null : idx));
+      });
     });
-  }, [boundary, interactionMode, canEditBoundary]);
+
+    // Midpoint "+" handles to insert a new corner along any edge (disabled above 90 vertices)
+    if (boundary.length < 90) {
+      boundary.forEach((pt, idx) => {
+        const nextPt = boundary[(idx + 1) % boundary.length];
+        const mid: LatLng = {
+          lat: (pt.lat + nextPt.lat) / 2,
+          lng: (pt.lng + nextPt.lng) / 2,
+        };
+        const midIcon = L.divIcon({
+          className: '',
+          html: `<div style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;touch-action:none;cursor:pointer;"><div style="width:18px;height:18px;border-radius:9999px;background:rgba(255,255,255,0.92);border:1.5px solid #B45309;color:#B45309;font-size:13px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.22);">+</div></div>`,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16],
+        });
+        const midHandle = L.marker([mid.lat, mid.lng], {
+          icon: midIcon,
+          draggable: true,
+          zIndexOffset: 280,
+        }).addTo(layer);
+
+        let midMoved = false;
+        midHandle.on('dragstart', () => {
+          midMoved = true;
+        });
+        midHandle.on('drag', () => {
+          const ll = midHandle.getLatLng();
+          const inserted = [
+            ...boundary.slice(0, idx + 1),
+            { lat: ll.lat, lng: ll.lng },
+            ...boundary.slice(idx + 1),
+          ];
+          polygon.setLatLngs(
+            inserted.map((p) => [p.lat, p.lng] as [number, number])
+          );
+        });
+        midHandle.on('dragend', () => {
+          const ll = midHandle.getLatLng();
+          const inserted = [
+            ...boundary.slice(0, idx + 1),
+            { lat: ll.lat, lng: ll.lng },
+            ...boundary.slice(idx + 1),
+          ];
+          setSelectedVertexIdx(idx + 1);
+          onBoundaryUpdateRef.current(inserted);
+        });
+        midHandle.on('click', (ev) => {
+          L.DomEvent.stopPropagation(ev);
+          if (midMoved) {
+            midMoved = false;
+            return;
+          }
+          const inserted = [
+            ...boundary.slice(0, idx + 1),
+            mid,
+            ...boundary.slice(idx + 1),
+          ];
+          setSelectedVertexIdx(idx + 1);
+          onBoundaryUpdateRef.current(inserted);
+        });
+      });
+    }
+  }, [boundary, interactionMode, canEditBoundary, selectedVertexIdx]);
 
   useEffect(() => {
     const layer = draftLayerRef.current;
+    const rb = rubberBandLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
+    if (rb) rb.clearLayers();
 
     if (interactionMode !== 'draw_boundary' || draftPoints.length === 0) return;
+
+    if (drawTool === 'crosshair' && rb && mapRef.current) {
+      const center = mapRef.current.getCenter();
+      const last = draftPoints[draftPoints.length - 1];
+      L.polyline(
+        [
+          [last.lat, last.lng],
+          [center.lat, center.lng],
+        ],
+        {
+          color: '#B45309',
+          weight: 2,
+          dashArray: '5, 6',
+          opacity: 0.85,
+          interactive: false,
+        }
+      ).addTo(rb);
+    }
 
     if (draftPoints.length >= 2) {
       L.polygon(
@@ -378,12 +825,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
             const pts = draftPointsRef.current;
             draftPointsRef.current = [];
             setDraftPoints([]);
+            rubberBandLayerRef.current?.clearLayers();
             onBoundaryCompleteRef.current(pts);
           }
         });
       }
     });
-  }, [draftPoints, interactionMode]);
+  }, [draftPoints, interactionMode, drawTool]);
 
   useEffect(() => {
     const layer = stopsLayerRef.current;
@@ -725,59 +1173,233 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         )}
       </div>
 
+      {/* Quick "Popraw granice" button right on the map in parish setup */}
+      {parish &&
+        interactionMode === 'pan' &&
+        canEditBoundary &&
+        boundary.length >= 3 &&
+        onEnterEditBoundary && (
+          <div className="no-print absolute bottom-[76px] sm:bottom-5 left-3 z-[460]">
+            <button
+              type="button"
+              onClick={onEnterEditBoundary}
+              className="min-h-[40px] px-3 py-2 bg-white/95 backdrop-blur-md border border-slate-200 hover:bg-slate-50 rounded-xl shadow-lg text-xs font-semibold text-slate-800 inline-flex items-center gap-2 transition-colors whitespace-nowrap"
+            >
+              <Pencil className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              <span>Popraw granice</span>
+              {boundaryAreaLabel && (
+                <span className="text-slate-400 font-normal tabular-nums">
+                  · {boundaryAreaLabel}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
+
+      {/* Centered crosshair target for mobile thumb precision */}
+      {parish &&
+        interactionMode === 'draw_boundary' &&
+        drawTool === 'crosshair' && (
+          <div
+            aria-hidden="true"
+            className="no-print pointer-events-none absolute inset-0 z-[450] flex items-center justify-center"
+          >
+            <div className="relative flex items-center justify-center">
+              <div className="w-11 h-11 rounded-full border-2 border-amber-700 bg-amber-500/10 shadow-sm flex items-center justify-center">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-700 ring-2 ring-white" />
+              </div>
+              <div className="absolute -bottom-6 px-2 py-0.5 rounded bg-slate-900/80 text-white text-[10px] font-medium whitespace-nowrap">
+                Przesuń mapę pod celownik
+              </div>
+            </div>
+          </div>
+        )}
+
       {parish && interactionMode !== 'pan' && (
         <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[500] w-max max-w-[calc(100%-24px)]">
           {interactionMode === 'draw_boundary' && (
-            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg px-3.5 py-2 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-900">
-              <span className="font-medium">
-                Dotknij kolejne narożniki obszaru · Punkty:{' '}
-                <span className="font-mono tabular-nums font-bold text-amber-800">
-                  {draftPoints.length}
-                </span>
-              </span>
-              <div className="flex items-center gap-1.5">
-                {draftPoints.length > 0 && (
+            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl p-2 flex flex-col items-center gap-2 text-xs text-slate-900">
+              {/* Tool mode switcher: Zakreśl / Celownik / Punkty */}
+              <div className="flex flex-wrap items-center justify-center gap-1.5 w-full">
+                <div className="flex items-center p-0.5 bg-slate-100 rounded-xl gap-0.5">
                   <button
                     type="button"
                     onClick={() => {
-                      const next = draftPointsRef.current.slice(0, -1);
-                      draftPointsRef.current = next;
-                      setDraftPoints(next);
-                    }}
-                    className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
-                  >
-                    <Undo2 className="w-3.5 h-3.5" />
-                    Cofnij
-                  </button>
-                )}
-                {draftPoints.length >= 3 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const pts = draftPointsRef.current;
                       draftPointsRef.current = [];
                       setDraftPoints([]);
-                      onBoundaryComplete(pts);
+                      rubberBandLayerRef.current?.clearLayers();
+                      setDrawTool('lasso');
                     }}
-                    className="min-h-[34px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1"
+                    className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                      drawTool === 'lasso'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
                   >
-                    <Check className="w-3.5 h-3.5" />
-                    Zapisz obszar
+                    <Pencil className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Zakreśl</span>
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLassoHint(null);
+                      setDrawTool('crosshair');
+                    }}
+                    className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                      drawTool === 'crosshair'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Crosshair className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Celownik</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLassoHint(null);
+                      setDrawTool('points');
+                    }}
+                    className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                      drawTool === 'points'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <MousePointerClick className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Punkty</span>
+                  </button>
+                </div>
+
                 <button
                   type="button"
                   onClick={() => {
                     draftPointsRef.current = [];
                     setDraftPoints([]);
+                    rubberBandLayerRef.current?.clearLayers();
                     onCancelInteraction();
                   }}
-                  className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
+                  className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <X className="w-3.5 h-3.5" />
                   Anuluj
                 </button>
               </div>
+
+              {drawTool === 'lasso' && (
+                <div className="px-2 pb-0.5 text-[11px] text-slate-600 text-center max-w-[320px]">
+                  {lassoHint ? (
+                    <span className="text-amber-800 font-medium">
+                      {lassoHint}
+                    </span>
+                  ) : (
+                    <span>
+                      Przytrzymaj i obrysuj teren palcem lub myszą jednym ruchem.
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {drawTool === 'points' && (
+                <div className="flex flex-wrap items-center justify-center gap-1.5 px-1">
+                  <span className="text-[11px] text-slate-600">
+                    Kliknij narożniki · Punkty:{' '}
+                    <strong className="font-mono tabular-nums text-amber-800">
+                      {draftPoints.length}
+                    </strong>
+                  </span>
+                  {draftPoints.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = draftPointsRef.current.slice(0, -1);
+                        draftPointsRef.current = next;
+                        setDraftPoints(next);
+                      }}
+                      className="min-h-[32px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
+                    >
+                      <Undo2 className="w-3.5 h-3.5" />
+                      Cofnij
+                    </button>
+                  )}
+                  {draftPoints.length >= 3 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const pts = draftPointsRef.current;
+                        draftPointsRef.current = [];
+                        setDraftPoints([]);
+                        rubberBandLayerRef.current?.clearLayers();
+                        onBoundaryComplete(pts);
+                      }}
+                      className="min-h-[32px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      Zapisz obszar
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {interactionMode === 'edit_boundary' && (
+            <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl px-3 py-2 flex flex-wrap items-center justify-center gap-1.5 text-xs text-slate-900">
+              <span className="font-medium text-slate-700 tabular-nums px-1">
+                {boundaryAreaLabel
+                  ? `Pow.: ${boundaryAreaLabel} · `
+                  : ''}
+                {boundary.length} pkt
+              </span>
+
+              {onScaleBoundary && (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onScaleBoundary(0.86)}
+                    title="Zmniejsz obszar"
+                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
+                  >
+                    <Minimize2 className="w-3.5 h-3.5 text-amber-700" />
+                    <span className="hidden sm:inline">Zmniejsz</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onScaleBoundary(1.16)}
+                    title="Powiększ obszar"
+                    className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg inline-flex items-center gap-1"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 text-amber-700" />
+                    <span className="hidden sm:inline">Powiększ</span>
+                  </button>
+                </div>
+              )}
+
+              {selectedVertexIdx !== null && boundary.length > 3 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = boundary.filter(
+                      (_, i) => i !== selectedVertexIdx
+                    );
+                    setSelectedVertexIdx(null);
+                    onBoundaryUpdate(updated);
+                  }}
+                  className="min-h-[36px] px-2.5 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg inline-flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Usuń pkt</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={onCancelInteraction}
+                className="min-h-[36px] px-3 py-1 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg inline-flex items-center gap-1"
+              >
+                <Check className="w-3.5 h-3.5" />
+                Gotowe
+              </button>
             </div>
           )}
 
@@ -812,6 +1434,73 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Ergonomic thumb-zone action bar for Crosshair boundary drawing */}
+      {parish &&
+        interactionMode === 'draw_boundary' &&
+        drawTool === 'crosshair' && (
+          <div className="no-print absolute bottom-5 left-1/2 -translate-x-1/2 z-[500] w-max max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl p-1.5 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                const map = mapRef.current;
+                if (!map) return;
+                const c = map.getCenter();
+                const next = [
+                  ...draftPointsRef.current,
+                  { lat: c.lat, lng: c.lng },
+                ];
+                draftPointsRef.current = next;
+                setDraftPoints(next);
+              }}
+              className="min-h-[44px] px-3.5 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Plus className="w-4 h-4" />
+              <span>
+                Postaw punkt ({draftPoints.length})
+              </span>
+            </button>
+
+            {draftPoints.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const next = draftPointsRef.current.slice(0, -1);
+                  draftPointsRef.current = next;
+                  setDraftPoints(next);
+                }}
+                aria-label="Cofnij ostatni punkt"
+                className="min-h-[44px] min-w-[44px] px-2.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center justify-center gap-1"
+              >
+                <Undo2 className="w-4 h-4" />
+              </button>
+            )}
+
+            {draftPoints.length >= 3 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const pts = draftPointsRef.current;
+                  draftPointsRef.current = [];
+                  setDraftPoints([]);
+                  rubberBandLayerRef.current?.clearLayers();
+                  onBoundaryComplete(pts);
+                }}
+                className="min-h-[44px] px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <Check className="w-4 h-4" />
+                <span>Zapisz</span>
+              </button>
+            )}
+          </div>
+        )}
+
+      {/* Helpful floating tip in edit_boundary mode */}
+      {parish && interactionMode === 'edit_boundary' && (
+        <div className="no-print pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 z-[460] px-3 py-1.5 rounded-xl bg-slate-900/85 text-white text-[11px] font-medium whitespace-nowrap max-w-[calc(100%-24px)] truncate shadow">
+          Przeciągaj narożniki, dotknij „+” aby dodać nowy, lub kliknij punkt aby go usunąć
         </div>
       )}
 

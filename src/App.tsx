@@ -98,8 +98,11 @@ import {
   getDayStartTime,
 } from './utils/seasonScheduler';
 import {
+  computePolygonAreaSqMeters,
+  createBufferedHullBoundary,
   createPresetBoundaryPolygon,
   extractStreetName,
+  formatPolygonArea,
   isPointInsideBoundary,
   partitionStopsBySector,
   scaleBoundaryFromCenter,
@@ -593,8 +596,55 @@ function ParishPlannerWorkspace({
     (points: LatLng[]) => {
       setInteractionMode('pan');
       updateBoundaryAndRecheckStops(points, false);
+      const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(points));
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Zapisano teren parafii (${areaLabel}) — możesz wykryć ulice lub poprawić narożniki.`,
+        },
+        5000
+      );
     },
-    [updateBoundaryAndRecheckStops]
+    [showStreetFeedback, updateBoundaryAndRecheckStops]
+  );
+
+  const handleWrapStopsBoundary = useCallback(() => {
+    const currentStops = stopsRef.current;
+    if (currentStops.length === 0) return;
+    const hull = createBufferedHullBoundary(
+      currentStops.map((s) => s.location),
+      90
+    );
+    if (hull.length < 3) return;
+    updateBoundaryAndRecheckStops(hull, false);
+    setInteractionMode('pan');
+    setMobilePane('map');
+    const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(hull));
+    showStreetFeedback(
+      {
+        status: 'success',
+        message: `Otoczono dodane ulice (${areaLabel}). Możesz poprawić narożniki na mapie.`,
+      },
+      5000
+    );
+  }, [showStreetFeedback, updateBoundaryAndRecheckStops]);
+
+  const handleApplyLocalityBoundary = useCallback(
+    (points: LatLng[], placeName: string) => {
+      if (points.length < 3) return;
+      updateBoundaryAndRecheckStops(points, false);
+      setInteractionMode('pan');
+      setMobilePane('map');
+      const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(points));
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Pobrano granice „${placeName}” (${areaLabel}). Kliknij „Popraw granice”, aby doregulować obrys.`,
+        },
+        6000
+      );
+    },
+    [showStreetFeedback, updateBoundaryAndRecheckStops]
   );
 
   const handleCreatePresetBoundary = useCallback(
@@ -2535,6 +2585,16 @@ function ParishPlannerWorkspace({
                         return next;
                       });
                     }}
+                    onToggleEditBoundary={() => {
+                      setInteractionMode((m) => {
+                        const next =
+                          m === 'edit_boundary' ? 'pan' : 'edit_boundary';
+                        if (next === 'edit_boundary') setMobilePane('map');
+                        return next;
+                      });
+                    }}
+                    onWrapStopsBoundary={handleWrapStopsBoundary}
+                    onApplyLocalityBoundary={handleApplyLocalityBoundary}
                     onClearBoundary={handleClearBoundary}
                     onTogglePickStreetMode={() => {
                       setInteractionMode((m) => {
@@ -2677,6 +2737,11 @@ function ParishPlannerWorkspace({
                   onBoundaryUpdate={(pts) =>
                     updateBoundaryAndRecheckStops(pts, true)
                   }
+                  onEnterEditBoundary={() => {
+                    setInteractionMode('edit_boundary');
+                    setMobilePane('map');
+                  }}
+                  onScaleBoundary={handleScaleBoundary}
                   onCancelInteraction={() => setInteractionMode('pan')}
                   onMapAddStop={handleMapAddStop}
                   onMapPickStreet={handleMapPickStreet}
@@ -2705,6 +2770,11 @@ function ParishPlannerWorkspace({
                   onBoundaryUpdate={(pts) =>
                     updateBoundaryAndRecheckStops(pts, true)
                   }
+                  onEnterEditBoundary={() => {
+                    setInteractionMode('edit_boundary');
+                    setMobilePane('map');
+                  }}
+                  onScaleBoundary={handleScaleBoundary}
                   onCancelInteraction={() => setInteractionMode('pan')}
                   onMapAddStop={handleMapAddStop}
                   onMapPickStreet={handleMapPickStreet}

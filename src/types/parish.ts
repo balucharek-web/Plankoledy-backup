@@ -169,8 +169,11 @@ export const PRIEST_PALETTE: PriestProfile[] = [
 export type MapInteractionMode =
   | 'pan'
   | 'draw_boundary'
+  | 'edit_boundary'
   | 'pick_street'
   | 'add_stop';
+
+export type BoundaryDrawTool = 'lasso' | 'crosshair' | 'points';
 
 export type MarkerLabelMode = 'auto' | 'numbers' | 'dots';
 
