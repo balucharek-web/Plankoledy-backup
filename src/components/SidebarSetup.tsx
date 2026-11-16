@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
 import {
   ArrowRight,
   CheckCircle2,
@@ -46,9 +46,16 @@ import {
   findMissingHouseNumberGaps,
   formatPolygonArea,
 } from '../utils/spatial';
-import { CsvImportModal } from './CsvImportModal';
-import { OsmStreetFetcherModal } from './OsmStreetFetcherModal';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
+
+const CsvImportModal = lazy(() =>
+  import('./CsvImportModal').then((m) => ({ default: m.CsvImportModal }))
+);
+const OsmStreetFetcherModal = lazy(() =>
+  import('./OsmStreetFetcherModal').then((m) => ({
+    default: m.OsmStreetFetcherModal,
+  }))
+);
 
 interface SidebarSetupProps {
   parish: ParishCenter | null;
@@ -87,8 +94,6 @@ interface SidebarSetupProps {
   onViewMap: () => void;
   onNextStep: () => void;
 }
-
-type TerritoryTab = 'area' | 'streets';
 
 function formatShortDistance(meters: number): string {
   if (meters < 1000) return `${meters} m`;
@@ -132,7 +137,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onViewMap,
   onNextStep,
 }) => {
-  const [territoryTab, setTerritoryTab] = useState<TerritoryTab>('area');
+  const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [areaScannerOpen, setAreaScannerOpen] = useState(false);
   const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
@@ -149,6 +154,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   const isEditingBoundary = interactionMode === 'edit_boundary';
   const isPickingStreet = interactionMode === 'pick_street';
   const isAddingHouse = interactionMode === 'add_stop';
+  const advancedOpen = showAdvancedTools || isPickingStreet || isAddingHouse;
 
   const localityHint = useMemo(
     () => extractLocalityQueryHint(parish?.address, parish?.name),
@@ -532,7 +538,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         )}
       </section>
 
-      {/* Krok 2: Konfiguracja terenu — Obszar LUB Wybór ulic z wykrywaniem adresów */}
+      {/* Krok 2: Prosta ścieżka 2-krokowa + narzędzia zaawansowane w akordeonie */}
       <section className="p-4 sm:p-5 space-y-3.5">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-900">
@@ -546,60 +552,224 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           )}
         </div>
 
-        {/* Clean 2-method selector */}
-        <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-xl gap-1">
-          <button
-            type="button"
-            onClick={() => setTerritoryTab('area')}
-            className={`min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
-              territoryTab === 'area'
-                ? 'bg-white text-slate-900 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Pentagon className="w-3.5 h-3.5 text-amber-700" />
-            <span>Obszar na mapie</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setTerritoryTab('streets')}
-            className={`min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
-              territoryTab === 'streets'
-                ? 'bg-white text-slate-900 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Route className="w-3.5 h-3.5 text-amber-700" />
-            <span>Wybierz ulice</span>
-          </button>
-        </div>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Najprościej w 2 krokach: zaznacz obszar parafii na mapie, a następnie
+          wykryj automatycznie wszystkie ulice i numery domów w środku.
+        </p>
 
-        {territoryTab === 'area' ? (
-          <div className="space-y-3">
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Zakreśl teren palcem/myszą, ustaw punkty celownikiem albo pobierz
-              gotowe granice miejscowości — a potem wykryj domy w środku.
-            </p>
+        {/* GŁÓWNY KROK A: Granica parafii */}
+        <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+              <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[11px] font-bold inline-flex items-center justify-center shrink-0">
+                1
+              </span>
+              {boundary.length >= 3
+                ? 'Obszar parafii zapisany'
+                : 'Zaznacz teren parafii na mapie'}
+            </span>
+            {boundary.length >= 3 && (
+              <button
+                type="button"
+                onClick={onClearBoundary}
+                title="Usuń obszar"
+                aria-label="Usuń obszar"
+                className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
 
-            {boundary.length < 3 ? (
-              <div className="space-y-2">
+          {boundary.length < 3 ? (
+            <button
+              type="button"
+              disabled={!parish}
+              onClick={onToggleDrawBoundary}
+              className={`w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
+                isDrawing
+                  ? 'bg-amber-700 border-amber-700 text-white'
+                  : 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:bg-slate-300 disabled:border-slate-300'
+              }`}
+            >
+              <Pentagon className="w-4 h-4 shrink-0" />
+              <span>
+                {isDrawing
+                  ? 'Rysujesz obszar na mapie...'
+                  : 'Zakreśl lub narysuj teren na mapie'}
+              </span>
+            </button>
+          ) : (
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                disabled={isDrawing}
+                onClick={onToggleEditBoundary}
+                className={`min-h-[40px] py-1.5 px-2.5 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
+                  isEditingBoundary
+                    ? 'bg-slate-900 border-slate-900 text-white'
+                    : 'bg-white border-slate-300 text-slate-900 hover:bg-slate-100'
+                }`}
+              >
+                <Pentagon className="w-3.5 h-3.5" />
+                <span>
+                  {isEditingBoundary ? 'Kończysz...' : 'Popraw narożniki'}
+                </span>
+              </button>
+              {onExpandBoundaryMeters ? (
+                <button
+                  type="button"
+                  disabled={isDrawing}
+                  onClick={() => onExpandBoundaryMeters(25)}
+                  title="Rozszerz granice o 25 m na zewnątrz, aby objąć domy przy granicy"
+                  className="min-h-[40px] py-1.5 px-2.5 text-xs font-semibold rounded-xl border bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100 inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+                >
+                  +25 m brzeg
+                </button>
+              ) : (
                 <button
                   type="button"
                   disabled={!parish}
                   onClick={onToggleDrawBoundary}
-                  className={`w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
-                    isDrawing
-                      ? 'bg-amber-700 border-amber-700 text-white'
-                      : 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:bg-slate-300 disabled:border-slate-300'
+                  className="min-h-[40px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-100 inline-flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  Przerysuj
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* GŁÓWNY KROK B: Wykrywanie ulic i adresów */}
+        <button
+          type="button"
+          disabled={!parish}
+          onClick={() =>
+            onOpenAreaScanner
+              ? onOpenAreaScanner()
+              : setAreaScannerOpen(true)
+          }
+          className="w-full min-h-[46px] py-2.5 px-3 text-xs sm:text-sm font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-2 transition-colors shadow-xs"
+        >
+          <ScanSearch className="w-4 h-4 shrink-0" />
+          <span>
+            {boundary.length >= 3
+              ? '2. Wykryj ulice i adresy z obszaru'
+              : '2. Wykryj ulice i adresy w okolicy kościoła'}
+          </span>
+        </button>
+
+        {outsideBoundaryCount > 0 && onDeleteOutsideBoundaryStops && (
+          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 text-xs">
+            <span className="text-amber-950 font-medium">
+              {outsideBoundaryCount}{' '}
+              {outsideBoundaryCount === 1
+                ? 'dom leży'
+                : outsideBoundaryCount < 5
+                  ? 'domy leżą'
+                  : 'domów leży'}{' '}
+              poza granicą.
+            </span>
+            <button
+              type="button"
+              onClick={onDeleteOutsideBoundaryStops}
+              className="px-2.5 py-1.5 text-[11px] font-semibold text-red-700 bg-white hover:bg-red-50 border border-red-200 rounded-lg whitespace-nowrap shrink-0"
+            >
+              Usuń spoza granicy ({outsideBoundaryCount})
+            </button>
+          </div>
+        )}
+
+        {parish && (
+          <button
+            type="button"
+            onClick={onViewMap}
+            className="lg:hidden w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <MapIcon className="w-3.5 h-3.5 text-amber-700" />
+            Podgląd obszaru i ulic na mapie
+          </button>
+        )}
+
+        {/* Zwijane narzędzia dodatkowe i ręczne */}
+        <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+          <button
+            type="button"
+            onClick={() => setShowAdvancedTools((v) => !v)}
+            aria-expanded={advancedOpen}
+            className="w-full min-h-[42px] px-3 py-2 bg-slate-50/70 hover:bg-slate-100/80 flex items-center justify-between gap-2 text-xs font-semibold text-slate-700 transition-colors"
+          >
+            <span>Więcej metod i narzędzia ręczne</span>
+            {advancedOpen ? (
+              <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
+            ) : (
+              <ChevronRight className="w-4 h-4 text-slate-500 shrink-0" />
+            )}
+          </button>
+
+          {advancedOpen && (
+            <div className="p-3 space-y-3 border-t border-slate-200">
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                  Dodawanie pojedynczych ulic / domów
+                </div>
+                <button
+                  type="button"
+                  disabled={!parish}
+                  onClick={onTogglePickStreetMode}
+                  className={`w-full min-h-[40px] py-2 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
+                    isPickingStreet
+                      ? 'bg-amber-700 border-amber-700 text-white shadow-sm'
+                      : 'bg-amber-50 border-amber-200 text-amber-950 hover:bg-amber-100 disabled:opacity-50'
                   }`}
                 >
-                  <Pentagon className="w-4 h-4 shrink-0" />
+                  <Route className="w-4 h-4 shrink-0" />
                   <span>
-                    {isDrawing
-                      ? 'Rysujesz obszar na mapie...'
-                      : 'Zakreśl lub narysuj teren na mapie'}
+                    {isPickingStreet
+                      ? 'Tryb aktywny — dotknij ulicę na mapie'
+                      : 'Kliknij ulicę na mapie (wykryj adresy)'}
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  disabled={!parish}
+                  onClick={onToggleMapAddMode}
+                  className={`w-full min-h-[38px] py-1.5 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
+                    isAddingHouse
+                      ? 'bg-slate-900 border-slate-900 text-white'
+                      : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50'
+                  }`}
+                >
+                  <MapPinPlus className="w-3.5 h-3.5 text-amber-700" />
+                  <span>
+                    {isAddingHouse
+                      ? 'Tryb aktywny — kliknij budynek na mapie'
+                      : 'Dodaj pojedynczy dom z mapy'}
+                  </span>
+                </button>
+
+                <div className="pt-1">
+                  <div className="text-[11px] font-medium text-slate-500 mb-1">
+                    Lub wpisz konkretny adres ręcznie:
+                  </div>
+                  <PlaceSearchInput
+                    placeholder={
+                      parish
+                        ? 'np. Mieczysława Dzieńdziela 12, Mikołów'
+                        : 'Najpierw wybierz parafię'
+                    }
+                    biasLocation={parish?.location}
+                    onSelect={onAddPlaceStop}
+                    clearOnSelect={true}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2.5 border-t border-slate-100 space-y-2">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                  Szybkie granice i korekta obrysu
+                </div>
 
                 <div className="grid grid-cols-3 gap-1.5">
                   {[
@@ -612,298 +782,121 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                       type="button"
                       disabled={!parish || isDrawing}
                       onClick={() => onCreatePresetBoundary(opt.radius)}
-                      className="min-h-[38px] py-1.5 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
+                      className="min-h-[36px] py-1 px-2 text-xs font-medium rounded-xl border bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70 disabled:opacity-50 disabled:bg-white disabled:border-slate-200 disabled:text-slate-400 transition-colors tabular-nums"
                     >
                       Promień {opt.label}
                     </button>
                   ))}
                 </div>
 
+                {boundary.length >= 3 && (
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isDrawing}
+                      onClick={() => onScaleBoundary(0.86)}
+                      className="min-h-[36px] py-1 px-2 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <Minimize2 className="w-3.5 h-3.5 text-amber-700" />
+                      Zmniejsz
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDrawing}
+                      onClick={() => onScaleBoundary(1.16)}
+                      className="min-h-[36px] py-1 px-2 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5 text-amber-700" />
+                      Powiększ
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!parish}
+                      onClick={onToggleDrawBoundary}
+                      className="min-h-[36px] py-1 px-2 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-100 inline-flex items-center justify-center gap-1 transition-colors"
+                    >
+                      <Pentagon className="w-3.5 h-3.5 text-amber-700" />
+                      Przerysuj
+                    </button>
+                  </div>
+                )}
+
                 {stops.length > 0 && (
                   <button
                     type="button"
                     disabled={!parish || isDrawing}
                     onClick={onWrapStopsBoundary}
-                    className="w-full min-h-[38px] py-2 px-3 text-xs font-medium rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 inline-flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full min-h-[38px] py-1.5 px-3 text-xs font-medium rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 inline-flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <Layers className="w-3.5 h-3.5 text-amber-700" />
                     <span>Otocz już dodane ulice ({stops.length} pkt)</span>
                   </button>
                 )}
-              </div>
-            ) : (
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-semibold text-slate-800">
-                    Zapisany obszar parafii
-                  </span>
-                  <span className="text-slate-500 tabular-nums">
-                    {boundaryAreaText ? `${boundaryAreaText} · ` : ''}
-                    {boundary.length} pkt
-                  </span>
-                </div>
 
-                <button
-                  type="button"
-                  disabled={isDrawing}
-                  onClick={onToggleEditBoundary}
-                  className={`w-full min-h-[42px] py-2 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
-                    isEditingBoundary
-                      ? 'bg-slate-900 border-slate-900 text-white'
-                      : 'bg-white border-slate-300 text-slate-900 hover:bg-slate-100'
-                  }`}
-                >
-                  <Pentagon className="w-3.5 h-3.5" />
-                  <span>
-                    {isEditingBoundary
-                      ? 'Kończysz poprawianie punktów...'
-                      : 'Popraw narożniki i boki na mapie'}
-                  </span>
-                </button>
-
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button
-                    type="button"
-                    disabled={isDrawing}
-                    onClick={() => onScaleBoundary(0.86)}
-                    className="min-h-[38px] py-1.5 px-2 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1 transition-colors"
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="locality-boundary-input"
+                    className="block text-[11px] font-medium text-slate-600"
                   >
-                    <Minimize2 className="w-3.5 h-3.5 text-amber-700" />
-                    Zmniejsz
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isDrawing}
-                    onClick={() => onScaleBoundary(1.16)}
-                    className="min-h-[38px] py-1.5 px-2 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-800 hover:bg-slate-100 inline-flex items-center justify-center gap-1 transition-colors"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5 text-amber-700" />
-                    Powiększ
-                  </button>
-                  {onExpandBoundaryMeters && (
+                    Pobierz oficjalne granice miejscowości / osiedla:
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      id="locality-boundary-input"
+                      type="text"
+                      value={localityQuery}
+                      onChange={(e) => {
+                        setLocalityQuery(e.target.value);
+                        if (localityError) setLocalityError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleFetchLocalityBoundary();
+                        }
+                      }}
+                      placeholder={localityHint || 'np. Reta, Mikołów'}
+                      disabled={!parish || localityLoading}
+                      className="flex-1 min-w-0 min-h-[36px] px-2.5 py-1 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-600/30 focus:border-amber-600"
+                    />
                     <button
                       type="button"
-                      disabled={isDrawing}
-                      onClick={() => onExpandBoundaryMeters(25)}
-                      title="Rozszerz granice o 25 m na zewnątrz, aby objąć domy przy granicy"
-                      className="min-h-[38px] py-1.5 px-2 text-xs font-semibold rounded-xl border bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100 inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+                      disabled={
+                        !parish ||
+                        localityLoading ||
+                        !(localityQuery || localityHint).trim()
+                      }
+                      onClick={() => void handleFetchLocalityBoundary()}
+                      className="min-h-[36px] px-3 py-1 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                     >
-                      +25 m brzeg
+                      {localityLoading && (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
+                      )}
+                      <span>Pobierz obrys</span>
                     </button>
+                  </div>
+                  {localityError && (
+                    <p className="text-[11px] text-red-600 leading-snug">
+                      {localityError}
+                    </p>
                   )}
                 </div>
-
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={!parish}
-                    onClick={onToggleDrawBoundary}
-                    className={`flex-1 min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
-                      isDrawing
-                        ? 'bg-amber-700 border-amber-700 text-white'
-                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <Pentagon className="w-3.5 h-3.5" />
-                    <span>{isDrawing ? 'Rysujesz...' : 'Przerysuj od zera'}</span>
-                  </button>
-
-                  {stops.length > 0 && (
-                    <button
-                      type="button"
-                      disabled={isDrawing}
-                      onClick={onWrapStopsBoundary}
-                      title="Dopasuj obszar wokół dodanych domów"
-                      className="min-h-[38px] py-1.5 px-2.5 text-xs font-medium rounded-xl border bg-white border-slate-200 text-slate-700 hover:bg-slate-100 inline-flex items-center justify-center gap-1 whitespace-nowrap"
-                    >
-                      <Layers className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Otocz ulice</span>
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={onClearBoundary}
-                    title="Usuń obszar"
-                    aria-label="Usuń obszar"
-                    className="min-w-[38px] min-h-[38px] inline-flex items-center justify-center text-slate-500 hover:text-red-600 bg-white border border-slate-200 rounded-xl hover:bg-red-50 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
               </div>
-            )}
 
-            {/* Quick 1-click locality / district border lookup */}
-            <div className="pt-2 border-t border-slate-100 space-y-1.5">
-              <label
-                htmlFor="locality-boundary-input"
-                className="block text-[11px] font-medium text-slate-600"
-              >
-                Lub pobierz granice miejscowości / osiedla:
-              </label>
-              <div className="flex items-center gap-1.5">
-                <input
-                  id="locality-boundary-input"
-                  type="text"
-                  value={localityQuery}
-                  onChange={(e) => {
-                    setLocalityQuery(e.target.value);
-                    if (localityError) setLocalityError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      void handleFetchLocalityBoundary();
-                    }
-                  }}
-                  placeholder={localityHint || 'np. Reta, Mikołów'}
-                  disabled={!parish || localityLoading}
-                  className="flex-1 min-w-0 min-h-[38px] px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-600/30 focus:border-amber-600"
-                />
+              <div className="pt-2.5 border-t border-slate-100">
                 <button
                   type="button"
-                  disabled={
-                    !parish ||
-                    localityLoading ||
-                    !(localityQuery || localityHint).trim()
-                  }
-                  onClick={() => void handleFetchLocalityBoundary()}
-                  className="min-h-[38px] px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  disabled={!parish}
+                  onClick={() => setCsvImportOpen(true)}
+                  className="w-full min-h-[38px] py-1.5 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
                 >
-                  {localityLoading && (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
-                  )}
-                  <span>Pobierz obrys</span>
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                  <span>Importuj adresy z pliku Excel / CSV</span>
                 </button>
               </div>
-              {localityError && (
-                <p className="text-[11px] text-red-600 leading-snug">
-                  {localityError}
-                </p>
-              )}
             </div>
-
-            <button
-              type="button"
-              disabled={!parish}
-              onClick={() =>
-                onOpenAreaScanner
-                  ? onOpenAreaScanner()
-                  : setAreaScannerOpen(true)
-              }
-              className="w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
-            >
-              <ScanSearch className="w-4 h-4 shrink-0" />
-              <span>
-                {boundary.length >= 3
-                  ? 'Wykryj ulice i adresy z obszaru'
-                  : 'Wykryj ulice i adresy w okolicy kościoła'}
-              </span>
-            </button>
-
-            {outsideBoundaryCount > 0 && onDeleteOutsideBoundaryStops && (
-              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 text-xs">
-                <span className="text-amber-950 font-medium">
-                  {outsideBoundaryCount}{' '}
-                  {outsideBoundaryCount === 1
-                    ? 'dom leży'
-                    : outsideBoundaryCount < 5
-                      ? 'domy leżą'
-                      : 'domów leży'}{' '}
-                  poza granicą.
-                </span>
-                <button
-                  type="button"
-                  onClick={onDeleteOutsideBoundaryStops}
-                  className="px-2.5 py-1.5 text-[11px] font-semibold text-red-700 bg-white hover:bg-red-50 border border-red-200 rounded-lg whitespace-nowrap shrink-0"
-                >
-                  Usuń spoza granicy ({outsideBoundaryCount})
-                </button>
-              </div>
-            )}
-
-            {parish && (
-              <button
-                type="button"
-                onClick={onViewMap}
-                className="lg:hidden w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-                Podgląd obszaru na mapie
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-2.5">
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Wskaż wybrane ulice bezpośrednio na mapie — aplikacja automatycznie
-              rozpozna ulicę i pobierze wszystkie oficjalne numery domów.
-            </p>
-
-            <button
-              type="button"
-              disabled={!parish}
-              onClick={onTogglePickStreetMode}
-              className={`w-full min-h-[44px] py-2.5 px-3 text-xs font-semibold rounded-xl border inline-flex items-center justify-center gap-2 transition-colors ${
-                isPickingStreet
-                  ? 'bg-amber-700 border-amber-700 text-white shadow-sm'
-                  : 'bg-amber-700 border-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 disabled:bg-slate-300 disabled:border-slate-300'
-              }`}
-            >
-              <Route className="w-4 h-4 shrink-0" />
-              <span>
-                {isPickingStreet
-                  ? 'Tryb aktywny — dotknij ulicę na mapie'
-                  : 'Kliknij ulicę na mapie (wykryj adresy)'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              disabled={!parish}
-              onClick={onToggleMapAddMode}
-              className={`w-full min-h-[40px] py-2 px-3 text-xs font-medium rounded-xl border inline-flex items-center justify-center gap-1.5 transition-colors ${
-                isAddingHouse
-                  ? 'bg-slate-900 border-slate-900 text-white'
-                  : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50 disabled:opacity-50'
-              }`}
-            >
-              <MapPinPlus className="w-3.5 h-3.5 text-amber-700" />
-              <span>
-                {isAddingHouse
-                  ? 'Tryb aktywny — kliknij budynek na mapie'
-                  : 'Dodaj pojedynczy dom z mapy'}
-              </span>
-            </button>
-
-            <div className="pt-1">
-              <div className="text-[11px] font-medium text-slate-500 mb-1">
-                Lub dopisz konkretny adres ręcznie:
-              </div>
-              <PlaceSearchInput
-                placeholder={
-                  parish
-                    ? 'np. Mieczysława Dzieńdziela 12, Mikołów'
-                    : 'Najpierw wybierz parafię'
-                }
-                biasLocation={parish?.location}
-                onSelect={onAddPlaceStop}
-                clearOnSelect={true}
-              />
-            </div>
-          </div>
-        )}
-
-        <button
-          type="button"
-          disabled={!parish}
-          onClick={() => setCsvImportOpen(true)}
-          className="w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-        >
-          <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-          <span>Importuj adresy z pliku Excel / CSV</span>
-        </button>
+          )}
+        </div>
 
         {streetPickFeedback && (
           <div
@@ -944,8 +937,9 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
 
         {savedStreets.length === 0 ? (
           <p className="text-xs text-slate-500 leading-relaxed">
-            Brak zapisanych ulic dla tej parafii. Wyznacz obszar i wykryj ulice
-            powyżej lub przełącz na zakładkę <strong>„Wybierz ulice”</strong>.
+            Brak zapisanych ulic dla tej parafii. Zakreśl teren i kliknij{' '}
+            <strong>„Wykryj ulice i adresy”</strong> powyżej albo wybierz
+            pojedynczą ulicę z narzędzi ręcznych.
           </p>
         ) : (
           <ul className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 max-h-96 overflow-y-auto">
@@ -1099,23 +1093,29 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         </button>
       </section>
 
-      {!onOpenAreaScanner && (
-        <OsmStreetFetcherModal
-          open={areaScannerOpen}
-          parish={parish}
-          boundary={boundary}
-          onClose={() => setAreaScannerOpen(false)}
-          onAddPlaces={onBatchAddStops}
-        />
+      {!onOpenAreaScanner && areaScannerOpen && (
+        <Suspense fallback={null}>
+          <OsmStreetFetcherModal
+            open={areaScannerOpen}
+            parish={parish}
+            boundary={boundary}
+            onClose={() => setAreaScannerOpen(false)}
+            onAddPlaces={onBatchAddStops}
+          />
+        </Suspense>
       )}
 
-      <CsvImportModal
-        open={csvImportOpen}
-        parish={parish}
-        existingStops={stops}
-        onClose={() => setCsvImportOpen(false)}
-        onImportPlaces={onBatchAddStops}
-      />
+      {csvImportOpen && (
+        <Suspense fallback={null}>
+          <CsvImportModal
+            open={csvImportOpen}
+            parish={parish}
+            existingStops={stops}
+            onClose={() => setCsvImportOpen(false)}
+            onImportPlaces={onBatchAddStops}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

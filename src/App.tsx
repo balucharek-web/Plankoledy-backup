@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
@@ -9,6 +17,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Church,
+  ClipboardCheck,
+  Crosshair,
   Eye,
   EyeOff,
   HelpCircle,
@@ -29,18 +39,14 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
 import { AuthModal } from './components/AuthModal';
-import { BlockUnitsModal } from './components/BlockUnitsModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
-import { OsmStreetFetcherModal } from './components/OsmStreetFetcherModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { OsmParishMap } from './components/OsmParishMap';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { ParishMap, RoutePolylineEntry } from './components/ParishMap';
 import { PlanDashboard, WorkspaceSection } from './components/PlanDashboard';
 import { SelectedPlaceData } from './components/PlaceSearchInput';
-import { PrintScheduleSheet } from './components/PrintScheduleSheet';
 import { SidebarRoutes } from './components/SidebarRoutes';
 import { SidebarSettings } from './components/SidebarSettings';
 import { SidebarSetup } from './components/SidebarSetup';
@@ -49,6 +55,32 @@ import {
   SidebarStops,
 } from './components/SidebarStops';
 import { MapEngineProvider } from './contexts/MapEngineContext';
+
+const ArchitectureGuideModal = lazy(() =>
+  import('./components/ArchitectureGuideModal').then((m) => ({
+    default: m.ArchitectureGuideModal,
+  }))
+);
+const BlockUnitsModal = lazy(() =>
+  import('./components/BlockUnitsModal').then((m) => ({
+    default: m.BlockUnitsModal,
+  }))
+);
+const OsmStreetFetcherModal = lazy(() =>
+  import('./components/OsmStreetFetcherModal').then((m) => ({
+    default: m.OsmStreetFetcherModal,
+  }))
+);
+const PrintScheduleSheet = lazy(() =>
+  import('./components/PrintScheduleSheet').then((m) => ({
+    default: m.PrintScheduleSheet,
+  }))
+);
+const MapFieldOverlay = lazy(() =>
+  import('./components/MapFieldOverlay').then((m) => ({
+    default: m.MapFieldOverlay,
+  }))
+);
 import {
   FIREBASE_CONSOLE_UPGRADE_URL,
   auth,
@@ -219,6 +251,14 @@ function ParishPlannerWorkspace({
   const [editingBlockStopId, setEditingBlockStopId] = useState<string | null>(
     null
   );
+  const [fieldModeOnMap, setFieldModeOnMap] = useState(false);
+  const [fieldNightMode, setFieldNightMode] = useState(false);
+  const [fieldPriestId, setFieldPriestId] = useState<number>(1);
+  const [activeFieldStopId, setActiveFieldStopId] = useState<string | null>(
+    null
+  );
+  const [recenterSignal, setRecenterSignal] = useState(0);
+  const [plannerDraftStreets, setPlannerDraftStreets] = useState<string[]>([]);
   const [confirmState, setConfirmState] = useState<{
     title: string;
     description: string;
@@ -241,6 +281,11 @@ function ParishPlannerWorkspace({
   stopsRef.current = stops;
 
   const navigateToSection = useCallback((section: WorkspaceSection) => {
+    if (section !== 'stops') {
+      setPlannerLoadState((prev) =>
+        prev.seq === 0 ? prev : { date: null, seq: 0 }
+      );
+    }
     setActiveSection(section);
     setMobilePane('panel');
     setMobileMenuOpen(false);
@@ -325,6 +370,9 @@ function ParishPlannerWorkspace({
       setFocusedPriestId(null);
       setPostBoundaryBanner(false);
       setLassoSelectedStopIds([]);
+      setFieldModeOnMap(false);
+      setActiveFieldStopId(null);
+      setPlannerDraftStreets([]);
       clearRoutes();
       return;
     }
@@ -511,6 +559,9 @@ function ParishPlannerWorkspace({
       setFocusedPriestId(null);
       setPostBoundaryBanner(false);
       setLassoSelectedStopIds([]);
+      setFieldModeOnMap(false);
+      setActiveFieldStopId(null);
+      setPlannerDraftStreets([]);
       setActiveParishId(target.id);
       setParish(target.parish);
       setBoundary(target.boundary);
@@ -1891,6 +1942,29 @@ function ParishPlannerWorkspace({
     return [];
   }, [cachedExact, selectedDaySummary]);
 
+  useEffect(() => {
+    if (displayedRoutes.length === 0) {
+      setFieldModeOnMap(false);
+      return;
+    }
+    if (!displayedRoutes.some((r) => r.priestId === fieldPriestId)) {
+      setFieldPriestId(displayedRoutes[0].priestId);
+    }
+  }, [displayedRoutes, fieldPriestId]);
+
+  const blockNextStopCandidate = useMemo(() => {
+    if (!editingBlockStopId || displayedRoutes.length === 0) return null;
+    for (const r of displayedRoutes) {
+      const idx = r.orderedStops.findIndex(
+        (i) => i.stop.id === editingBlockStopId
+      );
+      if (idx >= 0) {
+        return r.orderedStops[idx + 1]?.stop ?? null;
+      }
+    }
+    return null;
+  }, [editingBlockStopId, displayedRoutes]);
+
   const displayedRouteObjects = useMemo(
     () => (cachedExact ? cachedExact.routeObjects : []),
     [cachedExact]
@@ -2257,6 +2331,7 @@ function ParishPlannerWorkspace({
       setSelectedDate(payload.date);
       setFocusedPriestId(null);
       setFocusedStreet(null);
+      setPlannerDraftStreets([]);
       setMarkerLabelMode('numbers');
       setInteractionMode('pan');
       setActiveSection('routes');
@@ -2596,41 +2671,43 @@ function ParishPlannerWorkspace({
         {/* Active Workspace or Schedule */}
         {isScheduleView ? (
           <main className="flex-1 min-h-0 overflow-y-auto bg-slate-50 print-reset">
-            <PrintScheduleSheet
-              parish={parish}
-              boundary={boundary}
-              stops={stops}
-              config={config}
-              seasonConfig={seasonConfig}
-              routes={displayedRoutes}
-              isExactRoute={isExactRoute}
-              plannedDays={plannedDays}
-              unscheduledCount={unscheduledStops.length}
-              selectedDate={selectedDate}
-              effectiveStartTime={effectiveStartTime}
-              effectiveEndTime={effectiveEndTime}
-              exactDayKeys={exactDayKeys}
-              onSelectDate={setSelectedDate}
-              onInspectDay={(date) => {
-                setSelectedDate(date);
-                setFocusedPriestId(null);
-              }}
-              onViewDayOnMap={handleViewDayOnMap}
-              onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
-              onChangeSeasonConfig={handleChangeSeasonConfig}
-              onAutoScheduleSeason={handleAutoScheduleSeason}
-              onClearAllDates={handleClearAllDates}
-              onUpdateDayTimeWindow={handleUpdateDayTimeWindow}
-              onScheduleReturnVisits={handleScheduleReturnVisits}
-              onGoToDayPlanner={handleStartNewDayInPlanner}
-              onEditDayInPlanner={handleEditDayInPlanner}
-              onDeleteDayRoute={handleDeleteDayPlan}
-              onStartNewSeason={handleStartNewSeason}
-              onBackToMap={() => {
-                setActiveSection('overview');
-                setMobilePane('map');
-              }}
-            />
+            <Suspense fallback={null}>
+              <PrintScheduleSheet
+                parish={parish}
+                boundary={boundary}
+                stops={stops}
+                config={config}
+                seasonConfig={seasonConfig}
+                routes={displayedRoutes}
+                isExactRoute={isExactRoute}
+                plannedDays={plannedDays}
+                unscheduledCount={unscheduledStops.length}
+                selectedDate={selectedDate}
+                effectiveStartTime={effectiveStartTime}
+                effectiveEndTime={effectiveEndTime}
+                exactDayKeys={exactDayKeys}
+                onSelectDate={setSelectedDate}
+                onInspectDay={(date) => {
+                  setSelectedDate(date);
+                  setFocusedPriestId(null);
+                }}
+                onViewDayOnMap={handleViewDayOnMap}
+                onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
+                onChangeSeasonConfig={handleChangeSeasonConfig}
+                onAutoScheduleSeason={handleAutoScheduleSeason}
+                onClearAllDates={handleClearAllDates}
+                onUpdateDayTimeWindow={handleUpdateDayTimeWindow}
+                onScheduleReturnVisits={handleScheduleReturnVisits}
+                onGoToDayPlanner={handleStartNewDayInPlanner}
+                onEditDayInPlanner={handleEditDayInPlanner}
+                onDeleteDayRoute={handleDeleteDayPlan}
+                onStartNewSeason={handleStartNewSeason}
+                onBackToMap={() => {
+                  setActiveSection('overview');
+                  setMobilePane('map');
+                }}
+              />
+            </Suspense>
           </main>
         ) : (
           <>
@@ -2773,6 +2850,8 @@ function ParishPlannerWorkspace({
                     selectedDate={selectedDate}
                     plannerLoadDate={plannerLoadState.date}
                     plannerLoadSeq={plannerLoadState.seq}
+                    draftSelectedStreets={plannerDraftStreets}
+                    onDraftSelectedStreetsChange={setPlannerDraftStreets}
                     onSelectDate={(d) => {
                       setSelectedDate(d);
                       setFocusedPriestId(null);
@@ -2838,6 +2917,18 @@ function ParishPlannerWorkspace({
                     onSetRouteStartStop={handleSetRouteStartStop}
                     onDeleteRoute={handleClearCurrentRoute}
                     onGoToPlanner={handleStartNewDayInPlanner}
+                    fieldPriestId={fieldPriestId}
+                    onChangeFieldPriestId={setFieldPriestId}
+                    activeFieldStopId={activeFieldStopId}
+                    onChangeActiveFieldStopId={setActiveFieldStopId}
+                    nightMode={fieldNightMode}
+                    onToggleNightMode={() => setFieldNightMode((v) => !v)}
+                    onUpdateStopDetails={handleUpdateStop}
+                    onOpenMapFieldMode={() => {
+                      setFieldModeOnMap(true);
+                      setInteractionMode('pan');
+                      setMobilePane('map');
+                    }}
                   />
                 )}
 
@@ -2893,6 +2984,23 @@ function ParishPlannerWorkspace({
                     </button>
                   ) : (
                     <>
+                      {displayedRoutes.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setFieldModeOnMap((v) => !v)}
+                          className={`min-h-[36px] px-2.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors ${
+                            fieldModeOnMap
+                              ? 'bg-emerald-700 border-emerald-700 text-white shadow-xs'
+                              : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-950'
+                          }`}
+                        >
+                          <ClipboardCheck className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {fieldModeOnMap ? 'Tryb terenowy: WŁ' : 'W terenie na mapie'}
+                          </span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() =>
@@ -2957,6 +3065,16 @@ function ParishPlannerWorkspace({
 
                       <button
                         type="button"
+                        onClick={() => setRecenterSignal((n) => n + 1)}
+                        title="Wycentruj mapę na parafii / trasie"
+                        className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        <Crosshair className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>Wycentruj</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => navigateToSection('parish')}
                         className="lg:hidden min-h-[36px] px-2.5 py-1.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
                       >
@@ -2986,6 +3104,8 @@ function ParishPlannerWorkspace({
                   lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
+                  recenterSignal={recenterSignal}
+                  suppressStopPopup={fieldModeOnMap}
                   streetPickFeedback={streetPickFeedback}
                   onDismissStreetFeedback={() => setStreetPickFeedback(null)}
                   onBoundaryComplete={handleBoundaryComplete}
@@ -3000,7 +3120,16 @@ function ParishPlannerWorkspace({
                   onCancelInteraction={() => setInteractionMode('pan')}
                   onMapAddStop={handleMapAddStop}
                   onMapPickStreet={handleMapPickStreet}
-                  onSelectStop={setHighlightedStopId}
+                  onSelectStop={(id) => {
+                    setHighlightedStopId(id);
+                    if (id && fieldModeOnMap) {
+                      setActiveFieldStopId(id);
+                      const hitRoute = displayedRoutes.find((r) =>
+                        r.orderedStops.some((i) => i.stop.id === id)
+                      );
+                      if (hitRoute) setFieldPriestId(hitRoute.priestId);
+                    }
+                  }}
                   onDeleteStop={handleDeleteStop}
                   onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                   onLassoSelectStops={handleLassoSelectStops}
@@ -3022,6 +3151,8 @@ function ParishPlannerWorkspace({
                   lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
+                  recenterSignal={recenterSignal}
+                  suppressStopPopup={fieldModeOnMap}
                   streetPickFeedback={streetPickFeedback}
                   onDismissStreetFeedback={() => setStreetPickFeedback(null)}
                   onBoundaryComplete={handleBoundaryComplete}
@@ -3036,7 +3167,16 @@ function ParishPlannerWorkspace({
                   onCancelInteraction={() => setInteractionMode('pan')}
                   onMapAddStop={handleMapAddStop}
                   onMapPickStreet={handleMapPickStreet}
-                  onSelectStop={setHighlightedStopId}
+                  onSelectStop={(id) => {
+                    setHighlightedStopId(id);
+                    if (id && fieldModeOnMap) {
+                      setActiveFieldStopId(id);
+                      const hitRoute = displayedRoutes.find((r) =>
+                        r.orderedStops.some((i) => i.stop.id === id)
+                      );
+                      if (hitRoute) setFieldPriestId(hitRoute.priestId);
+                    }
+                  }}
                   onDeleteStop={handleDeleteStop}
                   onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                   onLassoSelectStops={handleLassoSelectStops}
@@ -3050,7 +3190,7 @@ function ParishPlannerWorkspace({
                 boundary.length >= 3 &&
                 validLassoSelectedIds.length === 0 &&
                 !streetPickFeedback && (
-                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[475] w-max max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-emerald-300 rounded-2xl shadow-xl px-3 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <div className="no-print absolute top-14 sm:top-3 left-1/2 -translate-x-1/2 z-[475] w-[calc(100%-20px)] sm:w-max sm:max-w-[calc(100%-260px)] bg-white/95 backdrop-blur-md border border-emerald-300 rounded-2xl shadow-xl px-3 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
                     <span className="font-semibold text-slate-900">
                       Teren parafii gotowy (
                       {formatPolygonArea(computePolygonAreaSqMeters(boundary))}
@@ -3096,7 +3236,7 @@ function ParishPlannerWorkspace({
                 !postBoundaryBanner &&
                 validLassoSelectedIds.length === 0 &&
                 !streetPickFeedback && (
-                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[470] w-max max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3 py-2 flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <div className="no-print absolute top-14 sm:top-3 left-1/2 -translate-x-1/2 z-[470] w-[calc(100%-20px)] sm:w-max sm:max-w-[calc(100%-260px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3 py-2 flex flex-wrap items-center justify-center gap-2 text-xs">
                     <span className="font-semibold text-amber-950 truncate max-w-[200px]">
                       Ulica: {focusedStreet}
                     </span>
@@ -3121,7 +3261,7 @@ function ParishPlannerWorkspace({
               {/* Lasso Multi-Select Floating Action Bar */}
               {interactionMode === 'pan' &&
                 validLassoSelectedIds.length > 0 && (
-                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[485] w-max max-w-[calc(100%-24px)] bg-slate-900/95 backdrop-blur-md text-white border border-indigo-400/50 rounded-2xl shadow-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <div className="no-print absolute top-14 sm:top-3 left-1/2 -translate-x-1/2 z-[485] w-[calc(100%-20px)] sm:w-max sm:max-w-[calc(100%-260px)] bg-slate-900/95 backdrop-blur-md text-white border border-indigo-400/50 rounded-2xl shadow-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
                     <span className="inline-flex items-center gap-1.5 font-semibold text-indigo-200 tabular-nums">
                       <Scan className="w-4 h-4 text-indigo-400" />
                       Zaznaczono: {validLassoSelectedIds.length}
@@ -3133,7 +3273,7 @@ function ParishPlannerWorkspace({
                         value={lassoAssignDate}
                         onChange={(e) => setLassoAssignDate(e.target.value)}
                         aria-label="Data kolędy dla zaznaczonych domów"
-                        className="min-h-[32px] px-2 py-1 text-base sm:text-xs font-mono bg-slate-800 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-indigo-400"
+                        className="min-h-[32px] px-2 py-1 text-base sm:text-xs font-mono bg-slate-800 border border-slate-600 rounded-lg text-white [color-scheme:dark] focus:outline-none focus:border-indigo-400"
                       />
                       <button
                         type="button"
@@ -3216,8 +3356,36 @@ function ParishPlannerWorkspace({
                   </div>
                 )}
 
-              {/* Compact Map Readability & Day HUD */}
+              {/* Field Mode Overlay DIRECTLY on Map OR Compact Readability HUD */}
               {interactionMode === 'pan' &&
+                fieldModeOnMap &&
+                displayedRoutes.length > 0 ? (
+                <Suspense fallback={null}>
+                  <MapFieldOverlay
+                    parish={parish}
+                    config={config}
+                    routes={displayedRoutes}
+                    fieldPriestId={fieldPriestId}
+                    activeFieldStopId={activeFieldStopId}
+                    nightMode={fieldNightMode}
+                    onChangePriest={(pId) => {
+                      setFieldPriestId(pId);
+                      setActiveFieldStopId(null);
+                    }}
+                    onSelectActiveStop={(stopId) => {
+                      setActiveFieldStopId(stopId);
+                      setHighlightedStopId(stopId);
+                    }}
+                    onToggleNightMode={() => setFieldNightMode((v) => !v)}
+                    onUpdateStopStatus={handleUpdateStopStatus}
+                    onUpdateStopDetails={handleUpdateStop}
+                    onOpenBlockUnits={(stopId) => setEditingBlockStopId(stopId)}
+                    onCenterOnStop={(stopId) => setHighlightedStopId(stopId)}
+                    onClose={() => setFieldModeOnMap(false)}
+                  />
+                </Suspense>
+              ) : (
+                interactionMode === 'pan' &&
                 (plannedDays.length > 0 ||
                   displayedRoutes.length > 0 ||
                   activeStopsCount > 0) && (
@@ -3408,12 +3576,15 @@ function ParishPlannerWorkspace({
                       </button>
                     )}
                   </div>
-                )}
+                )
+              )}
 
               {/* Top-left Map Route Info Pill (START + Streets) & Priest Legend */}
-              <div className="no-print absolute top-3 left-3 z-[450] flex flex-col items-start gap-1.5 max-w-[calc(100%-24px)] sm:max-w-[420px] pointer-events-none">
+              <div className="no-print absolute top-3 left-3 z-[450] flex flex-col items-start gap-1.5 max-w-[calc(100%-136px)] sm:max-w-[420px] pointer-events-none">
                 {interactionMode === 'pan' &&
                   !streetPickFeedback &&
+                  !postBoundaryBanner &&
+                  validLassoSelectedIds.length === 0 &&
                   displayedRoutes.length > 0 && (() => {
                     const visibleRoutesForPill =
                       focusedPriestId !== null
@@ -3491,37 +3662,39 @@ function ParishPlannerWorkspace({
             </section>
           </main>
           <div className="print-offscreen print-reset bg-white w-full">
-            <PrintScheduleSheet
-              parish={parish}
-              boundary={boundary}
-              config={config}
-              routes={displayedRoutes}
-              isExactRoute={isExactRoute}
-              plannedDays={plannedDays}
-              unscheduledCount={unscheduledStops.length}
-              selectedDate={selectedDate}
-              effectiveStartTime={effectiveStartTime}
-              effectiveEndTime={effectiveEndTime}
-              exactDayKeys={exactDayKeys}
-              forcedViewMode={
-                displayedRoutes.length > 0 ||
-                selectedDate !== null ||
-                plannedDays.length <= 1
-                  ? 'day'
-                  : 'season'
-              }
-              onSelectDate={setSelectedDate}
-              onInspectDay={(date) => {
-                setSelectedDate(date);
-                setFocusedPriestId(null);
-              }}
-              onViewDayOnMap={handleViewDayOnMap}
-              onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
-              onBackToMap={() => {
-                setActiveSection('overview');
-                setMobilePane('map');
-              }}
-            />
+            <Suspense fallback={null}>
+              <PrintScheduleSheet
+                parish={parish}
+                boundary={boundary}
+                config={config}
+                routes={displayedRoutes}
+                isExactRoute={isExactRoute}
+                plannedDays={plannedDays}
+                unscheduledCount={unscheduledStops.length}
+                selectedDate={selectedDate}
+                effectiveStartTime={effectiveStartTime}
+                effectiveEndTime={effectiveEndTime}
+                exactDayKeys={exactDayKeys}
+                forcedViewMode={
+                  displayedRoutes.length > 0 ||
+                  selectedDate !== null ||
+                  plannedDays.length <= 1
+                    ? 'day'
+                    : 'season'
+                }
+                onSelectDate={setSelectedDate}
+                onInspectDay={(date) => {
+                  setSelectedDate(date);
+                  setFocusedPriestId(null);
+                }}
+                onViewDayOnMap={handleViewDayOnMap}
+                onComputeDayRoute={(date) => void handleComputeRoutesForDate(date)}
+                onBackToMap={() => {
+                  setActiveSection('overview');
+                  setMobilePane('map');
+                }}
+              />
+            </Suspense>
           </div>
           </>
         )}
@@ -3774,28 +3947,50 @@ function ParishPlannerWorkspace({
         onCancel={() => setConfirmState(null)}
       />
 
-      <ArchitectureGuideModal
-        open={guideOpen}
-        onClose={() => setGuideOpen(false)}
-      />
+      {guideOpen && (
+        <Suspense fallback={null}>
+          <ArchitectureGuideModal
+            open={guideOpen}
+            onClose={() => setGuideOpen(false)}
+          />
+        </Suspense>
+      )}
 
-      <BlockUnitsModal
-        stop={stops.find((s) => s.id === editingBlockStopId) ?? null}
-        defaultVisitMinutes={config.defaultVisitMinutes}
-        onClose={() => setEditingBlockStopId(null)}
-        onSave={(updated) => handleUpdateStop(updated.id, updated)}
-      />
+      {Boolean(editingBlockStopId) && (
+        <Suspense fallback={null}>
+          <BlockUnitsModal
+            stop={stops.find((s) => s.id === editingBlockStopId) ?? null}
+            defaultVisitMinutes={config.defaultVisitMinutes}
+            onClose={() => setEditingBlockStopId(null)}
+            onSave={(updated) => handleUpdateStop(updated.id, updated)}
+            onSaveAndNext={
+              blockNextStopCandidate
+                ? (updated) => {
+                    handleUpdateStop(updated.id, updated);
+                    setActiveFieldStopId(blockNextStopCandidate.id);
+                    setHighlightedStopId(blockNextStopCandidate.id);
+                    setEditingBlockStopId(null);
+                  }
+                : undefined
+            }
+          />
+        </Suspense>
+      )}
 
-      <OsmStreetFetcherModal
-        open={areaScannerOpen}
-        parish={parish}
-        boundary={boundary}
-        onClose={() => setAreaScannerOpen(false)}
-        onAddPlaces={(places) => {
-          handleBatchAddStops(places);
-          setPostBoundaryBanner(false);
-        }}
-      />
+      {areaScannerOpen && (
+        <Suspense fallback={null}>
+          <OsmStreetFetcherModal
+            open={areaScannerOpen}
+            parish={parish}
+            boundary={boundary}
+            onClose={() => setAreaScannerOpen(false)}
+            onAddPlaces={(places) => {
+              handleBatchAddStops(places);
+              setPostBoundaryBanner(false);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

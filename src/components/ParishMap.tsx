@@ -91,6 +91,8 @@ interface ParishMapProps {
   onOpenBlockUnits?: (stopId: string) => void;
   onLassoSelectStops?: (stopIds: string[]) => void;
   onSelectStreetOverlay?: (streetName: string) => void;
+  recenterSignal?: number;
+  suppressStopPopup?: boolean;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -474,7 +476,27 @@ const StreetOverlaysLayer: React.FC<{
   const onSelectRef = useRef(onSelectStreetOverlay);
   onSelectRef.current = onSelectStreetOverlay;
 
-  const paths = useMemo(() => buildStreetOverlayPaths(stops), [stops]);
+  const stopsGeoSig = useMemo(
+    () =>
+      stops
+        .map(
+          (s) =>
+            `${s.id}:${s.location.lat.toFixed(5)}:${s.location.lng.toFixed(5)}:${s.address}:${s.label}`
+        )
+        .join('|'),
+    [stops]
+  );
+  const streetOverlayCacheRef = useRef<{
+    sig: string;
+    paths: ReturnType<typeof buildStreetOverlayPaths>;
+  }>({ sig: '', paths: [] });
+  if (streetOverlayCacheRef.current.sig !== stopsGeoSig) {
+    streetOverlayCacheRef.current = {
+      sig: stopsGeoSig,
+      paths: buildStreetOverlayPaths(stops),
+    };
+  }
+  const paths = streetOverlayCacheRef.current.paths;
 
   useEffect(() => {
     if (!map) return;
@@ -913,11 +935,81 @@ const MapControllerLayer: React.FC<{
   );
 };
 
-const UserGpsMarkerLayer: React.FC = () => {
+const UserGpsMarkerLayer: React.FC<{
+  parish: ParishCenter | null;
+  boundary: LatLng[];
+  stops: VisitStop[];
+  routes: PriestRouteResult[];
+  selectedDate: string | null;
+  focusedPriestId: number | null;
+  recenterSignal: number;
+  highlightedStopId: string | null;
+}> = ({
+  parish,
+  boundary,
+  stops,
+  routes,
+  selectedDate,
+  focusedPriestId,
+  recenterSignal,
+  highlightedStopId,
+}) => {
   const map = useMap();
   const gps = useUserGpsLocation();
   const circleRef = useRef<google.maps.Circle | null>(null);
   const hasCenteredRef = useRef<boolean>(false);
+
+  const recenterRef = useRef<() => void>(() => {});
+  recenterRef.current = () => {
+    if (!map) return;
+    const activeStopsForFit = stops.filter((s) =>
+      selectedDate
+        ? (s.visitDate ?? '').trim() === selectedDate
+        : s.included !== false
+    );
+    const bounds = new google.maps.LatLngBounds();
+    let hasPoints = false;
+    if (routes.length > 0 && activeStopsForFit.length > 0) {
+      activeStopsForFit.forEach((s) => {
+        if (focusedPriestId === null || s.priestId === focusedPriestId) {
+          bounds.extend(s.location);
+          hasPoints = true;
+        }
+      });
+    }
+    if (!hasPoints && boundary.length >= 3) {
+      boundary.forEach((pt) => {
+        bounds.extend(pt);
+        hasPoints = true;
+      });
+    }
+    if (hasPoints) {
+      map.fitBounds(bounds, { top: 64, right: 48, bottom: 90, left: 48 });
+      return;
+    }
+    if (parish) {
+      map.panTo(parish.location);
+      map.setZoom(15);
+    }
+  };
+
+  useEffect(() => {
+    if (recenterSignal > 0) {
+      recenterRef.current();
+    }
+  }, [recenterSignal]);
+
+  const stopsLookupRef = useRef(stops);
+  stopsLookupRef.current = stops;
+  useEffect(() => {
+    if (!map || !highlightedStopId) return;
+    const target = stopsLookupRef.current.find(
+      (s) => s.id === highlightedStopId
+    );
+    if (target) {
+      map.panTo(target.location);
+    }
+  }, [map, highlightedStopId]);
 
   useEffect(() => {
     if (!map) return;
@@ -1013,6 +1105,17 @@ const UserGpsMarkerLayer: React.FC = () => {
               <span>{gps.active ? 'GPS włączony' : 'Moja pozycja'}</span>
             </button>
           </div>
+          {parish && (
+            <button
+              type="button"
+              onClick={() => recenterRef.current()}
+              title="Wycentruj mapę na parafii lub trasie"
+              className="min-h-[34px] px-2.5 py-1 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+            >
+              <Church className="w-3.5 h-3.5 text-amber-700" />
+              <span className="hidden sm:inline">Wycentruj</span>
+            </button>
+          )}
           {gps.error && (
             <div className="max-w-[230px] px-2.5 py-1.5 bg-red-50/95 border border-red-200 rounded-lg shadow text-[11px] font-medium text-red-800">
               {gps.error}
@@ -1054,6 +1157,8 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   onOpenBlockUnits,
   onLassoSelectStops,
   onSelectStreetOverlay,
+  recenterSignal = 0,
+  suppressStopPopup = false,
 }) => {
   const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
   const [drawTool, setDrawTool] = useState<BoundaryDrawTool>(() =>
@@ -1156,7 +1261,16 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           showRouteLines={showRouteLines}
         />
 
-        <UserGpsMarkerLayer />
+        <UserGpsMarkerLayer
+          parish={parish}
+          boundary={boundary}
+          stops={stops}
+          routes={routes}
+          selectedDate={selectedDate}
+          focusedPriestId={focusedPriestId}
+          recenterSignal={recenterSignal}
+          highlightedStopId={highlightedStopId}
+        />
 
         {parish && <ParishChurchMarker parish={parish} />}
 
@@ -1196,14 +1310,14 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           });
 
           return (
-            <StopMarker
+              <StopMarker
               key={stop.id}
               stop={stop}
               routeMeta={routeMeta}
               isActiveInView={isActiveInView}
               appearance={appearance}
               color={palette.color}
-              isSelected={isSelected}
+              isSelected={isSelected && !suppressStopPopup}
               isLassoSelected={isLassoSelected}
               onSelect={() => {
                 if (

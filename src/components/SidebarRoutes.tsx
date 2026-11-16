@@ -16,10 +16,13 @@ import {
   ListOrdered,
   Loader2,
   Map as MapIcon,
+  MessageSquarePlus,
+  Moon,
   Navigation,
   Printer,
   RefreshCw,
   RotateCcw,
+  Sun,
   Trash2,
   UserX,
 } from 'lucide-react';
@@ -31,6 +34,7 @@ import {
   PriestRouteResult,
   ScheduledStopItem,
   UnitVisitStatus,
+  VisitStop,
 } from '../types/parish';
 import {
   formatPolishDateChip,
@@ -73,6 +77,14 @@ interface SidebarRoutesProps {
   onSetRouteStartStop?: (priestId: number, stopId: string) => void;
   onDeleteRoute?: () => void;
   onGoToPlanner?: () => void;
+  fieldPriestId?: number;
+  onChangeFieldPriestId?: (priestId: number) => void;
+  activeFieldStopId?: string | null;
+  onChangeActiveFieldStopId?: (stopId: string | null) => void;
+  nightMode?: boolean;
+  onToggleNightMode?: () => void;
+  onUpdateStopDetails?: (stopId: string, patch: Partial<VisitStop>) => void;
+  onOpenMapFieldMode?: () => void;
 }
 
 const STATUS_BADGE: Record<
@@ -136,15 +148,34 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
   onSetRouteStartStop,
   onDeleteRoute,
   onGoToPlanner,
+  fieldPriestId: controlledFieldPriestId,
+  onChangeFieldPriestId,
+  activeFieldStopId: controlledActiveFieldStopId,
+  onChangeActiveFieldStopId,
+  nightMode = false,
+  onToggleNightMode,
+  onUpdateStopDetails,
+  onOpenMapFieldMode,
 }) => {
   const [viewSubMode, setViewSubMode] = useState<'list' | 'field'>('list');
-  const [fieldPriestId, setFieldPriestId] = useState<number>(1);
-  const [activeFieldStopId, setActiveFieldStopId] = useState<string | null>(
-    null
-  );
+  const [localFieldPriestId, setLocalFieldPriestId] = useState<number>(1);
+  const [localActiveFieldStopId, setLocalActiveFieldStopId] = useState<
+    string | null
+  >(null);
+  const [noteOpenStopId, setNoteOpenStopId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState<string>('');
   const [openGmapsMenuPriest, setOpenGmapsMenuPriest] = useState<number | null>(
     null
   );
+
+  const fieldPriestId = controlledFieldPriestId ?? localFieldPriestId;
+  const setFieldPriestId = onChangeFieldPriestId ?? setLocalFieldPriestId;
+  const activeFieldStopId =
+    controlledActiveFieldStopId !== undefined
+      ? controlledActiveFieldStopId
+      : localActiveFieldStopId;
+  const setActiveFieldStopId =
+    onChangeActiveFieldStopId ?? setLocalActiveFieldStopId;
 
   // Sync selected priest in field mode with available routes
   useEffect(() => {
@@ -152,7 +183,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
     if (!routes.some((r) => r.priestId === fieldPriestId)) {
       setFieldPriestId(routes[0].priestId);
     }
-  }, [routes, fieldPriestId]);
+  }, [routes, fieldPriestId, setFieldPriestId]);
 
   const activeFieldRoute = useMemo(
     () =>
@@ -163,7 +194,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
   // Keep spotlight stop pointing to a valid stop (auto-pick first pending stop)
   useEffect(() => {
     if (!activeFieldRoute || activeFieldRoute.orderedStops.length === 0) {
-      setActiveFieldStopId(null);
+      if (activeFieldStopId !== null) setActiveFieldStopId(null);
       return;
     }
     const stillExists = activeFieldRoute.orderedStops.some(
@@ -176,7 +207,7 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
         ) ?? activeFieldRoute.orderedStops[0];
       setActiveFieldStopId(firstPending.stop.id);
     }
-  }, [activeFieldRoute, activeFieldStopId]);
+  }, [activeFieldRoute, activeFieldStopId, setActiveFieldStopId]);
 
   const fieldStats = useMemo(() => {
     if (!activeFieldRoute) {
@@ -452,7 +483,50 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
           </div>
         ) : viewSubMode === 'field' && activeFieldRoute ? (
           /* LIVE FIELD MODE ("KOLĘDA W TERENIE") */
-          <div className="p-4 space-y-4">
+          <div
+            className={`p-4 space-y-4 transition-colors ${
+              nightMode ? 'bg-slate-950 text-slate-100' : ''
+            }`}
+          >
+            {/* Quick Field Toolbar: Prowadź na mapie + Tryb wieczorny */}
+            {(onOpenMapFieldMode || onToggleNightMode) && (
+              <div className="flex items-center justify-between gap-2">
+                {onOpenMapFieldMode && (
+                  <button
+                    type="button"
+                    onClick={onOpenMapFieldMode}
+                    className="flex-1 min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors shadow-xs"
+                  >
+                    <MapIcon className="w-3.5 h-3.5" />
+                    <span>Prowadź na mapie (1-tap)</span>
+                  </button>
+                )}
+                {onToggleNightMode && (
+                  <button
+                    type="button"
+                    onClick={onToggleNightMode}
+                    title={
+                      nightMode
+                        ? 'Przełącz na tryb dzienny'
+                        : 'Tryb wieczorny (ciemny ekran)'
+                    }
+                    className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shrink-0 ${
+                      nightMode
+                        ? 'bg-slate-800 border-slate-700 text-amber-300 hover:bg-slate-700'
+                        : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {nightMode ? (
+                      <Sun className="w-3.5 h-3.5" />
+                    ) : (
+                      <Moon className="w-3.5 h-3.5" />
+                    )}
+                    <span>{nightMode ? 'Dzień' : 'Wieczór'}</span>
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Priest switcher if multi-priest */}
             {routes.length > 1 && (
               <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
@@ -468,8 +542,12 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                       }}
                       className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
                         active
-                          ? 'bg-slate-900 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          ? nightMode
+                            ? 'bg-amber-600 text-white'
+                            : 'bg-slate-900 text-white'
+                          : nightMode
+                            ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                       }`}
                     >
                       <span
@@ -556,8 +634,16 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                   config.travelMode
                 )[0];
 
+              const isNoteEditing = noteOpenStopId === activeItem.stop.id;
+
               return (
-                <div className="p-4 rounded-2xl border-2 border-amber-300 bg-white shadow-sm space-y-3.5">
+                <div
+                  className={`p-4 rounded-2xl border-2 shadow-sm space-y-3.5 ${
+                    nightMode
+                      ? 'border-amber-500/60 bg-slate-900 text-slate-100'
+                      : 'border-amber-300 bg-white text-slate-900'
+                  }`}
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2.5 min-w-0">
                       <span
@@ -569,10 +655,18 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                         {activeItem.orderIndex}
                       </span>
                       <div className="min-w-0">
-                        <div className="text-[11px] font-medium text-amber-800 uppercase tracking-wide">
+                        <div
+                          className={`text-[11px] font-medium uppercase tracking-wide ${
+                            nightMode ? 'text-amber-300' : 'text-amber-800'
+                          }`}
+                        >
                           Aktualny punkt · ~{activeItem.arrivalTime}
                         </div>
-                        <h3 className="text-base font-bold text-slate-900 leading-snug mt-0.5">
+                        <h3
+                          className={`text-base font-bold leading-snug mt-0.5 ${
+                            nightMode ? 'text-white' : 'text-slate-900'
+                          }`}
+                        >
                           {activeItem.stop.address || activeItem.stop.label}
                         </h3>
                         {(activeItem.stop.permanentDecline ||
@@ -607,23 +701,120 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                           (activeItem.stop.label &&
                             activeItem.stop.label !==
                               activeItem.stop.address)) && (
-                          <p className="text-xs text-slate-600 mt-0.5">
+                          <p
+                            className={`text-xs mt-0.5 ${
+                              nightMode ? 'text-slate-300' : 'text-slate-600'
+                            }`}
+                          >
                             {activeItem.stop.notes || activeItem.stop.label}
                           </p>
                         )}
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => onSelectStop(activeItem.stop.id)}
-                      title="Pokaż ten dom na mapie"
-                      className="min-w-[36px] min-h-[36px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1 shrink-0"
-                    >
-                      <MapIcon className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Mapa</span>
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {onUpdateStopDetails && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isNoteEditing) {
+                              setNoteOpenStopId(null);
+                            } else {
+                              setNoteDraft(activeItem.stop.notes ?? '');
+                              setNoteOpenStopId(activeItem.stop.id);
+                            }
+                          }}
+                          title="Notatka i stała odmowa"
+                          className={`min-w-[36px] min-h-[36px] px-2 py-1 text-xs font-medium rounded-xl inline-flex items-center justify-center transition-colors ${
+                            isNoteEditing || activeItem.stop.notes
+                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                              : nightMode
+                                ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          }`}
+                        >
+                          <MessageSquarePlus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onSelectStop(activeItem.stop.id)}
+                        title="Pokaż ten dom na mapie"
+                        className={`min-w-[36px] min-h-[36px] px-2.5 py-1 text-xs font-medium rounded-xl inline-flex items-center gap-1 shrink-0 ${
+                          nightMode
+                            ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                            : 'text-slate-700 bg-slate-100 hover:bg-slate-200'
+                        }`}
+                      >
+                        <MapIcon className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Mapa</span>
+                      </button>
+                    </div>
                   </div>
+
+                  {isNoteEditing && onUpdateStopDetails && (
+                    <div
+                      className={`p-2.5 rounded-xl border space-y-2 ${
+                        nightMode
+                          ? 'bg-slate-800/80 border-slate-700'
+                          : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <input
+                        type="text"
+                        value={noteDraft}
+                        onChange={(e) => setNoteDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            onUpdateStopDetails(activeItem.stop.id, {
+                              notes: noteDraft.trim() || undefined,
+                            });
+                            setNoteOpenStopId(null);
+                          }
+                        }}
+                        placeholder="Notatka terenowa (np. wejście od ogrodu, chory)..."
+                        className={`w-full min-h-[36px] px-2.5 py-1.5 text-base sm:text-xs rounded-lg border focus:outline-none focus:border-amber-500 ${
+                          nightMode
+                            ? 'bg-slate-900 border-slate-600 text-white placeholder:text-slate-400'
+                            : 'bg-white border-slate-300 text-slate-900'
+                        }`}
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(activeItem.stop.permanentDecline)}
+                            onChange={(e) =>
+                              onUpdateStopDetails(activeItem.stop.id, {
+                                permanentDecline: e.target.checked,
+                              })
+                            }
+                            className="w-3.5 h-3.5 rounded text-red-600"
+                          />
+                          <span
+                            className={
+                              nightMode ? 'text-red-300' : 'text-red-700'
+                            }
+                          >
+                            Stała odmowa (pomiń za rok)
+                          </span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onUpdateStopDetails(activeItem.stop.id, {
+                              notes: noteDraft.trim() || undefined,
+                            });
+                            setNoteOpenStopId(null);
+                          }}
+                          className="min-h-[30px] px-2.5 py-1 text-[11px] font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg"
+                        >
+                          Zapisz notatkę
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {isBlock ? (
                     <div className="space-y-2">
@@ -743,7 +934,13 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
             })()}
 
             {/* Interactive stop list for jumping */}
-            <div className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 overflow-hidden">
+            <div
+              className={`border rounded-xl divide-y overflow-hidden ${
+                nightMode
+                  ? 'border-slate-800 bg-slate-900 divide-slate-800'
+                  : 'border-slate-200 bg-white divide-slate-100'
+              }`}
+            >
               {activeFieldRoute.orderedStops.map((item) => {
                 const isActive = item.stop.id === activeFieldStopId;
                 const st: UnitVisitStatus = item.stop.visitStatus ?? 'pending';
@@ -758,7 +955,13 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                     type="button"
                     onClick={() => setActiveFieldStopId(item.stop.id)}
                     className={`w-full px-3 py-2.5 text-left flex items-center justify-between gap-2 transition-colors ${
-                      isActive ? 'bg-amber-50/70' : 'hover:bg-slate-50'
+                      isActive
+                        ? nightMode
+                          ? 'bg-amber-950/60'
+                          : 'bg-amber-50/70'
+                        : nightMode
+                          ? 'hover:bg-slate-800'
+                          : 'hover:bg-slate-50'
                     }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -770,7 +973,11 @@ export const SidebarRoutes: React.FC<SidebarRoutesProps> = ({
                       >
                         {item.orderIndex}
                       </span>
-                      <span className="text-xs font-medium text-slate-900 truncate">
+                      <span
+                        className={`text-xs font-medium truncate ${
+                          nightMode ? 'text-slate-100' : 'text-slate-900'
+                        }`}
+                      >
                         {item.stop.address || item.stop.label}
                       </span>
                     </div>

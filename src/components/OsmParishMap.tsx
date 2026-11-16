@@ -5,6 +5,7 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Church,
   Crosshair,
   Loader2,
   LocateFixed,
@@ -75,6 +76,8 @@ interface OsmParishMapProps {
   onOpenBlockUnits?: (stopId: string) => void;
   onLassoSelectStops?: (stopIds: string[]) => void;
   onSelectStreetOverlay?: (streetName: string) => void;
+  recenterSignal?: number;
+  suppressStopPopup?: boolean;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -116,6 +119,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onOpenBlockUnits,
   onLassoSelectStops,
   onSelectStreetOverlay,
+  recenterSignal = 0,
+  suppressStopPopup = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -192,10 +197,27 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     [lassoSelectedIds]
   );
 
-  const streetOverlayPaths = useMemo(
-    () => buildStreetOverlayPaths(stops),
+  const stopsGeoSig = useMemo(
+    () =>
+      stops
+        .map(
+          (s) =>
+            `${s.id}:${s.location.lat.toFixed(5)}:${s.location.lng.toFixed(5)}:${s.address}:${s.label}`
+        )
+        .join('|'),
     [stops]
   );
+  const streetOverlayCacheRef = useRef<{
+    sig: string;
+    paths: ReturnType<typeof buildStreetOverlayPaths>;
+  }>({ sig: '', paths: [] });
+  if (streetOverlayCacheRef.current.sig !== stopsGeoSig) {
+    streetOverlayCacheRef.current = {
+      sig: stopsGeoSig,
+      paths: buildStreetOverlayPaths(stops),
+    };
+  }
+  const streetOverlayPaths = streetOverlayCacheRef.current.paths;
 
   const routeMetaByStopId = useMemo(
     () => buildRouteStopLookup(routes),
@@ -1365,9 +1387,53 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     const marker = markersByStopIdRef.current[highlightedStopId];
     if (marker) {
       map.panTo(marker.getLatLng());
-      marker.openPopup();
+      if (!suppressStopPopup) {
+        marker.openPopup();
+      } else {
+        marker.closePopup();
+      }
     }
-  }, [highlightedStopId]);
+  }, [highlightedStopId, suppressStopPopup]);
+
+  const recenterToParishOrRouteRef = useRef<() => void>(() => {});
+  recenterToParishOrRouteRef.current = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const activeStopsForFit = stops.filter((s) =>
+      selectedDate
+        ? (s.visitDate ?? '').trim() === selectedDate
+        : s.included !== false
+    );
+    const bounds = L.latLngBounds([]);
+    let hasPoints = false;
+    if (routes.length > 0 && activeStopsForFit.length > 0) {
+      activeStopsForFit.forEach((s) => {
+        if (focusedPriestId === null || s.priestId === focusedPriestId) {
+          bounds.extend([s.location.lat, s.location.lng]);
+          hasPoints = true;
+        }
+      });
+    }
+    if (!hasPoints && boundary.length >= 3) {
+      boundary.forEach((pt) => {
+        bounds.extend([pt.lat, pt.lng]);
+        hasPoints = true;
+      });
+    }
+    if (hasPoints && bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [48, 84], maxZoom: 17 });
+      return;
+    }
+    if (parish) {
+      map.setView([parish.location.lat, parish.location.lng], 15);
+    }
+  };
+
+  useEffect(() => {
+    if (recenterSignal > 0) {
+      recenterToParishOrRouteRef.current();
+    }
+  }, [recenterSignal]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1508,6 +1574,18 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
             <span>{gps.active ? 'GPS włączony' : 'Moja pozycja'}</span>
           </button>
         </div>
+
+        {parish && (
+          <button
+            type="button"
+            onClick={() => recenterToParishOrRouteRef.current()}
+            title="Wycentruj mapę na parafii lub trasie"
+            className="min-h-[34px] px-2.5 py-1 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5 transition-colors"
+          >
+            <Church className="w-3.5 h-3.5 text-amber-700" />
+            <span className="hidden sm:inline">Wycentruj</span>
+          </button>
+        )}
 
         {gps.error && (
           <div className="max-w-[230px] px-2.5 py-1.5 bg-red-50/95 border border-red-200 rounded-lg shadow text-[11px] font-medium text-red-800">

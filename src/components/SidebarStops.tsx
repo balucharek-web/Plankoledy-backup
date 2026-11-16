@@ -67,6 +67,8 @@ interface SidebarStopsProps {
   selectedDate: string | null;
   plannerLoadDate?: string | null;
   plannerLoadSeq?: number;
+  draftSelectedStreets?: string[];
+  onDraftSelectedStreetsChange?: (streets: string[]) => void;
   onSelectDate: (date: string | null) => void;
   onAssignStopsDate: (stopIds: string[], visitDate: string) => void;
   onToggleStreetIncluded: (stopIds: string[], included: boolean) => void;
@@ -115,6 +117,8 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   selectedDate,
   plannerLoadDate,
   plannerLoadSeq = 0,
+  draftSelectedStreets,
+  onDraftSelectedStreetsChange,
   onSelectDate,
   onAssignStopsDate,
   onToggleStreetIncluded,
@@ -154,8 +158,11 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   const [singleEndTime, setSingleEndTime] = useState<string>(() =>
     getDayEndTime(selectedDate || seasonConfig.startDate, seasonConfig)
   );
-  const [singleSelectedStreets, setSingleSelectedStreets] = useState<string[]>(
+  const [localSelectedStreets, setLocalSelectedStreets] = useState<string[]>(
     () => {
+      if (draftSelectedStreets && draftSelectedStreets.length > 0) {
+        return draftSelectedStreets;
+      }
       if (!selectedDate) return [];
       const names = new Set<string>();
       for (const s of stops) {
@@ -165,6 +172,22 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
       }
       return Array.from(names);
     }
+  );
+  const singleSelectedStreets =
+    draftSelectedStreets ?? localSelectedStreets;
+  const setSingleSelectedStreets = useCallback(
+    (updater: string[] | ((prev: string[]) => string[])) => {
+      if (onDraftSelectedStreetsChange) {
+        const next =
+          typeof updater === 'function'
+            ? updater(draftSelectedStreets ?? localSelectedStreets)
+            : updater;
+        onDraftSelectedStreetsChange(next);
+      } else {
+        setLocalSelectedStreets(updater);
+      }
+    },
+    [draftSelectedStreets, localSelectedStreets, onDraftSelectedStreetsChange]
   );
   const [singleStreetQuery, setSingleStreetQuery] = useState<string>('');
   const [singleStreetFilter, setSingleStreetFilter] = useState<'all' | 'free'>(
@@ -286,7 +309,13 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
         setSingleSelectedStreets(Array.from(existingNames));
       }
     },
-    [config.startTime, seasonConfig, singleSelectedStreets.length, stops]
+    [
+      config.startTime,
+      seasonConfig,
+      setSingleSelectedStreets,
+      singleSelectedStreets.length,
+      stops,
+    ]
   );
 
   const datePresets = useMemo(() => {
@@ -1128,6 +1157,9 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                       <option value="asc">
                         Od najniższego numeru (rosnąco: 1, 2, 3...)
                       </option>
+                      <option value="side_by_side">
+                        Jedna strona (parzyste ↑), potem powrót drugą (nieparzyste ↓)
+                      </option>
                       <option value="desc">
                         Od najwyższego numeru (malejąco)
                       </option>
@@ -1236,6 +1268,13 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                     </div>
                   )}
                 </>
+              )}
+
+              {effectiveSingleStreets.length > 0 && !isEditingPlannedDay && (
+                <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-[11px] font-medium text-amber-900">
+                  Szkic dnia jest zachowany — po sprawdzeniu mapy kliknij przycisk
+                  poniżej, aby zapisać dzień i zobaczyć trasę.
+                </div>
               )}
 
               <button

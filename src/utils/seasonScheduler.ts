@@ -15,6 +15,7 @@ import {
   extractHouseNumberSortKey,
   extractStreetName,
   formatStreetHouseRange,
+  isEvenHouseNumberStr,
   partitionStopsBySector,
 } from './spatial';
 
@@ -920,7 +921,12 @@ export function collectReturnVisitCandidates(
   return out;
 }
 
-export type StreetStartDirection = 'auto' | 'asc' | 'desc' | 'from_stop';
+export type StreetStartDirection =
+  | 'auto'
+  | 'asc'
+  | 'desc'
+  | 'from_stop'
+  | 'side_by_side';
 
 /**
  * Computes manualOrder map for stops based on desired street direction or explicit starting house.
@@ -971,6 +977,45 @@ export function computeManualOrderForStops(
       ordered.forEach((s, idx) => result.set(s.id, idx + 1));
       return result;
     }
+  }
+
+  if (mode === 'side_by_side') {
+    const byStreet = new Map<string, VisitStop[]>();
+    for (const s of targetStops) {
+      const street = extractStreetName(s);
+      const list = byStreet.get(street);
+      if (list) list.push(s);
+      else byStreet.set(street, [s]);
+    }
+
+    const sortedStreets = Array.from(byStreet.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0], 'pl')
+    );
+
+    const orderedSideBySide: VisitStop[] = [];
+    for (const [, list] of sortedStreets) {
+      const evens: VisitStop[] = [];
+      const odds: VisitStop[] = [];
+      for (const s of list) {
+        if (isEvenHouseNumberStr(extractHouseNumberLabel(s))) {
+          evens.push(s);
+        } else {
+          odds.push(s);
+        }
+      }
+      const sortAsc = (a: VisitStop, b: VisitStop) =>
+        extractHouseNumberSortKey(extractHouseNumberLabel(a)) -
+          extractHouseNumberSortKey(extractHouseNumberLabel(b)) ||
+        (a.address || a.label).localeCompare(b.address || b.label, 'pl', {
+          numeric: true,
+        });
+      evens.sort(sortAsc);
+      odds.sort((a, b) => -sortAsc(a, b));
+      orderedSideBySide.push(...evens, ...odds);
+    }
+
+    orderedSideBySide.forEach((s, idx) => result.set(s.id, idx + 1));
+    return result;
   }
 
   const sorted = [...targetStops].sort((a, b) => {
