@@ -770,6 +770,7 @@ function ParishPlannerWorkspace({
             durationMinutes,
             priestId: ((prev.length + idx) % config.priestCount) + 1,
             inBoundary: isPointInsideBoundary(place.location, boundary),
+            ...(place.notes ? { notes: place.notes } : {}),
             ...(isBlock
               ? {
                   isMultiUnit: true,
@@ -1352,6 +1353,122 @@ function ParishPlannerWorkspace({
     showUndoToast,
   ]);
 
+  const handleStartNewSeason = useCallback(
+    (excludeDeclined: boolean) => {
+      const currentStops = stopsRef.current;
+      if (currentStops.length === 0) return;
+
+      const prevSnapshot = currentStops.map((s) => ({
+        ...s,
+        units: s.units ? s.units.map((u) => ({ ...u })) : undefined,
+      }));
+      const prevOverrides = seasonConfig.dayTimeOverrides
+        ? { ...seasonConfig.dayTimeOverrides }
+        : undefined;
+      const hasOverrides =
+        Object.keys(seasonConfig.dayTimeOverrides ?? {}).length > 0;
+      const currentId = activeParishIdRef.current;
+
+      setConfirmState({
+        title: 'Rozpocząć nowy sezon kolędowy?',
+        description: `Obecne statusy odwiedzin dla ${currentStops.length} punktów zostaną zachowane jako „Rok temu”, a daty tras z bieżącego kalendarza zostaną wyczyszczone.${
+          excludeDeclined
+            ? ' Domy ze statusem „Odmowa” zostaną oznaczone jako „Stała odmowa” i domyślnie pominięte przy planowaniu nowego sezonu.'
+            : ''
+        }`,
+        confirmLabel: 'Rozpocznij nowy sezon',
+        variant: 'warning',
+        onConfirm: () => {
+          const rolledStops: VisitStop[] = prevSnapshot.map((s) => {
+            const archivedStatus: UnitVisitStatus | undefined =
+              s.visitStatus && s.visitStatus !== 'pending'
+                ? s.visitStatus
+                : s.lastYearStatus;
+            const nextPermanentDecline =
+              excludeDeclined && archivedStatus === 'declined'
+                ? true
+                : Boolean(s.permanentDecline);
+            const nextIncluded = nextPermanentDecline ? false : true;
+            const rolledUnits = s.units
+              ? s.units.map((u) => {
+                  const unitArchive: UnitVisitStatus | undefined =
+                    u.status && u.status !== 'pending'
+                      ? u.status
+                      : u.lastYearStatus;
+                  return {
+                    ...u,
+                    status: 'pending' as UnitVisitStatus,
+                    ...(unitArchive ? { lastYearStatus: unitArchive } : {}),
+                  };
+                })
+              : undefined;
+
+            const nextStop: VisitStop = {
+              ...s,
+              visitStatus: 'pending',
+              visitDate: '',
+              manualOrder: 0,
+              included: nextIncluded,
+              permanentDecline: nextPermanentDecline,
+              ...(rolledUnits ? { units: rolledUnits } : {}),
+            };
+            if (archivedStatus) {
+              nextStop.lastYearStatus = archivedStatus;
+            } else {
+              delete nextStop.lastYearStatus;
+            }
+            return nextStop;
+          });
+
+          setStops(rolledStops);
+          if (hasOverrides) {
+            const nextSeason = { ...seasonConfig };
+            delete nextSeason.dayTimeOverrides;
+            handleChangeSeasonConfig(nextSeason);
+          }
+          setSelectedDate(null);
+          setFocusedPriestId(null);
+          clearRoutes();
+
+          if (authUser && currentId && rolledStops.length > 0) {
+            void batchUpdateStopFieldInFirestore(
+              currentId,
+              rolledStops,
+              'season_rollover'
+            ).catch(() => {});
+          }
+
+          showUndoToast(
+            'Rozpoczęto nowy sezon kolędowy — statusy zapisano jako „Rok temu”.',
+            () => {
+              setStops(prevSnapshot);
+              if (prevOverrides) {
+                handleChangeSeasonConfig({
+                  ...seasonConfig,
+                  dayTimeOverrides: prevOverrides,
+                });
+              }
+              if (authUser && currentId && prevSnapshot.length > 0) {
+                void batchUpdateStopFieldInFirestore(
+                  currentId,
+                  prevSnapshot,
+                  'season_rollover'
+                ).catch(() => {});
+              }
+            }
+          );
+        },
+      });
+    },
+    [
+      authUser,
+      clearRoutes,
+      handleChangeSeasonConfig,
+      seasonConfig,
+      showUndoToast,
+    ]
+  );
+
   const handleDeleteDayPlan = useCallback(
     (date: string) => {
       if (!date) return;
@@ -1650,6 +1767,8 @@ function ParishPlannerWorkspace({
   const handleUpdateStopStatus = useCallback(
     (stopId: string, status: UnitVisitStatus) => {
       const currentId = activeParishIdRef.current;
+      const existingStop = stopsRef.current.find((s) => s.id === stopId);
+      const prevStatus: UnitVisitStatus = existingStop?.visitStatus ?? 'pending';
       let updatedStop: VisitStop | null = null;
 
       setStops((prev) =>
@@ -1667,8 +1786,39 @@ function ParishPlannerWorkspace({
           'visitStatus'
         ).catch(() => {});
       }
+
+      if (prevStatus !== status) {
+        const statusLabels: Record<UnitVisitStatus, string> = {
+          pending: 'Do odwiedzenia',
+          accepted: 'Przyjęto',
+          absent: 'Nieobecni',
+          declined: 'Odmowa',
+          invited: 'Zaproszenie',
+        };
+        const label = existingStop?.label || 'punkt';
+        showUndoToast(
+          `Zmieniono status (${label}): ${statusLabels[status]}.`,
+          () => {
+            let revertedStop: VisitStop | null = null;
+            setStops((prev) =>
+              prev.map((s) => {
+                if (s.id !== stopId) return s;
+                revertedStop = { ...s, visitStatus: prevStatus };
+                return revertedStop;
+              })
+            );
+            if (authUser && currentId && revertedStop) {
+              void batchUpdateStopFieldInFirestore(
+                currentId,
+                [revertedStop],
+                'visitStatus'
+              ).catch(() => {});
+            }
+          }
+        );
+      }
     },
-    [authUser]
+    [authUser, showUndoToast]
   );
 
   const handleMoveStopOrder = useCallback(
@@ -1783,6 +1933,65 @@ function ParishPlannerWorkspace({
     [handleChangeSeasonConfig, seasonConfig]
   );
 
+  const handleComputeRoutesForDate = useCallback(
+    async (
+      explicitDate?: string | null,
+      options?: {
+        explicitStops?: VisitStop[];
+        explicitSeasonConfig?: SeasonPlanConfig;
+        preserveMobilePane?: boolean;
+      }
+    ) => {
+      if (!parish) return;
+      let targetDate =
+        explicitDate !== undefined ? explicitDate : selectedDate;
+      if (!targetDate && plannedDays.length > 0) {
+        targetDate = plannedDays[0].date;
+        setSelectedDate(targetDate);
+      }
+
+      const sourceStops = options?.explicitStops ?? stops;
+      const targetStops = targetDate
+        ? sourceStops.filter((s) => (s.visitDate ?? '').trim() === targetDate)
+        : sourceStops.filter((s) => s.included !== false);
+
+      if (targetStops.length === 0) return;
+
+      const effectiveSeason = options?.explicitSeasonConfig ?? seasonConfig;
+      const dayStart = getDayStartTime(
+        targetDate,
+        effectiveSeason,
+        config.startTime
+      );
+      const dayConfig: PlanConfig = { ...config, startTime: dayStart };
+
+      setInteractionMode('pan');
+      setActiveSection('routes');
+      if (!options?.preserveMobilePane) {
+        setMobilePane('panel');
+      }
+
+      const computed = await computeAllRoutes(parish, targetStops, dayConfig);
+      if (computed) {
+        const key = targetDate ?? 'current';
+        setExactRoutesCache((prev) => ({ ...prev, [key]: computed }));
+      }
+    },
+    [
+      parish,
+      selectedDate,
+      plannedDays,
+      stops,
+      seasonConfig,
+      config,
+      computeAllRoutes,
+    ]
+  );
+
+  const handleComputeRoutes = useCallback(async () => {
+    await handleComputeRoutesForDate(undefined);
+  }, [handleComputeRoutesForDate]);
+
   const handlePlanCustomDay = useCallback(
     (payload: CustomDayPlanPayload) => {
       if (!payload.date || payload.stopIds.length === 0) return;
@@ -1847,20 +2056,19 @@ function ParishPlannerWorkspace({
 
       const currentId = activeParishIdRef.current;
       const changed: VisitStop[] = [];
-      setStops((prev) =>
-        prev.map((s) => {
-          if (!idSet.has(s.id)) return s;
-          const next: VisitStop = {
-            ...s,
-            visitDate: payload.date,
-            included: true,
-            priestId: priestMap.get(s.id) ?? s.priestId,
-            manualOrder: orderMap.get(s.id) ?? 0,
-          };
-          changed.push(next);
-          return next;
-        })
-      );
+      const nextStopsArray = stopsRef.current.map((s) => {
+        if (!idSet.has(s.id)) return s;
+        const next: VisitStop = {
+          ...s,
+          visitDate: payload.date,
+          included: true,
+          priestId: priestMap.get(s.id) ?? s.priestId,
+          manualOrder: orderMap.get(s.id) ?? 0,
+        };
+        changed.push(next);
+        return next;
+      });
+      setStops(nextStopsArray);
 
       setExactRoutesCache((prev) => {
         const copy = { ...prev };
@@ -1885,6 +2093,14 @@ function ParishPlannerWorkspace({
         ).catch(() => {});
       }
 
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        void handleComputeRoutesForDate(payload.date, {
+          explicitStops: nextStopsArray,
+          explicitSeasonConfig: nextSeason,
+          preserveMobilePane: true,
+        });
+      }
+
       showStreetFeedback(
         {
           status: 'success',
@@ -1897,6 +2113,7 @@ function ParishPlannerWorkspace({
       authUser,
       config.priestCount,
       handleChangeSeasonConfig,
+      handleComputeRoutesForDate,
       parish,
       seasonConfig,
       showStreetFeedback,
@@ -1972,54 +2189,6 @@ function ParishPlannerWorkspace({
     },
     [authUser, clearRoutes, config.priestCount, parish, showStreetFeedback]
   );
-
-  const handleComputeRoutesForDate = useCallback(
-    async (explicitDate?: string | null) => {
-      if (!parish) return;
-      let targetDate =
-        explicitDate !== undefined ? explicitDate : selectedDate;
-      if (!targetDate && plannedDays.length > 0) {
-        targetDate = plannedDays[0].date;
-        setSelectedDate(targetDate);
-      }
-
-      const targetStops = targetDate
-        ? stops.filter((s) => (s.visitDate ?? '').trim() === targetDate)
-        : stops.filter((s) => s.included !== false);
-
-      if (targetStops.length === 0) return;
-
-      const dayStart = getDayStartTime(
-        targetDate,
-        seasonConfig,
-        config.startTime
-      );
-      const dayConfig: PlanConfig = { ...config, startTime: dayStart };
-
-      setInteractionMode('pan');
-      setActiveSection('routes');
-      setMobilePane('panel');
-
-      const computed = await computeAllRoutes(parish, targetStops, dayConfig);
-      if (computed) {
-        const key = targetDate ?? 'current';
-        setExactRoutesCache((prev) => ({ ...prev, [key]: computed }));
-      }
-    },
-    [
-      parish,
-      selectedDate,
-      plannedDays,
-      stops,
-      seasonConfig,
-      config,
-      computeAllRoutes,
-    ]
-  );
-
-  const handleComputeRoutes = useCallback(async () => {
-    await handleComputeRoutesForDate(undefined);
-  }, [handleComputeRoutesForDate]);
 
   const handleViewDayOnMap = useCallback((date: string | null) => {
     setSelectedDate(date);
@@ -2137,6 +2306,8 @@ function ParishPlannerWorkspace({
           </button>
         </div>
       </header>
+
+      <OfflineIndicator />
 
       {/* Pending Email Verification Banner */}
       {pendingVerificationEmail && (
@@ -2277,6 +2448,7 @@ function ParishPlannerWorkspace({
               onGoToDayPlanner={handleStartNewDayInPlanner}
               onEditDayInPlanner={handleEditDayInPlanner}
               onDeleteDayRoute={handleDeleteDayPlan}
+              onStartNewSeason={handleStartNewSeason}
               onBackToMap={() => {
                 setActiveSection('overview');
                 setMobilePane('map');
@@ -3086,8 +3258,6 @@ function ParishPlannerWorkspace({
           </div>
         </div>
       )}
-
-      <OfflineIndicator />
 
       <ConfirmDialog
         open={Boolean(confirmState)}

@@ -2,6 +2,7 @@ import {
   Timestamp,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -187,6 +188,9 @@ function sanitizeUnitsList(units: BuildingUnit[] | undefined | null): BuildingUn
       notes,
       status,
     };
+    if (u.lastYearStatus && VALID_UNIT_STATUSES.has(u.lastYearStatus)) {
+      item.lastYearStatus = u.lastYearStatus;
+    }
     if (
       typeof u.durationMinutes === 'number' &&
       !Number.isNaN(u.durationMinutes)
@@ -244,6 +248,15 @@ function sanitizeStopPayload(
     units,
     visitStatus,
   };
+  if (
+    stop.lastYearStatus &&
+    VALID_UNIT_STATUSES.has(stop.lastYearStatus)
+  ) {
+    payload.lastYearStatus = stop.lastYearStatus;
+  }
+  if (typeof stop.permanentDecline === 'boolean') {
+    payload.permanentDecline = stop.permanentDecline;
+  }
   if (
     typeof stop.manualOrder === 'number' &&
     !Number.isNaN(stop.manualOrder)
@@ -354,6 +367,15 @@ export function subscribeParishStops(
                 typeof d.visitStatus === 'string' &&
                 VALID_UNIT_STATUSES.has(d.visitStatus as UnitVisitStatus)
                   ? (d.visitStatus as UnitVisitStatus)
+                  : undefined,
+              lastYearStatus:
+                typeof d.lastYearStatus === 'string' &&
+                VALID_UNIT_STATUSES.has(d.lastYearStatus as UnitVisitStatus)
+                  ? (d.lastYearStatus as UnitVisitStatus)
+                  : undefined,
+              permanentDecline:
+                typeof d.permanentDecline === 'boolean'
+                  ? d.permanentDecline
                   : undefined,
               manualOrder:
                 typeof d.manualOrder === 'number' ? d.manualOrder : undefined,
@@ -583,6 +605,15 @@ export async function updateStopInFirestore(
       updatedAt: serverTimestamp(),
     };
     if (
+      stop.lastYearStatus &&
+      VALID_UNIT_STATUSES.has(stop.lastYearStatus)
+    ) {
+      updatePayload.lastYearStatus = stop.lastYearStatus;
+    }
+    if (typeof stop.permanentDecline === 'boolean') {
+      updatePayload.permanentDecline = stop.permanentDecline;
+    }
+    if (
       typeof stop.manualOrder === 'number' &&
       !Number.isNaN(stop.manualOrder)
     ) {
@@ -610,6 +641,7 @@ export async function batchUpdateStopFieldInFirestore(
     | 'visitStatus'
     | 'manualOrder'
     | 'manualOrder_schedule'
+    | 'season_rollover'
 ): Promise<void> {
   if (stops.length === 0) return;
   const safeParishId = sanitizeDocId(parishId);
@@ -662,6 +694,24 @@ export async function batchUpdateStopFieldInFirestore(
             priestId: clampInt(stop.priestId, 1, 4, 1),
             included: stop.included !== false,
             manualOrder: clampInt(stop.manualOrder, 0, 10000, 0),
+            updatedAt: serverTimestamp(),
+          });
+        } else if (mode === 'season_rollover') {
+          const visitStatus: UnitVisitStatus =
+            stop.visitStatus && VALID_UNIT_STATUSES.has(stop.visitStatus)
+              ? stop.visitStatus
+              : 'pending';
+          batch.update(ref, {
+            visitStatus,
+            lastYearStatus:
+              stop.lastYearStatus && VALID_UNIT_STATUSES.has(stop.lastYearStatus)
+                ? stop.lastYearStatus
+                : deleteField(),
+            permanentDecline: Boolean(stop.permanentDecline),
+            visitDate: cleanVisitDate(stop.visitDate),
+            included: stop.included !== false,
+            manualOrder: clampInt(stop.manualOrder, 0, 10000, 0),
+            units: sanitizeUnitsList(stop.units),
             updatedAt: serverTimestamp(),
           });
         } else {

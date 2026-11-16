@@ -159,6 +159,16 @@
           "minLength": 0,
           "maxLength": 20
         },
+        "lastYearStatus": {
+          "type": "string",
+          "description": "Archived visit status from the previous koleda season.",
+          "minLength": 0,
+          "maxLength": 20
+        },
+        "permanentDecline": {
+          "type": "boolean",
+          "description": "Whether this address permanently declined pastoral visits across seasons."
+        },
         "manualOrder": {
           "type": "number",
           "description": "Optional manual ordering index within the day/priest route (0 to 10000)."

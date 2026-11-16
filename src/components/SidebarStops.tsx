@@ -27,6 +27,7 @@ import {
   SeasonPlanConfig,
   VisitStop,
 } from '../types/parish';
+import { UNIT_STATUS_META } from './BlockUnitsModal';
 import {
   StreetStartDirection,
   addDaysToIsoDate,
@@ -358,17 +359,29 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
     return [];
   }, [allStreetsSummary, singleSelectedStreets]);
 
-  const singleMatchingStops = useMemo(() => {
+  const { singleMatchingStops, excludedPermanentDeclineCount } = useMemo(() => {
     const streetSet = new Set(effectiveSingleStreets);
-    if (streetSet.size === 0) return [];
+    if (streetSet.size === 0) {
+      return {
+        singleMatchingStops: [] as VisitStop[],
+        excludedPermanentDeclineCount: 0,
+      };
+    }
+    let excludedCount = 0;
     const matching = stops.filter((s) => {
       if (!streetSet.has(extractStreetName(s))) return false;
-      if (singleParity === 'all') return true;
-      const isEven = isEvenHouseNumberStr(extractHouseNumberLabel(s));
-      if (singleParity === 'even') return isEven === true;
-      return isEven === false;
+      if (singleParity !== 'all') {
+        const isEven = isEvenHouseNumberStr(extractHouseNumberLabel(s));
+        if (singleParity === 'even' && isEven !== true) return false;
+        if (singleParity === 'odd' && isEven !== false) return false;
+      }
+      if (s.permanentDecline && s.included === false) {
+        excludedCount += 1;
+        return false;
+      }
+      return true;
     });
-    return [...matching].sort((a, b) => {
+    const sorted = [...matching].sort((a, b) => {
       const stCmp = extractStreetName(a).localeCompare(
         extractStreetName(b),
         'pl'
@@ -381,6 +394,10 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
         numeric: true,
       });
     });
+    return {
+      singleMatchingStops: sorted,
+      excludedPermanentDeclineCount: excludedCount,
+    };
   }, [effectiveSingleStreets, singleParity, stops]);
 
   const singlePreviewEstimate = useMemo(() => {
@@ -1083,6 +1100,15 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                           tylko parzyste/nieparzyste albo mniej ulic).
                         </div>
                       )}
+                      {excludedPermanentDeclineCount > 0 && (
+                        <div className="text-[11px] text-slate-700">
+                          Pominięto automatycznie {excludedPermanentDeclineCount}{' '}
+                          {excludedPermanentDeclineCount === 1
+                            ? 'dom ze stałą odmową z poprzedniego roku'
+                            : 'domy/ów ze stałą odmową z poprzedniego roku'}{' '}
+                          (możesz je przywrócić w zakładce „Domy i bloki”).
+                        </div>
+                      )}
                     </div>
                   )}
                 </>
@@ -1528,51 +1554,75 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                   }`}
                                 >
                                   <div className="flex items-center gap-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={isIncluded}
-                                      onChange={() =>
-                                        onUpdateStop(stop.id, {
-                                          included: !isIncluded,
-                                        })
-                                      }
-                                      aria-label={`Uwzględnij ${stop.address}`}
-                                      className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 shrink-0"
-                                    />
-                                    <span
-                                      className={`w-2.5 h-2.5 shrink-0 ${
-                                        isBlock ? 'rounded-xs' : 'rounded-full'
-                                      }`}
-                                      style={{
-                                        backgroundColor: isIncluded
-                                          ? palette.color
-                                          : '#CBD5E1',
-                                      }}
-                                    />
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        isBlock
-                                          ? onOpenBlockUnits(stop.id)
-                                          : onSelectStop(stop.id)
-                                      }
-                                      title={
-                                        isBlock
-                                          ? 'Kliknij, aby otworzyć rozpiskę lokali w bloku'
-                                          : 'Pokaż na mapie'
-                                      }
-                                      className="flex-1 min-w-0 text-left text-xs font-medium text-slate-900 hover:text-amber-800 truncate inline-flex items-center gap-1.5"
-                                    >
-                                      <span className="truncate">
-                                        {stop.address}
-                                      </span>
-                                      {isBlock && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0 tabular-nums">
-                                          <Building2 className="w-2.5 h-2.5" />
-                                          Blok{unitCount > 0 ? ` (${unitCount})` : ''}
+                                      <input
+                                        type="checkbox"
+                                        checked={isIncluded}
+                                        onChange={() =>
+                                          onUpdateStop(stop.id, {
+                                            included: !isIncluded,
+                                            ...(stop.permanentDecline && !isIncluded
+                                              ? { permanentDecline: false }
+                                              : {}),
+                                          })
+                                        }
+                                        aria-label={`Uwzględnij ${stop.address}`}
+                                        className="w-4 h-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600 shrink-0"
+                                      />
+                                      <span
+                                        className={`w-2.5 h-2.5 shrink-0 ${
+                                          isBlock ? 'rounded-xs' : 'rounded-full'
+                                        }`}
+                                        style={{
+                                          backgroundColor: isIncluded
+                                            ? palette.color
+                                            : '#CBD5E1',
+                                        }}
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          isBlock
+                                            ? onOpenBlockUnits(stop.id)
+                                            : onSelectStop(stop.id)
+                                        }
+                                        title={
+                                          isBlock
+                                            ? 'Kliknij, aby otworzyć rozpiskę lokali w bloku'
+                                            : 'Pokaż na mapie'
+                                        }
+                                        className="flex-1 min-w-0 text-left text-xs font-medium text-slate-900 hover:text-amber-800 truncate inline-flex items-center gap-1.5"
+                                      >
+                                        <span className="truncate">
+                                          {stop.address}
                                         </span>
-                                      )}
-                                    </button>
+                                        {isBlock && (
+                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0 tabular-nums">
+                                            <Building2 className="w-2.5 h-2.5" />
+                                            Blok{unitCount > 0 ? ` (${unitCount})` : ''}
+                                          </span>
+                                        )}
+                                        {stop.permanentDecline && (
+                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-red-50 border border-red-200 text-red-700 text-[10px] font-semibold shrink-0">
+                                            Stała odmowa
+                                          </span>
+                                        )}
+                                        {!stop.permanentDecline &&
+                                          stop.lastYearStatus &&
+                                          stop.lastYearStatus !== 'pending' && (
+                                            <span
+                                              className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium shrink-0 ${
+                                                UNIT_STATUS_META[stop.lastYearStatus]
+                                                  .badgeClass
+                                              }`}
+                                            >
+                                              Rok temu:{' '}
+                                              {
+                                                UNIT_STATUS_META[stop.lastYearStatus]
+                                                  .shortLabel
+                                              }
+                                            </span>
+                                          )}
+                                      </button>
                                     <button
                                       type="button"
                                       onClick={() => onOpenBlockUnits(stop.id)}

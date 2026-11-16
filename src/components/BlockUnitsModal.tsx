@@ -84,9 +84,17 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
   const [units, setUnits] = useState<BuildingUnit[]>([]);
 
   // Generator controls
+  const [genStaircaseCount, setGenStaircaseCount] = useState(1);
+  const [genStaircaseStyle, setGenStaircaseStyle] = useState<
+    'letters' | 'roman' | 'numbers'
+  >('letters');
+  const [genNumberingMode, setGenNumberingMode] = useState<
+    'continuous' | 'per_staircase'
+  >('continuous');
   const [genStaircase, setGenStaircase] = useState('');
   const [genFrom, setGenFrom] = useState('1');
   const [genTo, setGenTo] = useState('15');
+  const [genPerStaircaseCount, setGenPerStaircaseCount] = useState('12');
 
   // Single unit add controls
   const [addStaircase, setAddStaircase] = useState('');
@@ -121,9 +129,13 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
     setManualDurationMinutes(
       hasBlock ? stop.durationMinutes : Math.min(1440, count * perUnit)
     );
+    setGenStaircaseCount(1);
+    setGenStaircaseStyle('letters');
+    setGenNumberingMode('continuous');
     setGenStaircase('');
     setGenFrom(String(existingUnits.length + 1));
     setGenTo(String(existingUnits.length + 15));
+    setGenPerStaircaseCount('12');
     setAddStaircase('');
     setAddNumber('');
     setAddFamily('');
@@ -211,13 +223,19 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
 
   const shortBuildingAddr = stop.address.split(',')[0]?.trim() || stop.address;
 
-  const handleGenerateRange = () => {
-    const from = Number.parseInt(genFrom, 10);
-    const to = Number.parseInt(genTo, 10);
-    if (Number.isNaN(from) || Number.isNaN(to) || from < 1 || to < from) {
-      return;
+  const getStaircaseLabel = (
+    idx: number,
+    style: 'letters' | 'roman' | 'numbers'
+  ): string => {
+    if (style === 'numbers') return String(idx + 1);
+    if (style === 'roman') {
+      const romans = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
+      return romans[idx] ?? String(idx + 1);
     }
-    const cleanStair = genStaircase.trim().slice(0, 30);
+    return String.fromCharCode(65 + idx);
+  };
+
+  const handleGenerateRange = () => {
     const existingKeys = new Set(
       units.map(
         (u) => `${(u.staircase ?? '').trim().toLowerCase()}::${u.unitNumber.trim().toLowerCase()}`
@@ -226,23 +244,82 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
 
     const added: BuildingUnit[] = [];
     let truncated = false;
-    for (let n = from; n <= to; n++) {
-      if (units.length + added.length >= MAX_UNITS_LIST) {
-        truncated = true;
-        break;
+    let lastGeneratedNumber = Number.parseInt(genFrom, 10) || 0;
+
+    if (genStaircaseCount <= 1) {
+      const from = Number.parseInt(genFrom, 10);
+      const to = Number.parseInt(genTo, 10);
+      if (Number.isNaN(from) || Number.isNaN(to) || from < 1 || to < from) {
+        return;
       }
-      const numStr = String(n);
-      const key = `${cleanStair.toLowerCase()}::${numStr.toLowerCase()}`;
-      if (existingKeys.has(key)) continue;
-      existingKeys.add(key);
-      added.push({
-        id: `u_${Date.now()}_${n}_${Math.random().toString(36).slice(2, 6)}`,
-        unitNumber: numStr,
-        staircase: cleanStair,
-        familyName: '',
-        notes: '',
-        status: 'pending',
-      });
+      const cleanStair = genStaircase.trim().slice(0, 30);
+      for (let n = from; n <= to; n++) {
+        if (units.length + added.length >= MAX_UNITS_LIST) {
+          truncated = true;
+          break;
+        }
+        const numStr = String(n);
+        const key = `${cleanStair.toLowerCase()}::${numStr.toLowerCase()}`;
+        if (existingKeys.has(key)) continue;
+        existingKeys.add(key);
+        added.push({
+          id: `u_${Date.now()}_${n}_${Math.random().toString(36).slice(2, 6)}`,
+          unitNumber: numStr,
+          staircase: cleanStair,
+          familyName: '',
+          notes: '',
+          status: 'pending',
+        });
+        lastGeneratedNumber = n;
+      }
+      if (added.length > 0) {
+        setGenFrom(String(lastGeneratedNumber + 1));
+        setGenTo(String(lastGeneratedNumber + 15));
+      }
+    } else {
+      const startNum = Math.max(1, Number.parseInt(genFrom, 10) || 1);
+      const perStair = Math.max(
+        1,
+        Math.min(60, Number.parseInt(genPerStaircaseCount, 10) || 12)
+      );
+      const stairCount = Math.max(2, Math.min(10, genStaircaseCount));
+      let runningNum = startNum;
+
+      for (let sIdx = 0; sIdx < stairCount; sIdx++) {
+        const stairLabel = getStaircaseLabel(sIdx, genStaircaseStyle);
+        const localStart =
+          genNumberingMode === 'continuous' ? runningNum : startNum;
+        for (let k = 0; k < perStair; k++) {
+          if (units.length + added.length >= MAX_UNITS_LIST) {
+            truncated = true;
+            break;
+          }
+          const numVal = localStart + k;
+          const numStr = String(numVal);
+          const key = `${stairLabel.toLowerCase()}::${numStr.toLowerCase()}`;
+          if (!existingKeys.has(key)) {
+            existingKeys.add(key);
+            added.push({
+              id: `u_${Date.now()}_${sIdx}_${numVal}_${Math.random()
+                .toString(36)
+                .slice(2, 6)}`,
+              unitNumber: numStr,
+              staircase: stairLabel,
+              familyName: '',
+              notes: '',
+              status: 'pending',
+            });
+          }
+          lastGeneratedNumber = numVal;
+        }
+        if (genNumberingMode === 'continuous') {
+          runningNum += perStair;
+        }
+        if (truncated) break;
+      }
+      if (added.length > 0 && genNumberingMode === 'continuous') {
+        setGenFrom(String(lastGeneratedNumber + 1));
+      }
     }
 
     if (added.length > 0) {
@@ -250,8 +327,6 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
       setUnits(nextUnits);
       setEstimatedCount(nextUnits.length);
       setIsMultiUnit(true);
-      setGenFrom(String(to + 1));
-      setGenTo(String(to + 15));
     }
     setLimitNotice(
       truncated
@@ -561,67 +636,210 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <div>
-                    <label
-                      htmlFor="gen-staircase"
-                      className="block text-[11px] font-medium text-slate-600 mb-1"
-                    >
-                      Klatka (opcjonalnie)
-                    </label>
-                    <input
-                      id="gen-staircase"
-                      type="text"
-                      value={genStaircase}
-                      onChange={(e) => setGenStaircase(e.target.value)}
-                      placeholder="np. A lub I"
-                      className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
-                    />
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label
+                        htmlFor="gen-stair-count"
+                        className="block text-[11px] font-medium text-slate-600 mb-1"
+                      >
+                        Liczba klatek
+                      </label>
+                      <select
+                        id="gen-stair-count"
+                        value={genStaircaseCount}
+                        onChange={(e) =>
+                          setGenStaircaseCount(
+                            Number.parseInt(e.target.value, 10) || 1
+                          )
+                        }
+                        className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                      >
+                        <option value={1}>1 klatka (lub bez podziału)</option>
+                        {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((c) => (
+                          <option key={c} value={c}>
+                            {c} klatki / klatek naraz
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {genStaircaseCount > 1 && (
+                      <>
+                        <div>
+                          <label
+                            htmlFor="gen-stair-style"
+                            className="block text-[11px] font-medium text-slate-600 mb-1"
+                          >
+                            Oznaczenie klatek
+                          </label>
+                          <select
+                            id="gen-stair-style"
+                            value={genStaircaseStyle}
+                            onChange={(e) =>
+                              setGenStaircaseStyle(
+                                e.target.value as 'letters' | 'roman' | 'numbers'
+                              )
+                            }
+                            className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                          >
+                            <option value="letters">Litery: A, B, C...</option>
+                            <option value="roman">Rzymskie: I, II, III...</option>
+                            <option value="numbers">Cyfry: 1, 2, 3...</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label
+                            htmlFor="gen-num-mode"
+                            className="block text-[11px] font-medium text-slate-600 mb-1"
+                          >
+                            Numeracja lokali
+                          </label>
+                          <select
+                            id="gen-num-mode"
+                            value={genNumberingMode}
+                            onChange={(e) =>
+                              setGenNumberingMode(
+                                e.target.value as 'continuous' | 'per_staircase'
+                              )
+                            }
+                            className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                          >
+                            <option value="continuous">
+                              Ciągła (np. kl. A 1–12, kl. B 13–24)
+                            </option>
+                            <option value="per_staircase">
+                              Od nowa w każdej klatce
+                            </option>
+                          </select>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <div>
-                    <label
-                      htmlFor="gen-from"
-                      className="block text-[11px] font-medium text-slate-600 mb-1"
-                    >
-                      Od numeru
-                    </label>
-                    <input
-                      id="gen-from"
-                      type="number"
-                      min={1}
-                      max={999}
-                      value={genFrom}
-                      onChange={(e) => setGenFrom(e.target.value)}
-                      className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
-                    />
-                  </div>
-                  <div>
-                    <label
-                      htmlFor="gen-to"
-                      className="block text-[11px] font-medium text-slate-600 mb-1"
-                    >
-                      Do numeru
-                    </label>
-                    <input
-                      id="gen-to"
-                      type="number"
-                      min={1}
-                      max={999}
-                      value={genTo}
-                      onChange={(e) => setGenTo(e.target.value)}
-                      className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={handleGenerateRange}
-                      className="w-full min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-                    >
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>Generuj lokale</span>
-                    </button>
-                  </div>
+
+                  {genStaircaseCount <= 1 ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div>
+                        <label
+                          htmlFor="gen-staircase"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Klatka (opcjonalnie)
+                        </label>
+                        <input
+                          id="gen-staircase"
+                          type="text"
+                          value={genStaircase}
+                          onChange={(e) => setGenStaircase(e.target.value)}
+                          placeholder="np. A lub I"
+                          className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="gen-from"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Od numeru
+                        </label>
+                        <input
+                          id="gen-from"
+                          type="number"
+                          min={1}
+                          max={999}
+                          value={genFrom}
+                          onChange={(e) => setGenFrom(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="gen-to"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Do numeru
+                        </label>
+                        <input
+                          id="gen-to"
+                          type="number"
+                          min={1}
+                          max={999}
+                          value={genTo}
+                          onChange={(e) => setGenTo(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        <button
+                          type="button"
+                          onClick={handleGenerateRange}
+                          className="w-full min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          <span>Generuj lokale</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label
+                          htmlFor="gen-multi-from"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Start od numeru
+                        </label>
+                        <input
+                          id="gen-multi-from"
+                          type="number"
+                          min={1}
+                          max={999}
+                          value={genFrom}
+                          onChange={(e) => setGenFrom(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="gen-per-stair"
+                          className="block text-[11px] font-medium text-slate-600 mb-1"
+                        >
+                          Lokali w każdej klatce
+                        </label>
+                        <input
+                          id="gen-per-stair"
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={genPerStaircaseCount}
+                          onChange={(e) => setGenPerStaircaseCount(e.target.value)}
+                          className="w-full min-h-[38px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                        />
+                      </div>
+                      <div className="col-span-2 sm:col-span-1 flex items-end">
+                        <button
+                          type="button"
+                          onClick={handleGenerateRange}
+                          className="w-full min-h-[38px] px-3 py-1.5 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors tabular-nums"
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          <span>
+                            Generuj {genStaircaseCount} klatek (
+                            {genStaircaseCount *
+                              Math.max(
+                                1,
+                                Math.min(
+                                  60,
+                                  Number.parseInt(genPerStaircaseCount, 10) || 12
+                                )
+                              )}{' '}
+                            lok.)
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Add single unit */}
@@ -804,6 +1022,22 @@ export const BlockUnitsModal: React.FC<BlockUnitsModalProps> = ({
                             <div className="text-xs font-semibold text-slate-900 tabular-nums truncate">
                               {exactUnitAddress}
                             </div>
+                            {unit.lastYearStatus && unit.lastYearStatus !== 'pending' && (
+                              <div className="mt-0.5">
+                                <span
+                                  className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                                    UNIT_STATUS_META[unit.lastYearStatus]
+                                      .badgeClass
+                                  }`}
+                                >
+                                  Rok temu:{' '}
+                                  {
+                                    UNIT_STATUS_META[unit.lastYearStatus]
+                                      .shortLabel
+                                  }
+                                </span>
+                              </div>
+                            )}
                             <div className="flex items-center gap-1 mt-0.5">
                               <input
                                 type="text"

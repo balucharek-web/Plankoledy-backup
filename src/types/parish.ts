@@ -34,6 +34,7 @@ export interface BuildingUnit {
   familyName?: string;
   notes?: string;
   status?: UnitVisitStatus;
+  lastYearStatus?: UnitVisitStatus;
   durationMinutes?: number;
 }
 
@@ -54,6 +55,8 @@ export interface VisitStop {
   minutesPerUnit?: number;
   units?: BuildingUnit[];
   visitStatus?: UnitVisitStatus;
+  lastYearStatus?: UnitVisitStatus;
+  permanentDecline?: boolean;
   manualOrder?: number;
 }
 

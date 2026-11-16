@@ -18,6 +18,7 @@ export interface SelectedPlaceData {
   placeType?: 'parish' | 'place' | 'address';
   isMultiUnit?: boolean;
   unitsCount?: number;
+  notes?: string;
 }
 
 interface PlaceSearchInputProps {

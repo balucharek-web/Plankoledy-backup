@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Church,
   Cloud,
+  FileSpreadsheet,
   Layers,
   Loader2,
   LocateFixed,
@@ -34,6 +35,7 @@ import {
   VisitStop,
 } from '../types/parish';
 import { extractStreetName } from '../utils/spatial';
+import { CsvImportModal } from './CsvImportModal';
 import { OsmStreetFetcherModal } from './OsmStreetFetcherModal';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
 
@@ -103,6 +105,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
     boundary.length >= 3 ? 'area' : 'area'
   );
   const [areaScannerOpen, setAreaScannerOpen] = useState(false);
+  const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyError, setNearbyError] = useState<string | null>(null);
   const [nearbyChurches, setNearbyChurches] = useState<
@@ -647,6 +650,16 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           </div>
         )}
 
+        <button
+          type="button"
+          disabled={!parish}
+          onClick={() => setCsvImportOpen(true)}
+          className="w-full min-h-[40px] py-2 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
+        >
+          <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+          <span>Importuj adresy z pliku Excel / CSV</span>
+        </button>
+
         {streetPickFeedback && (
           <div
             className={`p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
@@ -738,6 +751,14 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
         boundary={boundary}
         onClose={() => setAreaScannerOpen(false)}
         onAddPlaces={onBatchAddStops}
+      />
+
+      <CsvImportModal
+        open={csvImportOpen}
+        parish={parish}
+        existingStops={stops}
+        onClose={() => setCsvImportOpen(false)}
+        onImportPlaces={onBatchAddStops}
       />
     </div>
   );
