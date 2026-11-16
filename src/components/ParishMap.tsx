@@ -130,7 +130,13 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         zIndex={appearance.zIndexPriority}
         onClick={onSelect}
       >
-        <div className="relative flex items-center justify-center">
+        <div
+          className="relative flex items-center justify-center"
+          style={{
+            minWidth: Math.max(22, appearance.size),
+            minHeight: Math.max(22, appearance.size),
+          }}
+        >
           {appearance.isStartPoint && (
             <div
               className="pointer-events-none select-none whitespace-nowrap"
@@ -1008,6 +1014,9 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             hasFocusedStreet: Boolean(focusedStreet),
             isSelected,
             isBlock,
+            isBoundaryEditing:
+              interactionMode === 'draw_boundary' ||
+              interactionMode === 'edit_boundary',
             routeMeta,
           });
 
@@ -1020,7 +1029,15 @@ export const ParishMap: React.FC<ParishMapProps> = ({
               appearance={appearance}
               color={palette.color}
               isSelected={isSelected}
-              onSelect={() => onSelectStop(stop.id)}
+              onSelect={() => {
+                if (
+                  interactionMode === 'draw_boundary' ||
+                  interactionMode === 'edit_boundary'
+                ) {
+                  return;
+                }
+                onSelectStop(stop.id);
+              }}
               onClose={() => onSelectStop(null)}
               onDelete={() => {
                 onSelectStop(null);

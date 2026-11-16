@@ -838,6 +838,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     if (!layer) return;
     layer.clearLayers();
     markersByStopIdRef.current = {};
+    const isBoundaryEditing =
+      interactionMode === 'draw_boundary' || interactionMode === 'edit_boundary';
 
     stops.forEach((stop) => {
       const palette =
@@ -868,31 +870,38 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         hasFocusedStreet: Boolean(focusedStreet),
         isSelected,
         isBlock,
+        isBoundaryEditing,
         routeMeta,
       });
 
-      const borderRadius = isBlock ? '6px' : '9999px';
+      const borderRadius = isBlock ? '5px' : '9999px';
       const bgColor = appearance.fillColorOverride ?? palette.color;
       const borderCol =
         appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
+      const hitSize = isBoundaryEditing
+        ? appearance.size
+        : Math.max(22, appearance.size);
 
       const startBadgeHtml = appearance.isStartPoint
-        ? `<div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:3px;background:#15803D;color:#FFFFFF;font-family:sans-serif;font-size:9px;font-weight:800;letter-spacing:0.04em;padding:1px 5px;border-radius:4px;border:1.5px solid #FFFFFF;box-shadow:0 1px 4px rgba(0,0,0,0.28);white-space:nowrap;pointer-events:none;">START</div>`
+        ? `<div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:2px;background:#15803D;color:#FFFFFF;font-family:sans-serif;font-size:9px;font-weight:800;letter-spacing:0.04em;padding:1px 5px;border-radius:4px;border:1.5px solid #FFFFFF;box-shadow:0 1px 4px rgba(0,0,0,0.28);white-space:nowrap;pointer-events:none;">START</div>`
         : '';
 
       const icon = L.divIcon({
         className: '',
-        html: `<div style="position:relative;width:${appearance.size}px;height:${appearance.size}px;">${startBadgeHtml}<div style="width:${appearance.size}px;height:${appearance.size}px;border-radius:${borderRadius};background:${bgColor};border:${appearance.borderWidth}px solid ${borderCol};opacity:${appearance.opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:${appearance.fontSize}px;line-height:1;font-weight:700;box-shadow:${
+        html: `<div style="position:relative;width:${hitSize}px;height:${hitSize}px;display:flex;align-items:center;justify-content:center;cursor:${
+          isBoundaryEditing ? 'default' : 'pointer'
+        };">${startBadgeHtml}<div style="width:${appearance.size}px;height:${appearance.size}px;border-radius:${borderRadius};background:${bgColor};border:${appearance.borderWidth}px solid ${borderCol};opacity:${appearance.opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:${appearance.fontSize}px;line-height:1;font-weight:700;box-shadow:${
           appearance.showLabel
-            ? '0 2px 6px rgba(15,23,42,0.28)'
-            : '0 1px 3px rgba(15,23,42,0.24)'
-        };cursor:pointer;">${appearance.showLabel ? appearance.labelText : ''}</div></div>`,
-        iconSize: [appearance.size, appearance.size],
-        iconAnchor: [appearance.size / 2, appearance.size / 2],
+            ? '0 2px 5px rgba(15,23,42,0.28)'
+            : '0 1px 2px rgba(15,23,42,0.22)'
+        };">${appearance.showLabel ? appearance.labelText : ''}</div></div>`,
+        iconSize: [hitSize, hitSize],
+        iconAnchor: [hitSize / 2, hitSize / 2],
       });
 
       const marker = L.marker([stop.location.lat, stop.location.lng], {
         icon,
+        interactive: !isBoundaryEditing,
         zIndexOffset: appearance.zIndexPriority,
       }).addTo(layer);
 
@@ -1014,6 +1023,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     markerLabelMode,
     mapZoom,
     activeVisibleCount,
+    interactionMode,
   ]);
 
   useEffect(() => {

@@ -176,7 +176,7 @@ function ParishPlannerWorkspace({
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [focusedPriestId, setFocusedPriestId] = useState<number | null>(null);
   const [markerLabelMode, setMarkerLabelMode] =
-    useState<MarkerLabelMode>('numbers');
+    useState<MarkerLabelMode>('auto');
   const [showRouteLines, setShowRouteLines] = useState<boolean>(true);
   const [focusedStreet, setFocusedStreet] = useState<string | null>(null);
   const [exactRoutesCache, setExactRoutesCache] = useState<

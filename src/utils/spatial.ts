@@ -722,6 +722,7 @@ export function computeStopMarkerAppearance({
   hasFocusedStreet,
   isSelected,
   isBlock,
+  isBoundaryEditing = false,
   routeMeta,
 }: {
   zoom: number;
@@ -733,18 +734,34 @@ export function computeStopMarkerAppearance({
   hasFocusedStreet: boolean;
   isSelected: boolean;
   isBlock: boolean;
+  isBoundaryEditing?: boolean;
   routeMeta?: RouteStopMeta;
 }): StopMarkerAppearance {
+  // While drawing or editing parish boundaries, shrink houses into subtle tiny pins
+  // so streets, intersections and district edges stay completely clear.
+  if (isBoundaryEditing && !isSelected) {
+    return {
+      size: 6,
+      showLabel: false,
+      labelText: '',
+      fontSize: 8,
+      opacity: 0.45,
+      borderWidth: 1,
+      borderColorOverride: '#FFFFFF',
+      zIndexPriority: 20,
+    };
+  }
+
   if (!isActiveInView || isDimmedByStreet) {
     return {
-      size: isSelected ? 22 : 9,
+      size: isSelected ? 22 : 6,
       showLabel: isSelected,
       labelText: isSelected && routeMeta ? String(routeMeta.orderNumber) : '',
-      fontSize: 10,
-      opacity: isSelected ? 1 : isDimmedByStreet ? 0.24 : 0.26,
-      borderWidth: isSelected ? 2.5 : 1.5,
+      fontSize: 9,
+      opacity: isSelected ? 1 : isDimmedByStreet ? 0.34 : 0.36,
+      borderWidth: isSelected ? 2 : 1,
       fillColorOverride: isDimmedByStreet ? '#94A3B8' : '#CBD5E1',
-      borderColorOverride: isSelected ? '#0F172A' : '#64748B',
+      borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected ? 400 : 15,
     };
   }
@@ -753,51 +770,84 @@ export function computeStopMarkerAppearance({
   const isStartPoint = Boolean(routeMeta?.isFirstInRoute) && !isDimmedByPriest;
   const opacity = isDimmedByPriest ? 0.28 : 1;
 
-  if (markerLabelMode === 'dots') {
+  // Compact tiny pin size based on zoom level so adjacent houses don't blot out the map
+  const tinyDotSize =
+    zoom <= 13 ? 6 : zoom === 14 ? 7 : zoom === 15 ? 9 : 11;
+
+  // Mode 'dots' OR unrouted houses (no orderNumber yet, e.g. parish overview):
+  // never draw giant empty circles — use tiny crisp dots at houses.
+  if (markerLabelMode === 'dots' || !orderNumber) {
+    const showBlockLetter = Boolean(isBlock && !orderNumber && zoom >= 15 && markerLabelMode !== 'dots');
     const showKeyBadge =
       isSelected ||
-      Boolean(routeMeta?.isFirstInRoute) ||
-      Boolean(routeMeta?.isLastInRoute);
-    const size = showKeyBadge ? (isSelected ? 26 : isStartPoint ? 26 : 20) : isBlock ? 15 : 12;
+      Boolean(orderNumber && isStartPoint) ||
+      Boolean(orderNumber && routeMeta?.isLastInRoute);
+
+    const size = isSelected
+      ? 24
+      : showKeyBadge
+        ? isStartPoint
+          ? 22
+          : 17
+        : showBlockLetter
+          ? 15
+          : isBlock
+            ? Math.min(11, tinyDotSize + 2)
+            : tinyDotSize;
+
+    const showLabel =
+      (showKeyBadge && Boolean(orderNumber)) || showBlockLetter;
+
     return {
       size,
-      showLabel: showKeyBadge && Boolean(orderNumber),
-      labelText: showKeyBadge ? (orderNumber ? String(orderNumber) : isBlock ? 'B' : '') : '',
-      fontSize: 10,
-      opacity,
-      borderWidth: isStartPoint ? 3 : showKeyBadge ? 2 : 1.5,
+      showLabel,
+      labelText:
+        showKeyBadge && orderNumber
+          ? String(orderNumber)
+          : showBlockLetter
+            ? 'B'
+            : '',
+      fontSize: 9,
+      opacity: isDimmedByPriest ? 0.25 : 0.94,
+      borderWidth: isStartPoint ? 2.5 : showKeyBadge ? 1.5 : 1.25,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
-      zIndexPriority: isSelected ? 400 : isStartPoint ? 360 : showKeyBadge ? 250 : isBlock ? 140 : 80,
+      zIndexPriority: isSelected
+        ? 450
+        : isStartPoint
+          ? 360
+          : showKeyBadge
+            ? 250
+            : isBlock
+              ? 140
+              : 80,
       isStartPoint,
     };
   }
 
-  // In 'numbers' mode or whenever viewing a day/street (<= 140 houses or zoom >= 14),
-  // display every single point sequentially (1, 2, 3...) without dropping houses into unlabeled dots.
+  // Routed stops with orderNumber:
+  // In 'numbers' mode always show numbers; in 'auto' mode show numbers when zoomed in (>= 15),
+  // focused on a street, or viewing a compact route (<= 24 stops); otherwise show tiny dots + key anchors.
   const showEveryHouseNumber =
     markerLabelMode === 'numbers' ||
     hasFocusedStreet ||
-    activeVisibleCount <= 140 ||
+    activeVisibleCount <= 24 ||
     zoom >= 15;
 
   if (showEveryHouseNumber) {
+    const baseSize = zoom <= 14 ? 17 : zoom === 15 ? 20 : 22;
     const size = isSelected
-      ? 28
+      ? 26
       : isStartPoint
-        ? 27
-        : orderNumber
-          ? 24
-          : isBlock
-            ? 22
-            : 19;
+        ? baseSize + 3
+        : baseSize;
     return {
       size,
-      showLabel: Boolean(orderNumber) || isBlock,
-      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
-      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+      showLabel: true,
+      labelText: String(orderNumber),
+      fontSize: orderNumber >= 100 || zoom <= 14 ? 8.5 : 9.5,
       opacity,
-      borderWidth: isStartPoint ? 3 : 2,
+      borderWidth: isStartPoint ? 2.5 : 1.5,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
@@ -806,14 +856,12 @@ export function computeStopMarkerAppearance({
           ? 390
           : isDimmedByPriest
             ? 40
-            : orderNumber
-              ? 300 - Math.min(200, orderNumber)
-              : 100,
+            : 300 - Math.min(200, orderNumber),
       isStartPoint,
     };
   }
 
-  // Extreme overview with >140 houses zoomed way out: still highlight START, end & street entries
+  // Overview with >24 routed stops zoomed out in 'auto' mode: highlight key points & use tiny dots in between
   const showOverviewAnchor =
     isSelected ||
     isStartPoint ||
@@ -823,12 +871,12 @@ export function computeStopMarkerAppearance({
 
   if (showOverviewAnchor) {
     return {
-      size: isSelected ? 26 : isStartPoint ? 26 : 21,
-      showLabel: Boolean(orderNumber) || isBlock,
-      labelText: orderNumber ? String(orderNumber) : isBlock ? 'B' : '',
-      fontSize: orderNumber && orderNumber >= 100 ? 9 : 10,
+      size: isSelected ? 24 : isStartPoint ? 22 : 17,
+      showLabel: true,
+      labelText: String(orderNumber),
+      fontSize: orderNumber >= 100 ? 8 : 8.5,
       opacity,
-      borderWidth: isStartPoint ? 3 : 2,
+      borderWidth: isStartPoint ? 2.5 : 1.5,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
@@ -843,12 +891,12 @@ export function computeStopMarkerAppearance({
   }
 
   return {
-    size: 12,
+    size: tinyDotSize,
     showLabel: false,
     labelText: '',
-    fontSize: 9,
+    fontSize: 8.5,
     opacity: isDimmedByPriest ? 0.25 : 0.92,
-    borderWidth: 1.5,
+    borderWidth: 1.25,
     borderColorOverride: '#FFFFFF',
     zIndexPriority: isDimmedByPriest ? 35 : 95,
   };
