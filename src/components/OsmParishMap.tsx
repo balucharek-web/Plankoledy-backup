@@ -15,6 +15,8 @@ import {
   Pencil,
   Plus,
   Route,
+  Scan,
+  Square,
   Trash2,
   Undo2,
   X,
@@ -33,10 +35,14 @@ import {
 } from '../types/parish';
 import {
   buildRouteStopLookup,
+  buildStreetOverlayPaths,
   computePolygonAreaSqMeters,
+  computeRectanglePolygon,
   computeStopMarkerAppearance,
+  expandBoundaryPolygonMeters,
   extractStreetName,
   formatPolygonArea,
+  isPointInsideBoundary,
   simplifyPolygonRDP,
 } from '../utils/spatial';
 
@@ -54,6 +60,7 @@ interface OsmParishMapProps {
   focusedStreet?: string | null;
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
+  lassoSelectedIds?: string[];
   streetPickFeedback: StreetPickFeedback | null;
   onDismissStreetFeedback: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
@@ -66,6 +73,8 @@ interface OsmParishMapProps {
   onSelectStop: (stopId: string | null) => void;
   onDeleteStop: (stopId: string) => void;
   onOpenBlockUnits?: (stopId: string) => void;
+  onLassoSelectStops?: (stopIds: string[]) => void;
+  onSelectStreetOverlay?: (streetName: string) => void;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -92,6 +101,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   focusedStreet = null,
   interactionMode,
   highlightedStopId,
+  lassoSelectedIds = [],
   streetPickFeedback,
   onDismissStreetFeedback,
   onBoundaryComplete,
@@ -104,11 +114,14 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onSelectStop,
   onDeleteStop,
   onOpenBlockUnits,
+  onLassoSelectStops,
+  onSelectStreetOverlay,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const parishLayerRef = useRef<L.LayerGroup | null>(null);
   const boundaryLayerRef = useRef<L.LayerGroup | null>(null);
+  const streetOverlaysLayerRef = useRef<L.LayerGroup | null>(null);
   const draftLayerRef = useRef<L.LayerGroup | null>(null);
   const rubberBandLayerRef = useRef<L.LayerGroup | null>(null);
   const stopsLayerRef = useRef<L.LayerGroup | null>(null);
@@ -132,6 +145,9 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
   const draftPointsRef = useRef<LatLng[]>([]);
   const [lassoHint, setLassoHint] = useState<string | null>(null);
+  const [lassoLiveCount, setLassoLiveCount] = useState<number>(0);
+  const [spacePanning, setSpacePanning] = useState(false);
+  const spaceHeldRef = useRef(false);
   const [selectedVertexIdx, setSelectedVertexIdx] = useState<number | null>(
     null
   );
@@ -140,6 +156,14 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   interactionModeRef.current = interactionMode;
   const boundaryRef = useRef(boundary);
   boundaryRef.current = boundary;
+  const stopsRef = useRef(stops);
+  stopsRef.current = stops;
+  const selectedDateRef = useRef(selectedDate);
+  selectedDateRef.current = selectedDate;
+  const focusedPriestIdRef = useRef(focusedPriestId);
+  focusedPriestIdRef.current = focusedPriestId;
+  const focusedStreetRef = useRef(focusedStreet);
+  focusedStreetRef.current = focusedStreet;
   const onMapAddStopRef = useRef(onMapAddStop);
   onMapAddStopRef.current = onMapAddStop;
   const onMapPickStreetRef = useRef(onMapPickStreet);
@@ -156,8 +180,22 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   onBoundaryUpdateRef.current = onBoundaryUpdate;
   const onCancelInteractionRef = useRef(onCancelInteraction);
   onCancelInteractionRef.current = onCancelInteraction;
+  const onLassoSelectStopsRef = useRef(onLassoSelectStops);
+  onLassoSelectStopsRef.current = onLassoSelectStops;
+  const onSelectStreetOverlayRef = useRef(onSelectStreetOverlay);
+  onSelectStreetOverlayRef.current = onSelectStreetOverlay;
   const highlightedStopIdRef = useRef(highlightedStopId);
   highlightedStopIdRef.current = highlightedStopId;
+
+  const lassoSelectedSet = useMemo(
+    () => new Set(lassoSelectedIds),
+    [lassoSelectedIds]
+  );
+
+  const streetOverlayPaths = useMemo(
+    () => buildStreetOverlayPaths(stops),
+    [stops]
+  );
 
   const routeMetaByStopId = useMemo(
     () => buildRouteStopLookup(routes),
@@ -205,6 +243,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     }).addTo(map);
 
     routesLayerRef.current = L.layerGroup().addTo(map);
+    streetOverlaysLayerRef.current = L.layerGroup().addTo(map);
     boundaryLayerRef.current = L.layerGroup().addTo(map);
     draftLayerRef.current = L.layerGroup().addTo(map);
     rubberBandLayerRef.current = L.layerGroup().addTo(map);
@@ -239,7 +278,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       if (
         interactionModeRef.current !== 'draw_boundary' ||
         pts.length === 0 ||
-        drawToolRef.current === 'lasso'
+        drawToolRef.current === 'lasso' ||
+        drawToolRef.current === 'rect'
       ) {
         return;
       }
@@ -333,12 +373,18 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     const container = containerRef.current;
     if (!map || !container) return;
 
+    const isFreehandCapture =
+      interactionMode === 'lasso_select' ||
+      (interactionMode === 'draw_boundary' &&
+        (drawTool === 'lasso' || drawTool === 'rect'));
+
     if (interactionMode === 'draw_boundary') {
       setLassoHint(null);
-      if (drawTool === 'lasso') {
-        container.style.cursor = 'crosshair';
+      if (isFreehandCapture) {
+        container.style.cursor = spacePanning ? 'grab' : 'crosshair';
         container.style.touchAction = 'none';
-        map.dragging.disable();
+        if (spacePanning) map.dragging.enable();
+        else map.dragging.disable();
         map.doubleClickZoom.disable();
       } else if (drawTool === 'crosshair') {
         container.style.cursor = 'grab';
@@ -351,6 +397,14 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         map.dragging.enable();
         map.doubleClickZoom.disable();
       }
+    } else if (interactionMode === 'lasso_select') {
+      setLassoHint(null);
+      setLassoLiveCount(0);
+      container.style.cursor = spacePanning ? 'grab' : 'crosshair';
+      container.style.touchAction = 'none';
+      if (spacePanning) map.dragging.enable();
+      else map.dragging.disable();
+      map.doubleClickZoom.disable();
     } else if (interactionMode === 'edit_boundary') {
       container.style.cursor = '';
       container.style.touchAction = '';
@@ -377,23 +431,43 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     if (interactionMode !== 'edit_boundary') {
       setSelectedVertexIdx(null);
     }
-  }, [interactionMode, drawTool]);
+    if (interactionMode !== 'lasso_select') {
+      setLassoLiveCount(0);
+    }
+  }, [interactionMode, drawTool, spacePanning]);
 
-  // Freehand lasso pointer capture (works uniformly for finger touch and mouse drag)
+  // Unified pointer capture for freehand boundary ('lasso'), rectangle ('rect'), and map stop selection ('lasso_select'),
+  // with 2-finger pan/zoom on mobile + Spacebar or Right-mouse-drag panning on PC.
   useEffect(() => {
     const map = mapRef.current;
     const container = containerRef.current;
     const layer = draftLayerRef.current;
     if (!map || !container || !layer) return;
-    if (interactionMode !== 'draw_boundary' || drawTool !== 'lasso') return;
+
+    const isBoundaryLasso =
+      interactionMode === 'draw_boundary' && drawTool === 'lasso';
+    const isBoundaryRect =
+      interactionMode === 'draw_boundary' && drawTool === 'rect';
+    const isStopLasso = interactionMode === 'lasso_select';
+    if (!isBoundaryLasso && !isBoundaryRect && !isStopLasso) return;
+
+    const strokeColor = isStopLasso ? '#4F46E5' : '#B45309';
+    const fillColor = isStopLasso ? '#6366F1' : '#F59E0B';
 
     let drawing = false;
     let activePointerId: number | null = null;
+    let rightPanPointerId: number | null = null;
+    let panLastX = 0;
+    let panLastY = 0;
     let lastClientX = 0;
     let lastClientY = 0;
     let rawPoints: LatLng[] = [];
+    let rectStart: LatLng | null = null;
+    let rectEnd: LatLng | null = null;
     let strokeLine: L.Polyline | null = null;
     let strokeFill: L.Polygon | null = null;
+    let rectPreview: L.Rectangle | null = null;
+    let multiTouchActive = false;
 
     const toLatLng = (clientX: number, clientY: number): LatLng => {
       const rect = container.getBoundingClientRect();
@@ -402,10 +476,33 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       return { lat: ll.lat, lng: ll.lng };
     };
 
+    const matchStopsInside = (poly: LatLng[]): string[] => {
+      if (poly.length < 3) return [];
+      const curDate = selectedDateRef.current;
+      const curPriest = focusedPriestIdRef.current;
+      const curStreet = focusedStreetRef.current;
+      const ids: string[] = [];
+      for (const s of stopsRef.current) {
+        const isActive = curDate
+          ? (s.visitDate ?? '').trim() === curDate
+          : s.included !== false;
+        if (!isActive) continue;
+        if (curPriest !== null && s.priestId !== curPriest) continue;
+        if (curStreet && extractStreetName(s) !== curStreet) continue;
+        if (isPointInsideBoundary(s.location, poly)) {
+          ids.push(s.id);
+        }
+      }
+      return ids;
+    };
+
     const cleanupStroke = () => {
       drawing = false;
       activePointerId = null;
       rawPoints = [];
+      rectStart = null;
+      rectEnd = null;
+      if (isStopLasso) setLassoLiveCount(0);
       if (strokeLine) {
         layer.removeLayer(strokeLine);
         strokeLine = null;
@@ -414,12 +511,86 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         layer.removeLayer(strokeFill);
         strokeFill = null;
       }
+      if (rectPreview) {
+        layer.removeLayer(rectPreview);
+        rectPreview = null;
+      }
+    };
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.code !== 'Space') return;
+      const target = ev.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      ev.preventDefault();
+      if (!spaceHeldRef.current) {
+        spaceHeldRef.current = true;
+        setSpacePanning(true);
+        if (!drawing) map.dragging.enable();
+      }
+    };
+
+    const onKeyUp = (ev: KeyboardEvent) => {
+      if (ev.code !== 'Space') return;
+      spaceHeldRef.current = false;
+      setSpacePanning(false);
+      if (!drawing && !multiTouchActive) {
+        map.dragging.disable();
+      }
+    };
+
+    const onTouchStart = (ev: TouchEvent) => {
+      if (ev.touches.length >= 2) {
+        multiTouchActive = true;
+        cleanupStroke();
+        container.style.touchAction = 'auto';
+        map.dragging.enable();
+      }
+    };
+
+    const onTouchEnd = (ev: TouchEvent) => {
+      if (ev.touches.length === 0 && multiTouchActive) {
+        multiTouchActive = false;
+        container.style.touchAction = 'none';
+        if (!spaceHeldRef.current) {
+          map.dragging.disable();
+        }
+      }
+    };
+
+    const onContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault();
     };
 
     const onPointerDown = (ev: PointerEvent) => {
       const target = ev.target as HTMLElement | null;
       if (target?.closest('.no-print, .leaflet-control')) return;
-      if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+      if (multiTouchActive) return;
+
+      // Right-mouse drag pans the map cleanly while drawing on PC
+      if (ev.pointerType === 'mouse' && ev.button === 2) {
+        ev.preventDefault();
+        rightPanPointerId = ev.pointerId;
+        panLastX = ev.clientX;
+        panLastY = ev.clientY;
+        container.style.cursor = 'grabbing';
+        try {
+          container.setPointerCapture(ev.pointerId);
+        } catch {
+          // Ignore
+        }
+        return;
+      }
+
+      if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+      if (spaceHeldRef.current) return;
 
       ev.preventDefault();
       setLassoHint(null);
@@ -428,22 +599,42 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       lastClientX = ev.clientX;
       lastClientY = ev.clientY;
       const startPt = toLatLng(ev.clientX, ev.clientY);
-      rawPoints = [startPt];
 
       layer.clearLayers();
-      strokeFill = L.polygon([[startPt.lat, startPt.lng]], {
-        color: '#B45309',
-        weight: 0,
-        fillColor: '#F59E0B',
-        fillOpacity: 0.16,
-        interactive: false,
-      }).addTo(layer);
-      strokeLine = L.polyline([[startPt.lat, startPt.lng]], {
-        color: '#B45309',
-        weight: 3.5,
-        opacity: 0.95,
-        interactive: false,
-      }).addTo(layer);
+      if (isBoundaryRect) {
+        rectStart = startPt;
+        rectEnd = startPt;
+        rectPreview = L.rectangle(
+          [
+            [startPt.lat, startPt.lng],
+            [startPt.lat, startPt.lng],
+          ],
+          {
+            color: strokeColor,
+            weight: 3,
+            dashArray: '6, 5',
+            fillColor,
+            fillOpacity: 0.16,
+            interactive: false,
+          }
+        ).addTo(layer);
+      } else {
+        rawPoints = [startPt];
+        strokeFill = L.polygon([[startPt.lat, startPt.lng]], {
+          color: strokeColor,
+          weight: 0,
+          fillColor,
+          fillOpacity: 0.16,
+          interactive: false,
+        }).addTo(layer);
+        strokeLine = L.polyline([[startPt.lat, startPt.lng]], {
+          color: strokeColor,
+          weight: 3.5,
+          opacity: 0.95,
+          dashArray: isStopLasso ? '6, 5' : undefined,
+          interactive: false,
+        }).addTo(layer);
+      }
 
       try {
         container.setPointerCapture(ev.pointerId);
@@ -453,7 +644,29 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     };
 
     const onPointerMove = (ev: PointerEvent) => {
-      if (!drawing || ev.pointerId !== activePointerId) return;
+      if (ev.pointerId === rightPanPointerId) {
+        const dx = panLastX - ev.clientX;
+        const dy = panLastY - ev.clientY;
+        panLastX = ev.clientX;
+        panLastY = ev.clientY;
+        map.panBy([dx, dy], { animate: false });
+        return;
+      }
+
+      if (!drawing || ev.pointerId !== activePointerId || multiTouchActive) {
+        return;
+      }
+
+      if (isBoundaryRect && rectStart) {
+        const curPt = toLatLng(ev.clientX, ev.clientY);
+        rectEnd = curPt;
+        rectPreview?.setBounds([
+          [Math.min(rectStart.lat, curPt.lat), Math.min(rectStart.lng, curPt.lng)],
+          [Math.max(rectStart.lat, curPt.lat), Math.max(rectStart.lng, curPt.lng)],
+        ]);
+        return;
+      }
+
       const distPx = Math.hypot(
         ev.clientX - lastClientX,
         ev.clientY - lastClientY
@@ -468,22 +681,73 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       strokeLine?.setLatLngs(coords);
       if (rawPoints.length >= 3) {
         strokeFill?.setLatLngs(coords);
+        if (isStopLasso && rawPoints.length % 3 === 0) {
+          setLassoLiveCount(matchStopsInside(rawPoints).length);
+        }
       }
     };
 
     const finishStroke = (ev: PointerEvent) => {
+      if (ev.pointerId === rightPanPointerId) {
+        rightPanPointerId = null;
+        container.style.cursor = spaceHeldRef.current ? 'grab' : 'crosshair';
+        try {
+          container.releasePointerCapture(ev.pointerId);
+        } catch {
+          // Ignore
+        }
+        return;
+      }
+
       if (!drawing || ev.pointerId !== activePointerId) return;
       try {
         container.releasePointerCapture(ev.pointerId);
       } catch {
         // Ignore
       }
+
+      if (isBoundaryRect) {
+        const s = rectStart;
+        const e = rectEnd ?? toLatLng(ev.clientX, ev.clientY);
+        cleanupStroke();
+        if (!s) return;
+        const spanLatM = Math.abs(e.lat - s.lat) * 111320;
+        const spanLngM =
+          Math.abs(e.lng - s.lng) *
+          111320 *
+          Math.max(0.2, Math.cos((s.lat * Math.PI) / 180));
+        if (spanLatM < 35 || spanLngM < 35) {
+          setLassoHint(
+            'Przeciągnij prostokąt od rogu do przeciwnego rogu (min. ~35 m).'
+          );
+          return;
+        }
+        onBoundaryCompleteRef.current(computeRectanglePolygon(s, e));
+        return;
+      }
+
       const captured = [...rawPoints];
       cleanupStroke();
 
+      if (isStopLasso) {
+        if (captured.length < 4) {
+          setLassoHint(
+            'Zakreśl pętlę wokół wybranej grupy domów lub ulicy.'
+          );
+          return;
+        }
+        const matched = matchStopsInside(captured);
+        if (matched.length === 0) {
+          setLassoHint('W zakreślonej pętli nie było widocznych domów.');
+          return;
+        }
+        onLassoSelectStopsRef.current?.(matched);
+        return;
+      }
+
       if (captured.length < 5) {
         setLassoHint(
-          'Przytrzymaj i zakreśl pętlę wokół parafii jednym ruchem (lub przełącz na Celownik).'
+          'Przytrzymaj i zakreśl pętlę wokół parafii jednym ruchem (lub przełącz na Ramkę / Celownik).'
         );
         return;
       }
@@ -508,13 +772,27 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       }
     };
 
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    container.addEventListener('touchstart', onTouchStart, { passive: true });
+    container.addEventListener('touchend', onTouchEnd, { passive: true });
+    container.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    container.addEventListener('contextmenu', onContextMenu);
     container.addEventListener('pointerdown', onPointerDown);
     container.addEventListener('pointermove', onPointerMove);
     container.addEventListener('pointerup', finishStroke);
     container.addEventListener('pointercancel', cleanupStroke);
 
     return () => {
+      spaceHeldRef.current = false;
+      setSpacePanning(false);
       cleanupStroke();
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchend', onTouchEnd);
+      container.removeEventListener('touchcancel', onTouchEnd);
+      container.removeEventListener('contextmenu', onContextMenu);
       container.removeEventListener('pointerdown', onPointerDown);
       container.removeEventListener('pointermove', onPointerMove);
       container.removeEventListener('pointerup', finishStroke);
@@ -522,9 +800,13 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     };
   }, [interactionMode, drawTool]);
 
-  // PC keyboard shortcuts while drawing or editing boundary
+  // PC keyboard shortcuts while drawing, lasso selecting, or editing boundary
   useEffect(() => {
-    if (interactionMode !== 'draw_boundary' && interactionMode !== 'edit_boundary') {
+    if (
+      interactionMode !== 'draw_boundary' &&
+      interactionMode !== 'edit_boundary' &&
+      interactionMode !== 'lasso_select'
+    ) {
       return;
     }
 
@@ -585,6 +867,46 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [interactionMode, selectedVertexIdx]);
+
+  // Painted, clickable street highlights ("pomalowane ulice") when not displaying full route polylines
+  useEffect(() => {
+    const layer = streetOverlaysLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+
+    if (
+      routes.length > 0 ||
+      interactionMode === 'draw_boundary' ||
+      interactionMode === 'edit_boundary' ||
+      streetOverlayPaths.length === 0
+    ) {
+      return;
+    }
+
+    streetOverlayPaths.forEach((overlay) => {
+      const isFocused = focusedStreet === overlay.streetName;
+      const opacity = focusedStreet
+        ? isFocused
+          ? 0.65
+          : 0.14
+        : 0.34;
+      const poly = L.polyline(
+        overlay.points.map((p) => [p.lat, p.lng] as [number, number]),
+        {
+          color: overlay.color,
+          weight: isFocused ? 8 : 5,
+          opacity,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }
+      ).addTo(layer);
+
+      poly.on('click', (ev: L.LeafletMouseEvent) => {
+        L.DomEvent.stopPropagation(ev);
+        onSelectStreetOverlayRef.current?.(overlay.streetName);
+      });
+    });
+  }, [streetOverlayPaths, focusedStreet, routes.length, interactionMode]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -847,6 +1169,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       const routeMeta = routeMetaByStopId[stop.id];
       const orderNum = routeMeta?.orderNumber;
       const isSelected = highlightedStopId === stop.id;
+      const isLassoSelected = lassoSelectedSet.has(stop.id);
       const isActiveInView = selectedDate
         ? (stop.visitDate ?? '').trim() === selectedDate
         : stop.included !== false;
@@ -868,19 +1191,26 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         isDimmedByPriest,
         isDimmedByStreet,
         hasFocusedStreet: Boolean(focusedStreet),
-        isSelected,
+        isSelected: isSelected || isLassoSelected,
         isBlock,
         isBoundaryEditing,
         routeMeta,
       });
 
       const borderRadius = isBlock ? '5px' : '9999px';
-      const bgColor = appearance.fillColorOverride ?? palette.color;
-      const borderCol =
-        appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
+      const bgColor = isLassoSelected
+        ? '#4F46E5'
+        : appearance.fillColorOverride ?? palette.color;
+      const borderCol = isLassoSelected
+        ? '#FFFFFF'
+        : appearance.borderColorOverride ??
+          (isSelected ? '#0F172A' : '#FFFFFF');
+      const finalSize = isLassoSelected
+        ? Math.max(14, appearance.size - 4)
+        : appearance.size;
       const hitSize = isBoundaryEditing
-        ? appearance.size
-        : Math.max(22, appearance.size);
+        ? finalSize
+        : Math.max(22, finalSize);
 
       const startBadgeHtml = appearance.isStartPoint
         ? `<div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:2px;background:#15803D;color:#FFFFFF;font-family:sans-serif;font-size:9px;font-weight:800;letter-spacing:0.04em;padding:1px 5px;border-radius:4px;border:1.5px solid #FFFFFF;box-shadow:0 1px 4px rgba(0,0,0,0.28);white-space:nowrap;pointer-events:none;">START</div>`
@@ -890,10 +1220,12 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         className: '',
         html: `<div style="position:relative;width:${hitSize}px;height:${hitSize}px;display:flex;align-items:center;justify-content:center;cursor:${
           isBoundaryEditing ? 'default' : 'pointer'
-        };">${startBadgeHtml}<div style="width:${appearance.size}px;height:${appearance.size}px;border-radius:${borderRadius};background:${bgColor};border:${appearance.borderWidth}px solid ${borderCol};opacity:${appearance.opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:${appearance.fontSize}px;line-height:1;font-weight:700;box-shadow:${
-          appearance.showLabel
-            ? '0 2px 5px rgba(15,23,42,0.28)'
-            : '0 1px 2px rgba(15,23,42,0.22)'
+        };">${startBadgeHtml}<div style="width:${finalSize}px;height:${finalSize}px;border-radius:${borderRadius};background:${bgColor};border:${appearance.borderWidth}px solid ${borderCol};opacity:${appearance.opacity};color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:${appearance.fontSize}px;line-height:1;font-weight:700;box-shadow:${
+          isLassoSelected
+            ? '0 0 0 3px rgba(79,70,229,0.35)'
+            : appearance.showLabel
+              ? '0 2px 5px rgba(15,23,42,0.28)'
+              : '0 1px 2px rgba(15,23,42,0.22)'
         };">${appearance.showLabel ? appearance.labelText : ''}</div></div>`,
         iconSize: [hitSize, hitSize],
         iconAnchor: [hitSize / 2, hitSize / 2],
@@ -901,8 +1233,8 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
       const marker = L.marker([stop.location.lat, stop.location.lng], {
         icon,
-        interactive: !isBoundaryEditing,
-        zIndexOffset: appearance.zIndexPriority,
+        interactive: !isBoundaryEditing && interactionMode !== 'lasso_select',
+        zIndexOffset: isLassoSelected ? 420 : appearance.zIndexPriority,
       }).addTo(layer);
 
       const unitsPreviewHtml =
@@ -1024,6 +1356,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     mapZoom,
     activeVisibleCount,
     interactionMode,
+    lassoSelectedSet,
   ]);
 
   useEffect(() => {
@@ -1229,6 +1562,24 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
                   <button
                     type="button"
                     onClick={() => {
+                      draftPointsRef.current = [];
+                      setDraftPoints([]);
+                      rubberBandLayerRef.current?.clearLayers();
+                      setLassoHint(null);
+                      setDrawTool('rect');
+                    }}
+                    className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                      drawTool === 'rect'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Square className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Ramka</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       setLassoHint(null);
                       setDrawTool('crosshair');
                     }}
@@ -1273,15 +1624,19 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
                 </button>
               </div>
 
-              {drawTool === 'lasso' && (
-                <div className="px-2 pb-0.5 text-[11px] text-slate-600 text-center max-w-[320px]">
+              {(drawTool === 'lasso' || drawTool === 'rect') && (
+                <div className="px-2 pb-0.5 text-[11px] text-slate-600 text-center max-w-[360px]">
                   {lassoHint ? (
                     <span className="text-amber-800 font-medium">
                       {lassoHint}
                     </span>
+                  ) : drawTool === 'rect' ? (
+                    <span>
+                      Przeciągnij prostokąt nad parafią · Przesuwanie: 2 palce / Spacja / prawy klawisz myszy
+                    </span>
                   ) : (
                     <span>
-                      Przytrzymaj i obrysuj teren palcem lub myszą jednym ruchem.
+                      Obrysuj teren jednym ruchem · Przesuwanie: 2 palce / Spacja / prawy klawisz myszy
                     </span>
                   )}
                 </div>
@@ -1362,6 +1717,19 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
                 </div>
               )}
 
+              {boundary.length >= 3 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onBoundaryUpdate(expandBoundaryPolygonMeters(boundary, 25))
+                  }
+                  title="Rozszerz granice o 25 metrów na zewnątrz, aby objąć domy po drugiej stronie ulicy granicznej"
+                  className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+                >
+                  <span>+25 m brzeg</span>
+                </button>
+              )}
+
               {selectedVertexIdx !== null && boundary.length > 3 && (
                 <button
                   type="button"
@@ -1386,6 +1754,29 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
               >
                 <Check className="w-3.5 h-3.5" />
                 Gotowe
+              </button>
+            </div>
+          )}
+
+          {interactionMode === 'lasso_select' && (
+            <div className="bg-white/95 backdrop-blur-md border border-indigo-300 rounded-2xl shadow-xl px-3.5 py-2 flex flex-wrap items-center justify-center gap-2.5 text-xs text-slate-900">
+              <Scan className="w-4 h-4 text-indigo-700 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-semibold text-indigo-950 leading-snug">
+                  Obrysuj grupę domów na mapie
+                  {lassoLiveCount > 0 ? ` · w pętli: ${lassoLiveCount}` : ''}
+                </div>
+                <div className="text-[11px] text-slate-600">
+                  {lassoHint ||
+                    'Przesuwanie: 2 palce na telefonie / Spacja lub prawy klawisz na PC'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onCancelInteraction}
+                className="min-h-[34px] px-3 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+              >
+                Anuluj
               </button>
             </div>
           )}

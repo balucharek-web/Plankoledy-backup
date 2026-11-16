@@ -43,6 +43,7 @@ import {
   extractHouseNumberLabel,
   extractHouseNumberSortKey,
   extractStreetName,
+  findMissingHouseNumberGaps,
   isEvenHouseNumberStr,
 } from '../utils/spatial';
 
@@ -80,6 +81,7 @@ interface SidebarStopsProps {
   onComputeDayRoute: (date: string | null) => void;
   onPlanCustomDay: (payload: CustomDayPlanPayload) => void;
   onDeleteDayPlan?: (date: string) => void;
+  onAddMissingOnStreet?: (streetName: string) => void;
   onGoToSetup: () => void;
   onGoToSchedule?: () => void;
   isComputing: boolean;
@@ -127,6 +129,7 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   onComputeDayRoute,
   onPlanCustomDay,
   onDeleteDayPlan,
+  onAddMissingOnStreet,
   onGoToSetup,
   onGoToSchedule,
   isComputing,
@@ -983,8 +986,10 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                           </button>
                         </div>
 
-                        {isPreviewOpen && (
-                          <div className="px-3 py-2.5 bg-slate-50 border-t border-slate-100 space-y-1.5">
+                        {isPreviewOpen && (() => {
+                          const missingGaps = findMissingHouseNumberGaps(st.stops);
+                          return (
+                          <div className="px-3 py-2.5 bg-slate-50 border-t border-slate-100 space-y-2">
                             <div className="text-[11px] text-slate-500">
                               Adresy na ulicy {st.streetName} (dotknij, aby pokazać na mapie):
                             </div>
@@ -1018,8 +1023,29 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                 );
                               })}
                             </div>
+                            {missingGaps.length > 0 && (
+                              <div className="p-2 rounded-lg bg-amber-50/90 border border-amber-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-950">
+                                <span>
+                                  Możliwe braki numeracji:{' '}
+                                  <strong className="font-mono">
+                                    nr {missingGaps.join(', ')}
+                                  </strong>
+                                </span>
+                                {onAddMissingOnStreet && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onAddMissingOnStreet(st.streetName)}
+                                    className="px-2 py-1 font-semibold text-amber-900 bg-white hover:bg-amber-100 border border-amber-300 rounded-md inline-flex items-center gap-1 shrink-0"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                    <span>Dodaj na mapie</span>
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     );
                   })
@@ -1585,8 +1611,31 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                         </div>
                       </div>
 
-                      {isExpanded && (
+                      {isExpanded && (() => {
+                        const missingGaps = findMissingHouseNumberGaps(allStops);
+                        return (
                         <div className="bg-slate-50/70 border-t border-slate-100 divide-y divide-slate-100">
+                          {missingGaps.length > 0 && (
+                            <div className="px-4 py-2 bg-amber-50/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-950">
+                              <span>
+                                Możliwe braki numeracji:{' '}
+                                <strong className="font-mono">
+                                  nr {missingGaps.join(', ')}
+                                </strong>
+                              </span>
+                              {onAddMissingOnStreet && (
+                                <button
+                                  type="button"
+                                  onClick={() => onAddMissingOnStreet(streetName)}
+                                  className="px-2 py-1 font-semibold text-amber-900 bg-white hover:bg-amber-100 border border-amber-300 rounded-md inline-flex items-center gap-1 shrink-0"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Dodaj na mapie</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+
                           {allStops.length > 2 && (
                             <div className="px-4 py-2 flex flex-wrap items-center gap-1.5 text-[11px]">
                               <span className="text-slate-500 mr-1">
@@ -1858,7 +1907,8 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                             </div>
                           )}
                         </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   );
                 })

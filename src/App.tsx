@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
+  AlertTriangle,
   ArrowLeft,
   CalendarCheck,
   CalendarPlus,
@@ -20,14 +21,19 @@ import {
   Menu,
   Pentagon,
   Route,
+  Scan,
+  ScanSearch,
   SlidersHorizontal,
+  Trash2,
   Undo2,
+  Users,
   X,
 } from 'lucide-react';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
 import { AuthModal } from './components/AuthModal';
 import { BlockUnitsModal } from './components/BlockUnitsModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { OsmStreetFetcherModal } from './components/OsmStreetFetcherModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { OsmParishMap } from './components/OsmParishMap';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -104,6 +110,7 @@ import {
   computePolygonAreaSqMeters,
   createBufferedHullBoundary,
   createPresetBoundaryPolygon,
+  expandBoundaryPolygonMeters,
   extractStreetName,
   formatPolygonArea,
   isPointInsideBoundary,
@@ -205,6 +212,10 @@ function ParishPlannerWorkspace({
   const [streetPickFeedback, setStreetPickFeedback] =
     useState<StreetPickFeedback | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [areaScannerOpen, setAreaScannerOpen] = useState(false);
+  const [postBoundaryBanner, setPostBoundaryBanner] = useState(false);
+  const [lassoSelectedStopIds, setLassoSelectedStopIds] = useState<string[]>([]);
+  const [lassoAssignDate, setLassoAssignDate] = useState<string>('');
   const [editingBlockStopId, setEditingBlockStopId] = useState<string | null>(
     null
   );
@@ -312,6 +323,8 @@ function ParishPlannerWorkspace({
       setStops([]);
       setSelectedDate(null);
       setFocusedPriestId(null);
+      setPostBoundaryBanner(false);
+      setLassoSelectedStopIds([]);
       clearRoutes();
       return;
     }
@@ -496,6 +509,8 @@ function ParishPlannerWorkspace({
       setHighlightedStopId(null);
       setSelectedDate(null);
       setFocusedPriestId(null);
+      setPostBoundaryBanner(false);
+      setLassoSelectedStopIds([]);
       setActiveParishId(target.id);
       setParish(target.parish);
       setBoundary(target.boundary);
@@ -599,6 +614,7 @@ function ParishPlannerWorkspace({
     (points: LatLng[]) => {
       setInteractionMode('pan');
       updateBoundaryAndRecheckStops(points, false);
+      setPostBoundaryBanner(points.length >= 3);
       const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(points));
       showStreetFeedback(
         {
@@ -620,6 +636,7 @@ function ParishPlannerWorkspace({
     );
     if (hull.length < 3) return;
     updateBoundaryAndRecheckStops(hull, false);
+    setPostBoundaryBanner(true);
     setInteractionMode('pan');
     setMobilePane('map');
     const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(hull));
@@ -636,6 +653,7 @@ function ParishPlannerWorkspace({
     (points: LatLng[], placeName: string) => {
       if (points.length < 3) return;
       updateBoundaryAndRecheckStops(points, false);
+      setPostBoundaryBanner(true);
       setInteractionMode('pan');
       setMobilePane('map');
       const areaLabel = formatPolygonArea(computePolygonAreaSqMeters(points));
@@ -660,6 +678,7 @@ function ParishPlannerWorkspace({
       );
       setInteractionMode('pan');
       updateBoundaryAndRecheckStops(preset, false);
+      setPostBoundaryBanner(true);
       setMobilePane('map');
     },
     [parish, updateBoundaryAndRecheckStops]
@@ -676,6 +695,17 @@ function ParishPlannerWorkspace({
       updateBoundaryAndRecheckStops(scaled, false);
     },
     [boundary, parish?.location, updateBoundaryAndRecheckStops]
+  );
+
+  const handleExpandBoundaryMeters = useCallback(
+    (meters: number) => {
+      if (boundary.length < 3) return;
+      const expanded = expandBoundaryPolygonMeters(boundary, meters);
+      if (expanded.length >= 3) {
+        updateBoundaryAndRecheckStops(expanded, false);
+      }
+    },
+    [boundary, updateBoundaryAndRecheckStops]
   );
 
   const handleClearBoundary = useCallback(() => {
@@ -1747,6 +1777,67 @@ function ParishPlannerWorkspace({
     [authUser, clearRoutes]
   );
 
+  const handleDeleteOutsideBoundaryStops = useCallback(() => {
+    if (boundary.length < 3) return;
+    const outsideIds = stopsRef.current
+      .filter((s) => s.inBoundary === false)
+      .map((s) => s.id);
+    if (outsideIds.length === 0) return;
+    handleDeleteStreetStops(outsideIds);
+    setPostBoundaryBanner(false);
+  }, [boundary.length, handleDeleteStreetStops]);
+
+  const handleAddMissingOnStreet = useCallback(
+    (streetName: string) => {
+      setFocusedStreet(streetName);
+      setInteractionMode('add_stop');
+      setMobilePane('map');
+      showStreetFeedback(
+        {
+          status: 'info',
+          message: `Kliknij brakujący dom przy ulicy „${streetName}”, aby go dopisać.`,
+        },
+        5500
+      );
+    },
+    [showStreetFeedback]
+  );
+
+  const handleSelectStreetOverlay = useCallback((streetName: string) => {
+    setFocusedStreet((prev) => (prev === streetName ? null : streetName));
+  }, []);
+
+  const handleLassoSelectStops = useCallback(
+    (stopIds: string[]) => {
+      setInteractionMode('pan');
+      setLassoSelectedStopIds(stopIds);
+      if (stopIds.length === 0) {
+        showStreetFeedback(
+          {
+            status: 'info',
+            message: 'Nie zaznaczono żadnych domów w pętli lassa.',
+          },
+          3500
+        );
+      }
+    },
+    [showStreetFeedback]
+  );
+
+  const outsideBoundaryCount = useMemo(
+    () =>
+      boundary.length < 3
+        ? 0
+        : stops.filter((s) => s.inBoundary === false).length,
+    [boundary.length, stops]
+  );
+
+  const validLassoSelectedIds = useMemo(() => {
+    if (lassoSelectedStopIds.length === 0) return [];
+    const existing = new Set(stops.map((s) => s.id));
+    return lassoSelectedStopIds.filter((id) => existing.has(id));
+  }, [lassoSelectedStopIds, stops]);
+
   const activeStopsCount = stops.filter((s) => s.included !== false).length;
 
   const exactRoutesOnlyByDay = useMemo(() => {
@@ -2613,6 +2704,12 @@ function ParishPlannerWorkspace({
                     onDeleteSavedParish={handleDeleteSavedParish}
                     onCreatePresetBoundary={handleCreatePresetBoundary}
                     onScaleBoundary={handleScaleBoundary}
+                    onExpandBoundaryMeters={handleExpandBoundaryMeters}
+                    onDeleteOutsideBoundaryStops={
+                      handleDeleteOutsideBoundaryStops
+                    }
+                    onAddMissingOnStreet={handleAddMissingOnStreet}
+                    onOpenAreaScanner={() => setAreaScannerOpen(true)}
                     onToggleDrawBoundary={() => {
                       setInteractionMode((m) => {
                         const next =
@@ -2693,6 +2790,7 @@ function ParishPlannerWorkspace({
                       setMobilePane('map');
                     }}
                     onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
+                    onAddMissingOnStreet={handleAddMissingOnStreet}
                     onComputeDayRoute={(d) =>
                       void handleComputeRoutesForDate(d)
                     }
@@ -2814,6 +2912,31 @@ function ParishPlannerWorkspace({
                         </span>
                       </button>
 
+                      {boundary.length >= 3 && (
+                        <button
+                          type="button"
+                          onClick={() => setAreaScannerOpen(true)}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-950 text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                        >
+                          <ScanSearch className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                          <span>Wykryj z terenu</span>
+                        </button>
+                      )}
+
+                      {stops.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLassoSelectedStopIds([]);
+                            setInteractionMode('lasso_select');
+                          }}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-950 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                        >
+                          <Scan className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+                          <span>Zaznacz lassem</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => setInteractionMode('pick_street')}
@@ -2860,6 +2983,7 @@ function ParishPlannerWorkspace({
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
                   focusedStreet={focusedStreet}
+                  lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -2879,6 +3003,8 @@ function ParishPlannerWorkspace({
                   onSelectStop={setHighlightedStopId}
                   onDeleteStop={handleDeleteStop}
                   onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
+                  onLassoSelectStops={handleLassoSelectStops}
+                  onSelectStreetOverlay={handleSelectStreetOverlay}
                 />
               ) : (
                 <OsmParishMap
@@ -2893,6 +3019,7 @@ function ParishPlannerWorkspace({
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
                   focusedStreet={focusedStreet}
+                  lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
                   streetPickFeedback={streetPickFeedback}
@@ -2912,8 +3039,182 @@ function ParishPlannerWorkspace({
                   onSelectStop={setHighlightedStopId}
                   onDeleteStop={handleDeleteStop}
                   onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
+                  onLassoSelectStops={handleLassoSelectStops}
+                  onSelectStreetOverlay={handleSelectStreetOverlay}
                 />
               )}
+
+              {/* Post-Boundary 1-Step Banner */}
+              {interactionMode === 'pan' &&
+                postBoundaryBanner &&
+                boundary.length >= 3 &&
+                validLassoSelectedIds.length === 0 &&
+                !streetPickFeedback && (
+                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[475] w-max max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-emerald-300 rounded-2xl shadow-xl px-3 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
+                    <span className="font-semibold text-slate-900">
+                      Teren parafii gotowy (
+                      {formatPolygonArea(computePolygonAreaSqMeters(boundary))}
+                      )
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPostBoundaryBanner(false);
+                        setAreaScannerOpen(true);
+                      }}
+                      className="min-h-[34px] px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                    >
+                      <ScanSearch className="w-3.5 h-3.5" />
+                      <span>Wykryj teraz ulice w tym terenie</span>
+                    </button>
+                    {outsideBoundaryCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleDeleteOutsideBoundaryStops}
+                        className="min-h-[34px] px-2.5 py-1.5 text-xs font-semibold text-red-800 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl inline-flex items-center gap-1.5 transition-colors"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                        <span>
+                          Usuń domy spoza granicy ({outsideBoundaryCount})
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setPostBoundaryBanner(false)}
+                      aria-label="Zamknij baner"
+                      className="min-w-[30px] min-h-[30px] inline-flex items-center justify-center text-slate-400 hover:text-slate-700 rounded-lg"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+              {/* Focused Street Quick Bar (when a painted street overlay or street filter is active) */}
+              {interactionMode === 'pan' &&
+                focusedStreet &&
+                !postBoundaryBanner &&
+                validLassoSelectedIds.length === 0 &&
+                !streetPickFeedback && (
+                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[470] w-max max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-amber-300 rounded-2xl shadow-lg px-3 py-2 flex flex-wrap items-center justify-center gap-2 text-xs">
+                    <span className="font-semibold text-amber-950 truncate max-w-[200px]">
+                      Ulica: {focusedStreet}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleAddMissingOnStreet(focusedStreet)}
+                      className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1"
+                    >
+                      <MapPinPlus className="w-3.5 h-3.5" />
+                      <span>+ Dodaj brakujący dom</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFocusedStreet(null)}
+                      className="min-h-[32px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                    >
+                      Pokaż wszystkie ulice
+                    </button>
+                  </div>
+                )}
+
+              {/* Lasso Multi-Select Floating Action Bar */}
+              {interactionMode === 'pan' &&
+                validLassoSelectedIds.length > 0 && (
+                  <div className="no-print absolute top-3 left-1/2 -translate-x-1/2 z-[485] w-max max-w-[calc(100%-24px)] bg-slate-900/95 backdrop-blur-md text-white border border-indigo-400/50 rounded-2xl shadow-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-center gap-2 text-xs">
+                    <span className="inline-flex items-center gap-1.5 font-semibold text-indigo-200 tabular-nums">
+                      <Scan className="w-4 h-4 text-indigo-400" />
+                      Zaznaczono: {validLassoSelectedIds.length}
+                    </span>
+
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="date"
+                        value={lassoAssignDate}
+                        onChange={(e) => setLassoAssignDate(e.target.value)}
+                        aria-label="Data kolędy dla zaznaczonych domów"
+                        className="min-h-[32px] px-2 py-1 text-base sm:text-xs font-mono bg-slate-800 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-indigo-400"
+                      />
+                      <button
+                        type="button"
+                        disabled={!lassoAssignDate}
+                        onClick={() => {
+                          if (!lassoAssignDate) return;
+                          handleAssignStopsDate(
+                            validLassoSelectedIds,
+                            lassoAssignDate
+                          );
+                          showStreetFeedback(
+                            {
+                              status: 'success',
+                              message: `Przypisano ${validLassoSelectedIds.length} domów do dnia ${formatPolishDateChip(lassoAssignDate)}.`,
+                            },
+                            4500
+                          );
+                          setLassoSelectedStopIds([]);
+                        }}
+                        className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-400 rounded-lg transition-colors whitespace-nowrap"
+                      >
+                        Przypisz do dnia
+                      </button>
+                    </div>
+
+                    {config.priestCount > 1 && (
+                      <div className="flex items-center gap-1">
+                        <Users className="w-3.5 h-3.5 text-slate-400" />
+                        {PRIEST_PALETTE.slice(0, config.priestCount).map(
+                          (p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                handleAssignStreetPriest(
+                                  validLassoSelectedIds,
+                                  p.id
+                                );
+                                showStreetFeedback(
+                                  {
+                                    status: 'success',
+                                    message: `Przypisano ${validLassoSelectedIds.length} domów do Ks. ${p.id}.`,
+                                  },
+                                  4000
+                                );
+                                setLassoSelectedStopIds([]);
+                              }}
+                              className="min-h-[30px] px-2 py-1 text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg inline-flex items-center gap-1"
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full"
+                                style={{ backgroundColor: p.color }}
+                              />
+                              Ks. {p.id}
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleDeleteStreetStops(validLassoSelectedIds);
+                        setLassoSelectedStopIds([]);
+                      }}
+                      className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-red-100 bg-red-700/80 hover:bg-red-600 rounded-lg inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Usuń</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setLassoSelectedStopIds([])}
+                      className="min-h-[32px] px-2 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg"
+                    >
+                      Wyczyść
+                    </button>
+                  </div>
+                )}
 
               {/* Compact Map Readability & Day HUD */}
               {interactionMode === 'pan' &&
@@ -3483,6 +3784,17 @@ function ParishPlannerWorkspace({
         defaultVisitMinutes={config.defaultVisitMinutes}
         onClose={() => setEditingBlockStopId(null)}
         onSave={(updated) => handleUpdateStop(updated.id, updated)}
+      />
+
+      <OsmStreetFetcherModal
+        open={areaScannerOpen}
+        parish={parish}
+        boundary={boundary}
+        onClose={() => setAreaScannerOpen(false)}
+        onAddPlaces={(places) => {
+          handleBatchAddStops(places);
+          setPostBoundaryBanner(false);
+        }}
       />
     </div>
   );

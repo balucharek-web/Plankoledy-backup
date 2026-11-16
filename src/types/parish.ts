@@ -170,10 +170,11 @@ export type MapInteractionMode =
   | 'pan'
   | 'draw_boundary'
   | 'edit_boundary'
+  | 'lasso_select'
   | 'pick_street'
   | 'add_stop';
 
-export type BoundaryDrawTool = 'lasso' | 'crosshair' | 'points';
+export type BoundaryDrawTool = 'lasso' | 'rect' | 'crosshair' | 'points';
 
 export type MarkerLabelMode = 'auto' | 'numbers' | 'dots';
 

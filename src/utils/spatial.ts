@@ -902,3 +902,184 @@ export function computeStopMarkerAppearance({
   };
 }
 
+/**
+ * Builds a 4-vertex polygon from two diagonal corners (for Rectangle / Frame boundary drawing).
+ */
+export function computeRectanglePolygon(a: LatLng, b: LatLng): LatLng[] {
+  const south = Math.min(a.lat, b.lat);
+  const north = Math.max(a.lat, b.lat);
+  const west = Math.min(a.lng, b.lng);
+  const east = Math.max(a.lng, b.lng);
+  return [
+    { lat: south, lng: west },
+    { lat: north, lng: west },
+    { lat: north, lng: east },
+    { lat: south, lng: east },
+  ];
+}
+
+/**
+ * Expands (or shrinks if meters < 0) each polygon vertex outward from the centroid by ~N meters,
+ * useful so border-street houses just across the drawn road center stay included.
+ */
+export function expandBoundaryPolygonMeters(
+  polygon: LatLng[],
+  meters: number
+): LatLng[] {
+  if (polygon.length < 3 || meters === 0) return polygon;
+  const centroid = polygon.reduce(
+    (acc, p) => ({
+      lat: acc.lat + p.lat / polygon.length,
+      lng: acc.lng + p.lng / polygon.length,
+    }),
+    { lat: 0, lng: 0 }
+  );
+  const cosLat = Math.max(0.2, Math.cos((centroid.lat * Math.PI) / 180));
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * cosLat;
+
+  return polygon.map((p) => {
+    const dxMeters = (p.lng - centroid.lng) * mPerDegLng;
+    const dyMeters = (p.lat - centroid.lat) * mPerDegLat;
+    const distMeters = Math.hypot(dxMeters, dyMeters);
+    if (distMeters < 1) return p;
+    const factor = Math.max(0.15, (distMeters + meters) / distMeters);
+    return {
+      lat: centroid.lat + (dyMeters * factor) / mPerDegLat,
+      lng: centroid.lng + (dxMeters * factor) / mPerDegLng,
+    };
+  });
+}
+
+/**
+ * Detects likely missing house numbers along a street by checking same-parity gaps
+ * (e.g. 10 and 14 without 12, or 1 and 5 without 3), capped cleanly to avoid noise.
+ */
+export function findMissingHouseNumberGaps(
+  stops: Array<Pick<VisitStop, 'address' | 'label'>>
+): number[] {
+  if (stops.length < 3) return [];
+  const baseNums = new Set<number>();
+  for (const s of stops) {
+    const label = extractHouseNumberLabel(s);
+    const m = label.match(/^(\d+)/);
+    if (m) {
+      const n = Number.parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > 0 && n < 2000) baseNums.add(n);
+    }
+  }
+  if (baseNums.size < 3) return [];
+
+  const evens = Array.from(baseNums)
+    .filter((n) => n % 2 === 0)
+    .sort((a, b) => a - b);
+  const odds = Array.from(baseNums)
+    .filter((n) => n % 2 === 1)
+    .sort((a, b) => a - b);
+
+  const missing = new Set<number>();
+  const scanParity = (arr: number[]) => {
+    for (let i = 0; i < arr.length - 1; i++) {
+      const diff = arr[i + 1] - arr[i];
+      if (diff === 4) {
+        const mid = arr[i] + 2;
+        if (!baseNums.has(mid)) missing.add(mid);
+      }
+    }
+  };
+  scanParity(evens);
+  scanParity(odds);
+
+  return Array.from(missing)
+    .sort((a, b) => a - b)
+    .slice(0, 6);
+}
+
+const STREET_OVERLAY_PALETTE = [
+  '#0284C7',
+  '#B45309',
+  '#0F766E',
+  '#7C3AED',
+  '#BE123C',
+  '#0369A1',
+  '#C2410C',
+  '#15803D',
+];
+
+export interface StreetOverlayPath {
+  streetName: string;
+  color: string;
+  count: number;
+  points: LatLng[];
+}
+
+/**
+ * Computes light spatial polylines connecting houses along each saved street
+ * so streets are visually "painted" and clickable directly on the map.
+ */
+export function buildStreetOverlayPaths(
+  stops: VisitStop[]
+): StreetOverlayPath[] {
+  const byStreet = new Map<string, VisitStop[]>();
+  for (const s of stops) {
+    const name = extractStreetName(s);
+    const list = byStreet.get(name);
+    if (list) list.push(s);
+    else byStreet.set(name, [s]);
+  }
+
+  const paths: StreetOverlayPath[] = [];
+  let idx = 0;
+  const sortedNames = Array.from(byStreet.keys()).sort((a, b) =>
+    a.localeCompare(b, 'pl')
+  );
+
+  for (const streetName of sortedNames) {
+    const list = byStreet.get(streetName) ?? [];
+    const color = STREET_OVERLAY_PALETTE[idx % STREET_OVERLAY_PALETTE.length];
+    idx += 1;
+    if (list.length < 2) continue;
+
+    // Order points spatially using greedy nearest neighbor starting from extreme endpoint
+    const remaining = [...list];
+    let startIdx = 0;
+    for (let i = 1; i < remaining.length; i++) {
+      if (
+        remaining[i].location.lat + remaining[i].location.lng <
+        remaining[startIdx].location.lat + remaining[startIdx].location.lng
+      ) {
+        startIdx = i;
+      }
+    }
+    const ordered: LatLng[] = [];
+    let current = remaining.splice(startIdx, 1)[0];
+    ordered.push(current.location);
+
+    while (remaining.length > 0) {
+      let bestI = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < remaining.length; i++) {
+        const dLat = remaining[i].location.lat - current.location.lat;
+        const dLng = remaining[i].location.lng - current.location.lng;
+        const d = dLat * dLat + dLng * dLng;
+        if (d < bestDist) {
+          bestDist = d;
+          bestI = i;
+        }
+      }
+      current = remaining.splice(bestI, 1)[0];
+      ordered.push(current.location);
+    }
+
+    paths.push({
+      streetName,
+      color,
+      count: list.length,
+      points: ordered,
+    });
+  }
+
+  return paths;
+}
+
+

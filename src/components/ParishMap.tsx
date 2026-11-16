@@ -25,6 +25,8 @@ import {
   Pencil,
   Plus,
   Route,
+  Scan,
+  Square,
   Undo2,
   X,
 } from 'lucide-react';
@@ -45,8 +47,10 @@ import {
   RouteStopMeta,
   StopMarkerAppearance,
   buildRouteStopLookup,
+  buildStreetOverlayPaths,
   computePolygonAreaSqMeters,
   computeStopMarkerAppearance,
+  expandBoundaryPolygonMeters,
   extractStreetName,
   formatPolygonArea,
 } from '../utils/spatial';
@@ -72,6 +76,7 @@ interface ParishMapProps {
   focusedStreet?: string | null;
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
+  lassoSelectedIds?: string[];
   streetPickFeedback: StreetPickFeedback | null;
   onDismissStreetFeedback: () => void;
   onBoundaryComplete: (points: LatLng[]) => void;
@@ -84,6 +89,8 @@ interface ParishMapProps {
   onSelectStop: (stopId: string | null) => void;
   onDeleteStop: (stopId: string) => void;
   onOpenBlockUnits?: (stopId: string) => void;
+  onLassoSelectStops?: (stopIds: string[]) => void;
+  onSelectStreetOverlay?: (streetName: string) => void;
 }
 
 const DEFAULT_POLAND_CENTER: LatLng = { lat: 52.0693, lng: 19.4803 };
@@ -95,6 +102,7 @@ interface StopMarkerProps {
   appearance: StopMarkerAppearance;
   color: string;
   isSelected: boolean;
+  isLassoSelected?: boolean;
   onSelect: () => void;
   onClose: () => void;
   onDelete: () => void;
@@ -108,6 +116,7 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   appearance,
   color,
   isSelected,
+  isLassoSelected = false,
   onSelect,
   onClose,
   onDelete,
@@ -117,9 +126,15 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   const isBlock = Boolean(stop.isMultiUnit || (stop.units && stop.units.length > 0));
   const unitsTotal = stop.units?.length || stop.unitsCount || 0;
   const orderNumber = routeMeta?.orderNumber;
-  const bgColor = appearance.fillColorOverride ?? color;
-  const borderCol =
-    appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
+  const bgColor = isLassoSelected
+    ? '#4F46E5'
+    : appearance.fillColorOverride ?? color;
+  const borderCol = isLassoSelected
+    ? '#FFFFFF'
+    : appearance.borderColorOverride ?? (isSelected ? '#0F172A' : '#FFFFFF');
+  const displaySize = isLassoSelected
+    ? Math.max(14, appearance.size - 4)
+    : appearance.size;
 
   return (
     <>
@@ -127,14 +142,14 @@ const StopMarker: React.FC<StopMarkerProps> = ({
         ref={markerRef}
         position={stop.location}
         title={stop.address || stop.label}
-        zIndex={appearance.zIndexPriority}
+        zIndex={isLassoSelected ? 420 : appearance.zIndexPriority}
         onClick={onSelect}
       >
         <div
           className="relative flex items-center justify-center"
           style={{
-            minWidth: Math.max(22, appearance.size),
-            minHeight: Math.max(22, appearance.size),
+            minWidth: Math.max(22, displaySize),
+            minHeight: Math.max(22, displaySize),
           }}
         >
           {appearance.isStartPoint && (
@@ -165,15 +180,17 @@ const StopMarker: React.FC<StopMarkerProps> = ({
               isBlock ? 'rounded-md' : 'rounded-full'
             }`}
             style={{
-              width: appearance.size,
-              height: appearance.size,
+              width: displaySize,
+              height: displaySize,
               fontSize: appearance.fontSize,
               lineHeight: 1,
               backgroundColor: bgColor,
               border: `${appearance.borderWidth}px solid ${borderCol}`,
-              boxShadow: appearance.showLabel
-                ? '0 2px 6px rgba(15,23,42,0.28)'
-                : '0 1px 3px rgba(15,23,42,0.25)',
+              boxShadow: isLassoSelected
+                ? '0 0 0 3px rgba(79,70,229,0.35)'
+                : appearance.showLabel
+                  ? '0 2px 6px rgba(15,23,42,0.28)'
+                  : '0 1px 3px rgba(15,23,42,0.25)',
               color: '#FFFFFF',
               opacity: appearance.opacity,
             }}
@@ -439,9 +456,77 @@ const RoutePolylinesLayer: React.FC<{
   return null;
 };
 
+const StreetOverlaysLayer: React.FC<{
+  stops: VisitStop[];
+  routesCount: number;
+  interactionMode: MapInteractionMode;
+  focusedStreet: string | null;
+  onSelectStreetOverlay?: (streetName: string) => void;
+}> = ({
+  stops,
+  routesCount,
+  interactionMode,
+  focusedStreet,
+  onSelectStreetOverlay,
+}) => {
+  const map = useMap();
+  const polylinesRef = useRef<google.maps.Polyline[]>([]);
+  const onSelectRef = useRef(onSelectStreetOverlay);
+  onSelectRef.current = onSelectStreetOverlay;
+
+  const paths = useMemo(() => buildStreetOverlayPaths(stops), [stops]);
+
+  useEffect(() => {
+    if (!map) return;
+
+    polylinesRef.current.forEach((p) => p.setMap(null));
+    polylinesRef.current = [];
+
+    if (
+      routesCount > 0 ||
+      interactionMode === 'draw_boundary' ||
+      interactionMode === 'edit_boundary' ||
+      paths.length === 0
+    ) {
+      return;
+    }
+
+    const created: google.maps.Polyline[] = [];
+    paths.forEach((overlay) => {
+      const isFocused = focusedStreet === overlay.streetName;
+      const pl = new google.maps.Polyline({
+        path: overlay.points,
+        strokeColor: overlay.color,
+        strokeWeight: isFocused ? 8 : 5,
+        strokeOpacity: focusedStreet ? (isFocused ? 0.65 : 0.14) : 0.34,
+        clickable: true,
+        zIndex: isFocused ? 40 : 20,
+        map,
+      });
+      pl.addListener('click', () => {
+        onSelectRef.current?.(overlay.streetName);
+      });
+      created.push(pl);
+    });
+
+    polylinesRef.current = created;
+
+    return () => {
+      polylinesRef.current.forEach((p) => p.setMap(null));
+      polylinesRef.current = [];
+    };
+  }, [map, paths, routesCount, interactionMode, focusedStreet]);
+
+  return null;
+};
+
 const MapControllerLayer: React.FC<{
   parish: ParishCenter | null;
   boundary: LatLng[];
+  stops: VisitStop[];
+  selectedDate: string | null;
+  focusedPriestId: number | null;
+  focusedStreet: string | null;
   canEditBoundary: boolean;
   interactionMode: MapInteractionMode;
   drawTool: BoundaryDrawTool;
@@ -450,12 +535,17 @@ const MapControllerLayer: React.FC<{
   onBoundaryComplete: (points: LatLng[]) => void;
   onBoundaryUpdate: (points: LatLng[]) => void;
   onScaleBoundary?: (factor: number) => void;
+  onLassoSelectStops?: (stopIds: string[]) => void;
   onCancelInteraction: () => void;
   onMapAddStop: (location: LatLng) => void;
   onMapPickStreet: (location: LatLng) => void;
 }> = ({
   parish,
   boundary,
+  stops,
+  selectedDate,
+  focusedPriestId,
+  focusedStreet,
   canEditBoundary,
   interactionMode,
   drawTool,
@@ -464,6 +554,7 @@ const MapControllerLayer: React.FC<{
   onBoundaryComplete,
   onBoundaryUpdate,
   onScaleBoundary,
+  onLassoSelectStops,
   onCancelInteraction,
   onMapAddStop,
   onMapPickStreet,
@@ -474,6 +565,7 @@ const MapControllerLayer: React.FC<{
   const {
     draftVertexCount,
     lassoHint,
+    lassoLiveCount,
     addCrosshairVertex,
     finishDraft,
     undoLastVertex,
@@ -481,11 +573,17 @@ const MapControllerLayer: React.FC<{
   } = useParishPolygonDrawer({
     isDrawing: interactionMode === 'draw_boundary',
     isEditingBoundary: interactionMode === 'edit_boundary',
+    isLassoSelecting: interactionMode === 'lasso_select',
+    stopsForLasso: stops,
+    selectedDate,
+    focusedPriestId,
+    focusedStreet,
     drawTool,
     canEditBoundary,
     savedBoundary: boundary,
     onComplete: onBoundaryComplete,
     onUpdateBoundary: onBoundaryUpdate,
+    onLassoSelectComplete: onLassoSelectStops,
     onCancel: onCancelInteraction,
   });
 
@@ -571,6 +669,21 @@ const MapControllerLayer: React.FC<{
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    cancelDraft();
+                    onChangeDrawTool('rect');
+                  }}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                    drawTool === 'rect'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Square className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Ramka</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => onChangeDrawTool('crosshair')}
                   className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
                     drawTool === 'crosshair'
@@ -607,15 +720,19 @@ const MapControllerLayer: React.FC<{
               </button>
             </div>
 
-            {drawTool === 'lasso' && (
-              <div className="px-2 pb-0.5 text-[11px] text-slate-600 text-center max-w-[320px]">
+            {(drawTool === 'lasso' || drawTool === 'rect') && (
+              <div className="px-2 pb-0.5 text-[11px] text-slate-600 text-center max-w-[360px]">
                 {lassoHint ? (
                   <span className="text-amber-800 font-medium">
                     {lassoHint}
                   </span>
+                ) : drawTool === 'rect' ? (
+                  <span>
+                    Przeciągnij prostokąt nad parafią · Przesuwanie: 2 palce / Spacja
+                  </span>
                 ) : (
                   <span>
-                    Przytrzymaj i obrysuj teren palcem lub myszą jednym ruchem.
+                    Obrysuj teren jednym ruchem · Przesuwanie: 2 palce / Spacja
                   </span>
                 )}
               </div>
@@ -680,6 +797,18 @@ const MapControllerLayer: React.FC<{
                 </button>
               </div>
             )}
+            {boundary.length >= 3 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onBoundaryUpdate(expandBoundaryPolygonMeters(boundary, 25))
+                }
+                title="Rozszerz granice o 25 m na zewnątrz"
+                className="min-h-[36px] px-2.5 py-1 text-xs font-medium text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
+              >
+                <span>+25 m brzeg</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onCancelInteraction}
@@ -687,6 +816,28 @@ const MapControllerLayer: React.FC<{
             >
               <Check className="w-3.5 h-3.5" />
               Gotowe
+            </button>
+          </div>
+        )}
+
+        {interactionMode === 'lasso_select' && (
+          <div className="no-print mt-3 mx-2 max-w-[calc(100vw-24px)] bg-white/95 backdrop-blur-md border border-indigo-300 rounded-2xl shadow-xl px-3.5 py-2 flex flex-wrap items-center justify-center gap-2.5 text-xs text-slate-900">
+            <Scan className="w-4 h-4 text-indigo-700 shrink-0" />
+            <div className="min-w-0">
+              <div className="font-semibold text-indigo-950 leading-snug">
+                Obrysuj grupę domów na mapie
+                {lassoLiveCount > 0 ? ` · w pętli: ${lassoLiveCount}` : ''}
+              </div>
+              <div className="text-[11px] text-slate-600">
+                {lassoHint || 'Przesuwanie: 2 palce na telefonie / Spacja na PC'}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelInteraction}
+              className="min-h-[34px] px-3 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+            >
+              Anuluj
             </button>
           </div>
         )}
@@ -888,6 +1039,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   focusedStreet = null,
   interactionMode,
   highlightedStopId,
+  lassoSelectedIds = [],
   streetPickFeedback,
   onDismissStreetFeedback,
   onBoundaryComplete,
@@ -900,12 +1052,19 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   onSelectStop,
   onDeleteStop,
   onOpenBlockUnits,
+  onLassoSelectStops,
+  onSelectStreetOverlay,
 }) => {
   const [mapZoom, setMapZoom] = useState<number>(parish ? 15 : 6);
   const [drawTool, setDrawTool] = useState<BoundaryDrawTool>(() =>
     typeof window !== 'undefined' && window.innerWidth < 768
       ? 'crosshair'
       : 'lasso'
+  );
+
+  const lassoSelectedSet = useMemo(
+    () => new Set(lassoSelectedIds),
+    [lassoSelectedIds]
   );
 
   const boundaryAreaLabel = useMemo(
@@ -943,7 +1102,9 @@ export const ParishMap: React.FC<ParishMapProps> = ({
         defaultCenter={parish?.location ?? DEFAULT_POLAND_CENTER}
         defaultZoom={parish ? 15 : 6}
         gestureHandling={
-          interactionMode === 'draw_boundary' && drawTool === 'lasso'
+          interactionMode === 'lasso_select' ||
+          (interactionMode === 'draw_boundary' &&
+            (drawTool === 'lasso' || drawTool === 'rect'))
             ? 'none'
             : 'greedy'
         }
@@ -961,6 +1122,10 @@ export const ParishMap: React.FC<ParishMapProps> = ({
         <MapControllerLayer
           parish={parish}
           boundary={boundary}
+          stops={stops}
+          selectedDate={selectedDate}
+          focusedPriestId={focusedPriestId}
+          focusedStreet={focusedStreet}
           canEditBoundary={canEditBoundary}
           interactionMode={interactionMode}
           drawTool={drawTool}
@@ -969,9 +1134,18 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           onBoundaryComplete={onBoundaryComplete}
           onBoundaryUpdate={onBoundaryUpdate}
           onScaleBoundary={onScaleBoundary}
+          onLassoSelectStops={onLassoSelectStops}
           onCancelInteraction={onCancelInteraction}
           onMapAddStop={onMapAddStop}
           onMapPickStreet={onMapPickStreet}
+        />
+
+        <StreetOverlaysLayer
+          stops={stops}
+          routesCount={routes.length}
+          interactionMode={interactionMode}
+          focusedStreet={focusedStreet}
+          onSelectStreetOverlay={onSelectStreetOverlay}
         />
 
         <RoutePolylinesLayer
@@ -1002,6 +1176,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             stop.isMultiUnit || (stop.units && stop.units.length > 0)
           );
           const isSelected = highlightedStopId === stop.id;
+          const isLassoSelected = lassoSelectedSet.has(stop.id);
           const routeMeta = routeMetaByStopId[stop.id];
 
           const appearance = computeStopMarkerAppearance({
@@ -1012,7 +1187,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             isDimmedByPriest,
             isDimmedByStreet,
             hasFocusedStreet: Boolean(focusedStreet),
-            isSelected,
+            isSelected: isSelected || isLassoSelected,
             isBlock,
             isBoundaryEditing:
               interactionMode === 'draw_boundary' ||
@@ -1029,10 +1204,12 @@ export const ParishMap: React.FC<ParishMapProps> = ({
               appearance={appearance}
               color={palette.color}
               isSelected={isSelected}
+              isLassoSelected={isLassoSelected}
               onSelect={() => {
                 if (
                   interactionMode === 'draw_boundary' ||
-                  interactionMode === 'edit_boundary'
+                  interactionMode === 'edit_boundary' ||
+                  interactionMode === 'lasso_select'
                 ) {
                   return;
                 }

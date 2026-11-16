@@ -1,31 +1,48 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
-import { BoundaryDrawTool, LatLng } from '../types/parish';
-import { simplifyPolygonRDP } from '../utils/spatial';
+import { BoundaryDrawTool, LatLng, VisitStop } from '../types/parish';
+import {
+  computeRectanglePolygon,
+  extractStreetName,
+  isPointInsideBoundary,
+  simplifyPolygonRDP,
+} from '../utils/spatial';
 
 interface UseParishPolygonDrawerOptions {
   isDrawing: boolean;
   isEditingBoundary?: boolean;
+  isLassoSelecting?: boolean;
+  stopsForLasso?: VisitStop[];
+  selectedDate?: string | null;
+  focusedPriestId?: number | null;
+  focusedStreet?: string | null;
   drawTool: BoundaryDrawTool;
   canEditBoundary?: boolean;
   savedBoundary: LatLng[];
   onComplete: (polygon: LatLng[]) => void;
   onUpdateBoundary: (polygon: LatLng[]) => void;
+  onLassoSelectComplete?: (stopIds: string[]) => void;
   onCancel?: () => void;
 }
 
 /**
- * Interactive polygon drawing (Zakreśl lasso, Celownik crosshair, Punkty clicks)
- * and vertex-editing hook using native Maps JS events and AdvancedMarkerElement.
+ * Interactive polygon drawing (Zakreśl lasso, Ramka rect, Celownik crosshair, Punkty clicks),
+ * lasso multi-stop selection, and vertex-editing hook using native Maps JS events and AdvancedMarkerElement.
  */
 export function useParishPolygonDrawer({
   isDrawing,
   isEditingBoundary = false,
+  isLassoSelecting = false,
+  stopsForLasso = [],
+  selectedDate = null,
+  focusedPriestId = null,
+  focusedStreet = null,
   drawTool,
   canEditBoundary = true,
   savedBoundary,
   onComplete,
   onUpdateBoundary,
+  onLassoSelectComplete,
   onCancel,
 }: UseParishPolygonDrawerOptions) {
   const map = useMap();
@@ -33,6 +50,7 @@ export function useParishPolygonDrawer({
 
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
   const [lassoHint, setLassoHint] = useState<string | null>(null);
+  const [lassoLiveCount, setLassoLiveCount] = useState<number>(0);
   const draftPointsRef = useRef<LatLng[]>([]);
   const previewPolygonRef = useRef<google.maps.Polygon | null>(null);
   const rubberBandLineRef = useRef<google.maps.Polyline | null>(null);
@@ -46,6 +64,16 @@ export function useParishPolygonDrawer({
   onCompleteRef.current = onComplete;
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
+  const onLassoSelectCompleteRef = useRef(onLassoSelectComplete);
+  onLassoSelectCompleteRef.current = onLassoSelectComplete;
+  const stopsForLassoRef = useRef(stopsForLasso);
+  stopsForLassoRef.current = stopsForLasso;
+  const selectedDateRef = useRef(selectedDate);
+  selectedDateRef.current = selectedDate;
+  const focusedPriestIdRef = useRef(focusedPriestId);
+  focusedPriestIdRef.current = focusedPriestId;
+  const focusedStreetRef = useRef(focusedStreet);
+  focusedStreetRef.current = focusedStreet;
 
   const clearDraftOverlays = useCallback(() => {
     if (previewPolygonRef.current) {
@@ -242,9 +270,9 @@ export function useParishPolygonDrawer({
     onUpdateBoundary,
   ]);
 
-  // Drawing interaction listeners
+  // Drawing / Lasso selection interaction listeners
   useEffect(() => {
-    if (!map || !isDrawing) {
+    if (!map || (!isDrawing && !isLassoSelecting)) {
       if (map) {
         map.setOptions({
           draggable: true,
@@ -259,11 +287,18 @@ export function useParishPolygonDrawer({
       draftPointsRef.current = [];
       setDraftPoints([]);
       setLassoHint(null);
+      setLassoLiveCount(0);
       return;
     }
 
-    if (drawTool === 'lasso') {
+    const isFreehandLasso = isLassoSelecting || (isDrawing && drawTool === 'lasso');
+    const isRectMode = isDrawing && drawTool === 'rect';
+
+    if (isFreehandLasso || isRectMode) {
       const div = map.getDiv();
+      const strokeColor = isLassoSelecting ? '#4F46E5' : '#B45309';
+      const fillColor = isLassoSelecting ? '#6366F1' : '#F59E0B';
+
       map.setOptions({
         draggable: false,
         gestureHandling: 'none',
@@ -281,8 +316,33 @@ export function useParishPolygonDrawer({
       let lastX = 0;
       let lastY = 0;
       let rawPts: LatLng[] = [];
+      let rectStart: LatLng | null = null;
+      let rectEnd: LatLng | null = null;
       let liveLine: google.maps.Polyline | null = null;
       let livePoly: google.maps.Polygon | null = null;
+      let liveRect: google.maps.Rectangle | null = null;
+      let spaceHeld = false;
+      let multiTouchActive = false;
+
+      const matchStopsInside = (poly: LatLng[]): string[] => {
+        if (poly.length < 3) return [];
+        const curDate = selectedDateRef.current;
+        const curPriest = focusedPriestIdRef.current;
+        const curStreet = focusedStreetRef.current;
+        const ids: string[] = [];
+        for (const s of stopsForLassoRef.current) {
+          const isActive = curDate
+            ? (s.visitDate ?? '').trim() === curDate
+            : s.included !== false;
+          if (!isActive) continue;
+          if (curPriest !== null && s.priestId !== curPriest) continue;
+          if (curStreet && extractStreetName(s) !== curStreet) continue;
+          if (isPointInsideBoundary(s.location, poly)) {
+            ids.push(s.id);
+          }
+        }
+        return ids;
+      };
 
       const clientToLatLng = (clientX: number, clientY: number): LatLng | null => {
         if (!div) return null;
@@ -308,15 +368,75 @@ export function useParishPolygonDrawer({
         drawing = false;
         pointerId = null;
         rawPts = [];
+        rectStart = null;
+        rectEnd = null;
+        if (isLassoSelecting) setLassoLiveCount(0);
         liveLine?.setMap(null);
         liveLine = null;
         livePoly?.setMap(null);
         livePoly = null;
+        liveRect?.setMap(null);
+        liveRect = null;
+      };
+
+      const onKeyDown = (ev: KeyboardEvent) => {
+        if (ev.code !== 'Space') return;
+        const target = ev.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        ev.preventDefault();
+        if (!spaceHeld) {
+          spaceHeld = true;
+          map.setOptions({
+            draggable: true,
+            gestureHandling: 'greedy',
+            draggableCursor: 'grab',
+          });
+        }
+      };
+
+      const onKeyUp = (ev: KeyboardEvent) => {
+        if (ev.code !== 'Space') return;
+        spaceHeld = false;
+        if (!multiTouchActive) {
+          map.setOptions({
+            draggable: false,
+            gestureHandling: 'none',
+            draggableCursor: 'crosshair',
+          });
+        }
+      };
+
+      const onTouchStart = (ev: TouchEvent) => {
+        if (ev.touches.length >= 2) {
+          multiTouchActive = true;
+          cleanupStroke();
+          if (div) div.style.touchAction = 'auto';
+          map.setOptions({ draggable: true, gestureHandling: 'greedy' });
+        }
+      };
+
+      const onTouchEnd = (ev: TouchEvent) => {
+        if (ev.touches.length === 0 && multiTouchActive) {
+          multiTouchActive = false;
+          if (div) div.style.touchAction = 'none';
+          if (!spaceHeld) {
+            map.setOptions({ draggable: false, gestureHandling: 'none' });
+          }
+        }
       };
 
       const onDown = (ev: PointerEvent) => {
         const target = ev.target as HTMLElement | null;
         if (target?.closest('.no-print, button')) return;
+        if (spaceHeld || multiTouchActive) return;
         if (ev.button !== 0 && ev.pointerType === 'mouse') return;
         const pt = clientToLatLng(ev.clientX, ev.clientY);
         if (!pt) return;
@@ -326,24 +446,44 @@ export function useParishPolygonDrawer({
         pointerId = ev.pointerId;
         lastX = ev.clientX;
         lastY = ev.clientY;
-        rawPts = [pt];
 
-        livePoly = new google.maps.Polygon({
-          paths: [pt],
-          strokeWeight: 0,
-          fillColor: '#F59E0B',
-          fillOpacity: 0.16,
-          clickable: false,
-          map,
-        });
-        liveLine = new google.maps.Polyline({
-          path: [pt],
-          strokeColor: '#B45309',
-          strokeWeight: 3.5,
-          strokeOpacity: 0.95,
-          clickable: false,
-          map,
-        });
+        if (isRectMode) {
+          rectStart = pt;
+          rectEnd = pt;
+          liveRect = new google.maps.Rectangle({
+            bounds: {
+              south: pt.lat,
+              north: pt.lat,
+              west: pt.lng,
+              east: pt.lng,
+            },
+            strokeColor,
+            strokeWeight: 3,
+            strokeOpacity: 0.95,
+            fillColor,
+            fillOpacity: 0.16,
+            clickable: false,
+            map,
+          });
+        } else {
+          rawPts = [pt];
+          livePoly = new google.maps.Polygon({
+            paths: [pt],
+            strokeWeight: 0,
+            fillColor,
+            fillOpacity: 0.16,
+            clickable: false,
+            map,
+          });
+          liveLine = new google.maps.Polyline({
+            path: [pt],
+            strokeColor,
+            strokeWeight: 3.5,
+            strokeOpacity: 0.95,
+            clickable: false,
+            map,
+          });
+        }
         try {
           div.setPointerCapture(ev.pointerId);
         } catch {
@@ -352,7 +492,21 @@ export function useParishPolygonDrawer({
       };
 
       const onMove = (ev: PointerEvent) => {
-        if (!drawing || ev.pointerId !== pointerId) return;
+        if (!drawing || ev.pointerId !== pointerId || multiTouchActive) return;
+
+        if (isRectMode && rectStart) {
+          const pt = clientToLatLng(ev.clientX, ev.clientY);
+          if (!pt) return;
+          rectEnd = pt;
+          liveRect?.setBounds({
+            south: Math.min(rectStart.lat, pt.lat),
+            north: Math.max(rectStart.lat, pt.lat),
+            west: Math.min(rectStart.lng, pt.lng),
+            east: Math.max(rectStart.lng, pt.lng),
+          });
+          return;
+        }
+
         if (Math.hypot(ev.clientX - lastX, ev.clientY - lastY) < 6) return;
         lastX = ev.clientX;
         lastY = ev.clientY;
@@ -360,7 +514,12 @@ export function useParishPolygonDrawer({
         if (!pt) return;
         rawPts.push(pt);
         liveLine?.setPath(rawPts);
-        if (rawPts.length >= 3) livePoly?.setPath(rawPts);
+        if (rawPts.length >= 3) {
+          livePoly?.setPath(rawPts);
+          if (isLassoSelecting && rawPts.length % 3 === 0) {
+            setLassoLiveCount(matchStopsInside(rawPts).length);
+          }
+        }
       };
 
       const onUp = (ev: PointerEvent) => {
@@ -370,12 +529,47 @@ export function useParishPolygonDrawer({
         } catch {
           // Ignore
         }
+
+        if (isRectMode) {
+          const s = rectStart;
+          const e = rectEnd ?? clientToLatLng(ev.clientX, ev.clientY);
+          cleanupStroke();
+          if (!s || !e) return;
+          const spanLatM = Math.abs(e.lat - s.lat) * 111320;
+          const spanLngM =
+            Math.abs(e.lng - s.lng) *
+            111320 *
+            Math.max(0.2, Math.cos((s.lat * Math.PI) / 180));
+          if (spanLatM < 35 || spanLngM < 35) {
+            setLassoHint(
+              'Przeciągnij prostokąt od rogu do przeciwnego rogu (min. ~35 m).'
+            );
+            return;
+          }
+          finalizePolygon(computeRectanglePolygon(s, e));
+          return;
+        }
+
         const captured = [...rawPts];
         cleanupStroke();
 
+        if (isLassoSelecting) {
+          if (captured.length < 4) {
+            setLassoHint('Zakreśl pętlę wokół wybranych domów.');
+            return;
+          }
+          const matched = matchStopsInside(captured);
+          if (matched.length === 0) {
+            setLassoHint('W zakreślonej pętli nie było widocznych domów.');
+            return;
+          }
+          onLassoSelectCompleteRef.current?.(matched);
+          return;
+        }
+
         if (captured.length < 5) {
           setLassoHint(
-            'Przytrzymaj i zakreśl pętlę wokół parafii jednym ruchem (lub przełącz na Celownik).'
+            'Przytrzymaj i zakreśl pętlę wokół parafii jednym ruchem (lub przełącz na Ramkę / Celownik).'
           );
           return;
         }
@@ -398,6 +592,11 @@ export function useParishPolygonDrawer({
         }
       };
 
+      window.addEventListener('keydown', onKeyDown);
+      window.addEventListener('keyup', onKeyUp);
+      div?.addEventListener('touchstart', onTouchStart, { passive: true });
+      div?.addEventListener('touchend', onTouchEnd, { passive: true });
+      div?.addEventListener('touchcancel', onTouchEnd, { passive: true });
       div?.addEventListener('pointerdown', onDown);
       div?.addEventListener('pointermove', onMove);
       div?.addEventListener('pointerup', onUp);
@@ -406,6 +605,11 @@ export function useParishPolygonDrawer({
       return () => {
         cleanupStroke();
         projectionOverlay.setMap(null);
+        window.removeEventListener('keydown', onKeyDown);
+        window.removeEventListener('keyup', onKeyUp);
+        div?.removeEventListener('touchstart', onTouchStart);
+        div?.removeEventListener('touchend', onTouchEnd);
+        div?.removeEventListener('touchcancel', onTouchEnd);
         div?.removeEventListener('pointerdown', onDown);
         div?.removeEventListener('pointermove', onMove);
         div?.removeEventListener('pointerup', onUp);
@@ -517,11 +721,11 @@ export function useParishPolygonDrawer({
       google.maps.event.removeListener(dblClickListener);
       map.setOptions({ draggableCursor: null, disableDoubleClickZoom: false });
     };
-  }, [map, isDrawing, drawTool, appendVertex, clearDraftOverlays, finalizePolygon]);
+  }, [map, isDrawing, isLassoSelecting, drawTool, appendVertex, clearDraftOverlays, finalizePolygon]);
 
   // PC keyboard shortcuts
   useEffect(() => {
-    if (!isDrawing && !isEditingBoundary) return;
+    if (!isDrawing && !isEditingBoundary && !isLassoSelecting) return;
 
     const onKeyDown = (ev: KeyboardEvent) => {
       const target = ev.target as HTMLElement | null;
@@ -559,11 +763,12 @@ export function useParishPolygonDrawer({
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDrawing, isEditingBoundary, cancelDraft, undoLastVertex, finalizePolygon]);
+  }, [isDrawing, isEditingBoundary, isLassoSelecting, cancelDraft, undoLastVertex, finalizePolygon]);
 
   return {
     draftVertexCount: draftPoints.length,
     lassoHint,
+    lassoLiveCount,
     addCrosshairVertex,
     finishDraft: () => finalizePolygon(draftPointsRef.current),
     undoLastVertex,
