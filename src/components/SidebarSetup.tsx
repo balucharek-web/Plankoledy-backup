@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import {
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Church,
   Cloud,
   FileSpreadsheet,
@@ -38,6 +40,8 @@ import {
 } from '../types/parish';
 import {
   computePolygonAreaSqMeters,
+  extractHouseNumberLabel,
+  extractHouseNumberSortKey,
   extractStreetName,
   formatPolygonArea,
 } from '../utils/spatial';
@@ -72,6 +76,9 @@ interface SidebarSetupProps {
   onAddPlaceStop: (place: SelectedPlaceData) => void;
   onBatchAddStops: (places: SelectedPlaceData[]) => void;
   onDeleteStreetStops: (stopIds: string[]) => void;
+  onDeleteStop?: (stopId: string) => void;
+  onSelectStop?: (stopId: string) => void;
+  onFocusStreetOnMap?: (streetName: string) => void;
   onViewMap: () => void;
   onNextStep: () => void;
 }
@@ -110,6 +117,9 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onAddPlaceStop,
   onBatchAddStops,
   onDeleteStreetStops,
+  onDeleteStop,
+  onSelectStop,
+  onFocusStreetOnMap,
   onViewMap,
   onNextStep,
 }) => {
@@ -124,6 +134,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   const [localityQuery, setLocalityQuery] = useState('');
   const [localityLoading, setLocalityLoading] = useState(false);
   const [localityError, setLocalityError] = useState<string | null>(null);
+  const [expandedStreet, setExpandedStreet] = useState<string | null>(null);
 
   const isDrawing = interactionMode === 'draw_boundary';
   const isEditingBoundary = interactionMode === 'edit_boundary';
@@ -171,9 +182,28 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
       if (!groups[street]) groups[street] = [];
       groups[street].push(stop);
     }
-    return Object.entries(groups).sort((a, b) =>
-      a[0].localeCompare(b[0], 'pl')
-    );
+    return Object.entries(groups)
+      .map(
+        ([name, list]) =>
+          [
+            name,
+            [...list].sort((a, b) => {
+              const labelA =
+                extractHouseNumberLabel(a) || a.label || a.address;
+              const labelB =
+                extractHouseNumberLabel(b) || b.label || b.address;
+              return (
+                extractHouseNumberSortKey(labelA) -
+                  extractHouseNumberSortKey(labelB) ||
+                labelA.localeCompare(labelB, 'pl', {
+                  numeric: true,
+                  sensitivity: 'base',
+                })
+              );
+            }),
+          ] as [string, VisitStop[]]
+      )
+      .sort((a, b) => a[0].localeCompare(b[0], 'pl'));
   }, [stops]);
 
   const [lastGpsLocation, setLastGpsLocation] = useState<{
@@ -865,34 +895,119 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
             powyżej lub przełącz na zakładkę <strong>„Wybierz ulice”</strong>.
           </p>
         ) : (
-          <ul className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 max-h-52 overflow-y-auto">
-            {savedStreets.map(([streetName, streetStops]) => (
-              <li
-                key={streetName}
-                className="px-3 py-2 flex items-center justify-between gap-2"
-              >
-                <div className="min-w-0">
-                  <div className="text-xs font-medium text-slate-900 truncate">
-                    {streetName}
+          <ul className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 max-h-96 overflow-y-auto">
+            {savedStreets.map(([streetName, streetStops]) => {
+              const isExpanded = expandedStreet === streetName;
+              return (
+                <li key={streetName} className="bg-white">
+                  <div className="px-3 py-2 flex items-center justify-between gap-2 hover:bg-slate-50/70">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedStreet(isExpanded ? null : streetName)
+                      }
+                      className="flex-1 min-w-0 text-left flex items-center gap-2 min-h-[36px]"
+                    >
+                      {isExpanded ? (
+                        <ChevronDown className="w-4 h-4 text-amber-700 shrink-0" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-slate-900 truncate">
+                          {streetName}
+                        </div>
+                        <div className="text-[11px] text-slate-500 tabular-nums">
+                          {streetStops.length}{' '}
+                          {streetStops.length === 1 ? 'adres' : 'adresów'} ·{' '}
+                          <span className="text-amber-700 font-medium">
+                            {isExpanded ? 'zwiń' : 'zobacz domy'}
+                          </span>
+                        </div>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onDeleteStreetStops(streetStops.map((s) => s.id))
+                      }
+                      title={`Usuń ulicę ${streetName} z bazy parafii`}
+                      aria-label={`Usuń ulicę ${streetName}`}
+                      className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                  <div className="text-[11px] text-slate-500 tabular-nums">
-                    {streetStops.length}{' '}
-                    {streetStops.length === 1 ? 'adres' : 'adresów'}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onDeleteStreetStops(streetStops.map((s) => s.id))
-                  }
-                  title={`Usuń ulicę ${streetName} z bazy parafii`}
-                  aria-label={`Usuń ulicę ${streetName}`}
-                  className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg transition-colors shrink-0"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </li>
-            ))}
+
+                  {isExpanded && (
+                    <div className="px-3 pb-3 pt-2 bg-slate-50/90 border-t border-slate-100 space-y-2">
+                      {onFocusStreetOnMap && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] text-slate-500">
+                            Dotknij numer, aby wskazać dom na mapie:
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onFocusStreetOnMap(streetName)}
+                            className="px-2 py-1 text-[11px] font-medium text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg inline-flex items-center gap-1 shrink-0"
+                          >
+                            <MapIcon className="w-3 h-3" />
+                            <span>Na mapie</span>
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
+                        {streetStops.map((st) => {
+                          const numLabel =
+                            extractHouseNumberLabel(st) ||
+                            st.label ||
+                            st.address;
+                          const isBlock = Boolean(
+                            st.isMultiUnit || (st.units && st.units.length > 0)
+                          );
+                          return (
+                            <div
+                              key={st.id}
+                              className={`inline-flex items-center rounded-lg border text-[11px] font-mono tabular-nums ${
+                                st.inBoundary === false
+                                  ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                  : 'bg-white border-slate-200 text-slate-800'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => onSelectStop?.(st.id)}
+                                title={st.address || st.label}
+                                className="px-2 py-1 hover:bg-slate-100 rounded-l-lg inline-flex items-center gap-1"
+                              >
+                                <span className="font-semibold">{numLabel}</span>
+                                {isBlock && (
+                                  <span className="text-[9px] font-sans font-bold text-amber-800">
+                                    BLOK
+                                  </span>
+                                )}
+                              </button>
+                              {onDeleteStop && (
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteStop(st.id)}
+                                  aria-label={`Usuń ${st.address || numLabel}`}
+                                  title={`Usuń ${st.address || numLabel}`}
+                                  className="px-1.5 py-1 text-slate-400 hover:text-red-600 border-l border-slate-200/80 rounded-r-lg"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
 

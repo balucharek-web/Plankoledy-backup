@@ -176,6 +176,10 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
   const [singleStartDirection, setSingleStartDirection] =
     useState<StreetStartDirection>('asc');
   const [singleStartStopId, setSingleStartStopId] = useState<string>('');
+  const [previewCreatorStreet, setPreviewCreatorStreet] = useState<string | null>(
+    null
+  );
+  const [showCreatorMatchedList, setShowCreatorMatchedList] = useState(false);
 
   // House-by-house database editor state
   const [filterText, setFilterText] = useState('');
@@ -883,76 +887,140 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                       (d) => d !== singleDayDate
                     );
 
+                    const isPreviewOpen = previewCreatorStreet === st.streetName;
                     return (
-                      <button
-                        key={st.streetName}
-                        type="button"
-                        onClick={() => {
-                          setSingleSelectedStreets((prev) => {
-                            const base =
-                              prev.length === 0 &&
-                              effectiveSingleStreets.length === 1 &&
-                              st.streetName === effectiveSingleStreets[0]
-                                ? effectiveSingleStreets
-                                : prev;
-                            return base.includes(st.streetName)
-                              ? base.filter((x) => x !== st.streetName)
-                              : [...base, st.streetName];
-                          });
-                          setSingleStartStopId('');
-                        }}
-                        className={`w-full min-h-[48px] flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${
-                          checked
-                            ? 'bg-amber-50/80'
-                            : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
-                            checked
-                              ? 'bg-amber-700 border-amber-700 text-white'
-                              : 'bg-white border-slate-300'
+                      <div key={st.streetName} className="bg-white">
+                        <div
+                          className={`flex items-stretch ${
+                            checked ? 'bg-amber-50/80' : 'hover:bg-slate-50'
                           }`}
                         >
-                          {checked && <Check className="w-3.5 h-3.5" />}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-xs font-semibold text-slate-900 truncate">
-                            {st.streetName}
-                          </div>
-                          <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap tabular-nums">
-                            <span>
-                              {st.stops.length}{' '}
-                              {st.stops.length === 1 ? 'dom' : 'domów'}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSingleSelectedStreets((prev) => {
+                                const base =
+                                  prev.length === 0 &&
+                                  effectiveSingleStreets.length === 1 &&
+                                  st.streetName === effectiveSingleStreets[0]
+                                    ? effectiveSingleStreets
+                                    : prev;
+                                return base.includes(st.streetName)
+                                  ? base.filter((x) => x !== st.streetName)
+                                  : [...base, st.streetName];
+                              });
+                              setSingleStartStopId('');
+                            }}
+                            className="flex-1 min-w-0 min-h-[48px] flex items-center gap-2.5 px-3 py-2 text-left transition-colors"
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                                checked
+                                  ? 'bg-amber-700 border-amber-700 text-white'
+                                  : 'bg-white border-slate-300'
+                              }`}
+                            >
+                              {checked && <Check className="w-3.5 h-3.5" />}
                             </span>
-                            {st.blockCount > 0 && (
-                              <span className="text-amber-800">
-                                · {st.blockCount}{' '}
-                                {st.blockCount === 1 ? 'blok' : 'bloki'}
-                              </span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs font-semibold text-slate-900 truncate">
+                                {st.streetName}
+                              </div>
+                              <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap tabular-nums">
+                                <span>
+                                  {st.stops.length}{' '}
+                                  {st.stops.length === 1 ? 'dom' : 'domów'}
+                                </span>
+                                {st.blockCount > 0 && (
+                                  <span className="text-amber-800">
+                                    · {st.blockCount}{' '}
+                                    {st.blockCount === 1 ? 'blok' : 'bloki'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <span className="shrink-0">
+                              {assignedHere ? (
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-semibold whitespace-nowrap">
+                                  ten dzień
+                                </span>
+                              ) : otherDates.length > 0 ? (
+                                <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10px] font-medium whitespace-nowrap tabular-nums">
+                                  {formatPolishDateChip(otherDates[0])}
+                                  {otherDates.length > 1
+                                    ? ` +${otherDates.length - 1}`
+                                    : ''}
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-[10px] font-medium whitespace-nowrap">
+                                  wolna
+                                </span>
+                              )}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPreviewCreatorStreet(
+                                isPreviewOpen ? null : st.streetName
+                              )
+                            }
+                            aria-label={`Pokaż adresy na ulicy ${st.streetName}`}
+                            className={`px-2.5 border-l border-slate-100 text-[11px] font-medium inline-flex items-center gap-1 shrink-0 transition-colors ${
+                              isPreviewOpen
+                                ? 'bg-slate-900 text-white'
+                                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                            }`}
+                          >
+                            <span>Adresy</span>
+                            {isPreviewOpen ? (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronRight className="w-3.5 h-3.5" />
                             )}
-                          </div>
+                          </button>
                         </div>
-                        <span className="shrink-0">
-                          {assignedHere ? (
-                            <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-semibold whitespace-nowrap">
-                              ten dzień
-                            </span>
-                          ) : otherDates.length > 0 ? (
-                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10px] font-medium whitespace-nowrap tabular-nums">
-                              {formatPolishDateChip(otherDates[0])}
-                              {otherDates.length > 1
-                                ? ` +${otherDates.length - 1}`
-                                : ''}
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-[10px] font-medium whitespace-nowrap">
-                              wolna
-                            </span>
-                          )}
-                        </span>
-                      </button>
+
+                        {isPreviewOpen && (
+                          <div className="px-3 py-2.5 bg-slate-50 border-t border-slate-100 space-y-1.5">
+                            <div className="text-[11px] text-slate-500">
+                              Adresy na ulicy {st.streetName} (dotknij, aby pokazać na mapie):
+                            </div>
+                            <div className="flex flex-wrap gap-1 max-h-36 overflow-y-auto">
+                              {st.stops.map((house) => {
+                                const numLabel =
+                                  extractHouseNumberLabel(house) ||
+                                  house.label ||
+                                  house.address;
+                                const isBlk = Boolean(
+                                  house.isMultiUnit ||
+                                    (house.units && house.units.length > 0)
+                                );
+                                return (
+                                  <button
+                                    key={house.id}
+                                    type="button"
+                                    onClick={() => onSelectStop(house.id)}
+                                    title={house.address || house.label}
+                                    className="px-2 py-1 text-[11px] font-mono tabular-nums bg-white hover:bg-amber-50 border border-slate-200 hover:border-amber-400 rounded-md text-slate-800 inline-flex items-center gap-1"
+                                  >
+                                    <span className="font-semibold">
+                                      {numLabel}
+                                    </span>
+                                    {isBlk && (
+                                      <span className="text-[9px] font-sans font-bold text-amber-800">
+                                        BLOK
+                                      </span>
+                                    )}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     );
                   })
                 )}
@@ -1107,6 +1175,36 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                             ? 'dom ze stałą odmową z poprzedniego roku'
                             : 'domy/ów ze stałą odmową z poprzedniego roku'}{' '}
                           (możesz je przywrócić w zakładce „Domy i bloki”).
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setShowCreatorMatchedList((v) => !v)}
+                        className="text-[11px] font-semibold text-amber-800 hover:text-amber-950 inline-flex items-center gap-1 pt-0.5"
+                      >
+                        {showCreatorMatchedList ? (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {showCreatorMatchedList
+                            ? 'Ukryj wybrane adresy'
+                            : `Podejrzyj wybrane adresy (${singleMatchingStops.length})`}
+                        </span>
+                      </button>
+                      {showCreatorMatchedList && (
+                        <div className="pt-1.5 flex flex-wrap gap-1 max-h-36 overflow-y-auto">
+                          {singleMatchingStops.map((s) => (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => onSelectStop(s.id)}
+                              className="px-2 py-0.5 text-[11px] font-mono bg-white border border-slate-200 hover:border-amber-400 rounded-md text-slate-800"
+                            >
+                              {s.label || s.address}
+                            </button>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -1417,12 +1515,13 @@ export const SidebarStops: React.FC<SidebarStopsProps> = ({
                                 ? 'Zwiń listę domów'
                                 : 'Rozwiń listę domów'
                             }
-                            className="min-w-[34px] min-h-[34px] inline-flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 shrink-0"
+                            className="min-h-[34px] px-2.5 py-1 inline-flex items-center justify-center gap-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 text-xs font-medium shrink-0"
                           >
+                            <span>Domy ({allStops.length})</span>
                             {isExpanded ? (
-                              <ChevronDown className="w-4 h-4" />
+                              <ChevronDown className="w-3.5 h-3.5" />
                             ) : (
-                              <ChevronRight className="w-4 h-4" />
+                              <ChevronRight className="w-3.5 h-3.5" />
                             )}
                           </button>
                         </div>

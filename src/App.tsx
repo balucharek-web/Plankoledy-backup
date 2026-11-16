@@ -2650,6 +2650,16 @@ function ParishPlannerWorkspace({
                     onAddPlaceStop={handleAddPlaceStop}
                     onBatchAddStops={handleBatchAddStops}
                     onDeleteStreetStops={handleDeleteStreetStops}
+                    onDeleteStop={handleDeleteStop}
+                    onSelectStop={(id) => {
+                      setHighlightedStopId(id);
+                      setMobilePane('map');
+                    }}
+                    onFocusStreetOnMap={(streetName) => {
+                      setFocusedStreet(streetName);
+                      setInteractionMode('pan');
+                      setMobilePane('map');
+                    }}
                     onViewMap={() => setMobilePane('map')}
                     onNextStep={() => navigateToSection('stops')}
                   />
