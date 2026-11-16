@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
+  ArrowLeft,
   CalendarCheck,
   CalendarPlus,
   ChevronLeft,
@@ -15,7 +16,9 @@ import {
   LogIn,
   LogOut,
   Map as MapIcon,
+  MapPinPlus,
   Menu,
+  Pentagon,
   Route,
   SlidersHorizontal,
   Undo2,
@@ -2711,10 +2714,95 @@ function ParishPlannerWorkspace({
 
             {/* Right Interactive Map (completely hidden on mobile when viewing panel so nothing overlaps) */}
             <section
-              className={`flex-1 min-h-0 relative h-full w-full ${
-                mobilePane === 'map' ? 'block' : 'hidden lg:block'
+              className={`flex-1 min-h-0 h-full w-full flex-col ${
+                mobilePane === 'map' ? 'flex' : 'hidden lg:flex'
               }`}
             >
+              {/* Quick Exit (Mobile) & 1-Tap Map Actions Toolbar */}
+              {interactionMode === 'pan' && (
+                <div className="no-print shrink-0 bg-white border-b border-slate-200 px-2.5 sm:px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto">
+                  <button
+                    type="button"
+                    onClick={() => setMobilePane('panel')}
+                    className="lg:hidden min-h-[36px] px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Wróć:{' '}
+                      {activeSection === 'parish'
+                        ? 'Parafia'
+                        : activeSection === 'stops'
+                          ? 'Zaplanuj'
+                          : activeSection === 'routes'
+                            ? 'Trasy'
+                            : activeSection === 'settings'
+                              ? 'Ustawienia'
+                              : 'Start'}
+                    </span>
+                  </button>
+
+                  {!parish ? (
+                    <button
+                      type="button"
+                      onClick={() => navigateToSection('parish')}
+                      className="min-h-[36px] px-3 py-1.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                    >
+                      <Church className="w-3.5 h-3.5 shrink-0" />
+                      <span>Najpierw wybierz parafię</span>
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setInteractionMode(
+                            boundary.length >= 3
+                              ? 'edit_boundary'
+                              : 'draw_boundary'
+                          )
+                        }
+                        className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        <Pentagon className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>
+                          {boundary.length >= 3
+                            ? 'Popraw granice'
+                            : 'Narysuj teren'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setInteractionMode('pick_street')}
+                        className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        <Route className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>+ Ulica z mapy</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setInteractionMode('add_stop')}
+                        className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        <MapPinPlus className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>+ Dom</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => navigateToSection('parish')}
+                        className="lg:hidden min-h-[36px] px-2.5 py-1.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-medium inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        <Church className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>Parafia i ulice</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              <div className="flex-1 min-h-0 relative w-full">
               {useGoogleMaps ? (
                 <ParishMap
                   parish={parish}
@@ -2725,7 +2813,7 @@ function ParishPlannerWorkspace({
                   isExactRoute={isExactRoute}
                   selectedDate={selectedDate}
                   focusedPriestId={focusedPriestId}
-                  canEditBoundary={activeSection === 'parish'}
+                  canEditBoundary={Boolean(parish)}
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
                   focusedStreet={focusedStreet}
@@ -2758,7 +2846,7 @@ function ParishPlannerWorkspace({
                   isExactRoute={isExactRoute}
                   selectedDate={selectedDate}
                   focusedPriestId={focusedPriestId}
-                  canEditBoundary={activeSection === 'parish'}
+                  canEditBoundary={Boolean(parish)}
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
                   focusedStreet={focusedStreet}
@@ -3055,6 +3143,7 @@ function ParishPlannerWorkspace({
                   </div>
                 )}
               </div>
+              </div>
             </section>
           </main>
           <div className="print-offscreen print-reset bg-white w-full">
@@ -3129,7 +3218,7 @@ function ParishPlannerWorkspace({
           type="button"
           onClick={() => {
             if (activeSection === 'schedule') setActiveSection('overview');
-            setMobilePane('map');
+            setMobilePane((p) => (p === 'map' ? 'panel' : 'map'));
           }}
           className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
             mobilePane === 'map'
@@ -3138,7 +3227,7 @@ function ParishPlannerWorkspace({
           }`}
         >
           <MapIcon className="w-5 h-5" />
-          <span>Mapa</span>
+          <span>{mobilePane === 'map' ? 'Wróć' : 'Mapa'}</span>
         </button>
 
         <button

@@ -1057,28 +1057,6 @@ export const ParishMap: React.FC<ParishMapProps> = ({
       </GoogleMap>
 
       {parish &&
-        interactionMode === 'pan' &&
-        canEditBoundary &&
-        boundary.length >= 3 &&
-        onEnterEditBoundary && (
-          <div className="no-print absolute bottom-[76px] sm:bottom-5 left-3 z-20">
-            <button
-              type="button"
-              onClick={onEnterEditBoundary}
-              className="min-h-[40px] px-3 py-2 bg-white/95 backdrop-blur-md border border-slate-200 hover:bg-slate-50 rounded-xl shadow-lg text-xs font-semibold text-slate-800 inline-flex items-center gap-2 transition-colors whitespace-nowrap"
-            >
-              <Pencil className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-              <span>Popraw granice</span>
-              {boundaryAreaLabel && (
-                <span className="text-slate-400 font-normal tabular-nums">
-                  · {boundaryAreaLabel}
-                </span>
-              )}
-            </button>
-          </div>
-        )}
-
-      {parish &&
         interactionMode === 'draw_boundary' &&
         drawTool === 'crosshair' && (
           <div
