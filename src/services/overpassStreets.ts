@@ -486,10 +486,235 @@ async function runOverpassQuery(
   throw lastError ?? new Error('Nie udało się pobrać danych adresowych.');
 }
 
-function groupGugikPointsByStreet(
-  records: Array<{ item: GugikAddressItem; location: LatLng }>,
-  filterInside?: (pt: LatLng) => boolean
-): OsmStreetGroup[] {
+type GugikRecord = {
+  item: GugikAddressItem;
+  location: LatLng;
+  distanceMeters: number;
+};
+
+function rectIntersectsBoundary(
+  rect: { south: number; west: number; north: number; east: number },
+  boundary: LatLng[]
+): boolean {
+  if (boundary.length < 3) return true;
+  // 1. Any boundary vertex inside rect
+  for (const p of boundary) {
+    if (
+      p.lat >= rect.south &&
+      p.lat <= rect.north &&
+      p.lng >= rect.west &&
+      p.lng <= rect.east
+    ) {
+      return true;
+    }
+  }
+  // 2. Any rect corner or center inside boundary
+  const probes: LatLng[] = [
+    { lat: rect.south, lng: rect.west },
+    { lat: rect.south, lng: rect.east },
+    { lat: rect.north, lng: rect.west },
+    { lat: rect.north, lng: rect.east },
+    { lat: (rect.south + rect.north) / 2, lng: (rect.west + rect.east) / 2 },
+  ];
+  for (const pr of probes) {
+    if (isPointInsideBoundary(pr, boundary)) return true;
+  }
+  // 3. Fallback bounding-box overlap check against polygon bbox
+  let minLat = 90;
+  let maxLat = -90;
+  let minLng = 180;
+  let maxLng = -180;
+  for (const p of boundary) {
+    if (p.lat < minLat) minLat = p.lat;
+    if (p.lat > maxLat) maxLat = p.lat;
+    if (p.lng < minLng) minLng = p.lng;
+    if (p.lng > maxLng) maxLng = p.lng;
+  }
+  return !(
+    rect.east < minLng ||
+    rect.west > maxLng ||
+    rect.north < minLat ||
+    rect.south > maxLat
+  );
+}
+
+/**
+ * Fetches ALL GUGiK PRG addresses in the area without 1000-record truncation.
+ * If a polygon/radius query hits GUGiK's ~1000 limit (>= 850) or fails on a large polygon,
+ * recursively subdivides the bounding box into smaller rectangular tiles queried in parallel.
+ */
+async function fetchGugikAddressesInArea(params: {
+  boundary: LatLng[];
+  center: LatLng;
+  radiusMeters: number;
+}): Promise<GugikRecord[]> {
+  const { boundary, center, radiusMeters } = params;
+  const hasBoundary = boundary.length >= 3;
+
+  const bbox = computeBoundingBox(boundary, center, radiusMeters);
+  const initialRecords = hasBoundary
+    ? await queryGugikReversePolygon(boundary, 1000, 6500)
+    : await queryGugikReversePoint(
+        center,
+        Math.min(Math.max(radiusMeters, 250), 1500),
+        1000,
+        6500
+      );
+
+  // If well under GUGiK's 1000 limit and non-empty, we already have 100% of PRG addresses
+  if (initialRecords.length > 0 && initialRecords.length < 850) {
+    return initialRecords;
+  }
+
+  // Otherwise subdivide into tiles so no street/house beyond #1000 gets truncated
+  const deduped = new Map<string, GugikRecord>();
+  const addRecords = (recs: GugikRecord[]) => {
+    for (const r of recs) {
+      const idKey = r.item.id != null ? `id_${r.item.id}` : '';
+      const addrKey = `${(r.item.street ?? r.item.city ?? '').trim().toLowerCase()}|${(r.item.number ?? '').trim().toLowerCase()}|${r.location.lat.toFixed(5)},${r.location.lng.toFixed(5)}`;
+      const key = idKey || addrKey;
+      if (!deduped.has(key)) deduped.set(key, r);
+    }
+  };
+  addRecords(initialRecords);
+
+  const latSpan = bbox.north - bbox.south;
+  const lngSpan = bbox.east - bbox.west;
+  const initialGrid =
+    latSpan > 0.018 || lngSpan > 0.025 ? 3 : 2;
+
+  interface Cell {
+    south: number;
+    west: number;
+    north: number;
+    east: number;
+    depth: number;
+  }
+
+  const queue: Cell[] = [];
+  for (let r = 0; r < initialGrid; r++) {
+    for (let c = 0; c < initialGrid; c++) {
+      const south = bbox.south + (r * latSpan) / initialGrid;
+      const north = bbox.south + ((r + 1) * latSpan) / initialGrid;
+      const west = bbox.west + (c * lngSpan) / initialGrid;
+      const east = bbox.west + ((c + 1) * lngSpan) / initialGrid;
+      const cell: Cell = { south, west, north, east, depth: 1 };
+      if (!hasBoundary || rectIntersectsBoundary(cell, boundary)) {
+        queue.push(cell);
+      }
+    }
+  }
+
+  const MAX_REQUESTS = 28;
+  let requestsSent = 0;
+  const CONCURRENCY = 4;
+
+  while (queue.length > 0 && requestsSent < MAX_REQUESTS) {
+    const batch = queue.splice(
+      0,
+      Math.min(CONCURRENCY, MAX_REQUESTS - requestsSent)
+    );
+    requestsSent += batch.length;
+
+    const results = await Promise.all(
+      batch.map(async (cell) => {
+        const ring: LatLng[] = [
+          { lat: cell.south, lng: cell.west },
+          { lat: cell.south, lng: cell.east },
+          { lat: cell.north, lng: cell.east },
+          { lat: cell.north, lng: cell.west },
+        ];
+        const recs = await queryGugikReversePolygon(ring, 1000, 6000);
+        return { cell, recs };
+      })
+    );
+
+    for (const { cell, recs } of results) {
+      addRecords(recs);
+      const cellLatSpan = cell.north - cell.south;
+      const cellLngSpan = cell.east - cell.west;
+      if (
+        recs.length >= 850 &&
+        cell.depth < 3 &&
+        (cellLatSpan > 0.0014 || cellLngSpan > 0.0018)
+      ) {
+        const midLat = (cell.south + cell.north) / 2;
+        const midLng = (cell.west + cell.east) / 2;
+        const subCells: Cell[] = [
+          { south: cell.south, west: cell.west, north: midLat, east: midLng, depth: cell.depth + 1 },
+          { south: cell.south, west: midLng, north: midLat, east: cell.east, depth: cell.depth + 1 },
+          { south: midLat, west: cell.west, north: cell.north, east: midLng, depth: cell.depth + 1 },
+          { south: midLat, west: midLng, north: cell.north, east: cell.east, depth: cell.depth + 1 },
+        ];
+        for (const sc of subCells) {
+          if (!hasBoundary || rectIntersectsBoundary(sc, boundary)) {
+            queue.push(sc);
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
+/**
+ * Fetches named streets & addressed houses within a parish boundary or radius.
+ * Runs complete adaptive PRG (GUGiK UUG without 1000-limit truncation) AND
+ * OpenStreetMap Overpass in parallel, merging streets, missing houses, rural addr:place,
+ * and multi-unit apartment block metadata.
+ */
+export async function fetchParishStreetsFromOsm(params: {
+  boundary: LatLng[];
+  center: LatLng;
+  radiusMeters: number;
+}): Promise<OsmStreetGroup[]> {
+  const { boundary, center, radiusMeters } = params;
+  const hasBoundary = boundary.length >= 3;
+
+  const isInsideArea = (pt: LatLng): boolean => {
+    if (hasBoundary) {
+      return isPointInsideBoundary(pt, boundary);
+    }
+    return haversineMeters(center, pt) <= radiusMeters;
+  };
+
+  const { south, west, north, east } = computeBoundingBox(
+    boundary,
+    center,
+    radiusMeters
+  );
+  const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(
+    5
+  )},${east.toFixed(5)})`;
+
+  const overpassQuery = `
+[out:json][timeout:18];
+(
+  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${bbox};
+  nwr["addr:housenumber"]${bbox};
+);
+out center tags qt;
+`.trim();
+
+  const [gugikRes, overpassRes] = await Promise.allSettled([
+    fetchGugikAddressesInArea({ boundary, center, radiusMeters }),
+    runOverpassQuery(overpassQuery, 18000),
+  ]);
+
+  const gugikRecords = gugikRes.status === 'fulfilled' ? gugikRes.value : [];
+  const osmElements = overpassRes.status === 'fulfilled' ? overpassRes.value : [];
+
+  if (
+    gugikRecords.length === 0 &&
+    osmElements.length === 0 &&
+    overpassRes.status === 'rejected'
+  ) {
+    throw overpassRes.reason instanceof Error
+      ? overpassRes.reason
+      : new Error('Nie udało się wykryć ulic i adresów dla tego obszaru.');
+  }
+
   const streetMap: Record<
     string,
     {
@@ -501,8 +726,24 @@ function groupGugikPointsByStreet(
     }
   > = {};
 
-  for (const rec of records) {
-    if (filterInside && !filterInside(rec.location)) continue;
+  const ensureStreet = (label: string) => {
+    const clean = label.trim();
+    const key = normalizeStreetCore(clean) || clean.toLowerCase();
+    if (!streetMap[key]) {
+      streetMap[key] = {
+        streetName: clean,
+        sumLat: 0,
+        sumLng: 0,
+        pointCount: 0,
+        housesByNumber: {},
+      };
+    }
+    return { key, group: streetMap[key] };
+  };
+
+  // 1. Official PRG records (full tiled grid)
+  for (const rec of gugikRecords) {
+    if (!isInsideArea(rec.location)) continue;
 
     const rawStreet = (rec.item.street ?? '').trim();
     const rawCity = (rec.item.city ?? '').trim();
@@ -510,18 +751,7 @@ function groupGugikPointsByStreet(
     const streetLabel = rawStreet || rawCity;
     if (!streetLabel || !rawNum) continue;
 
-    const key = normalizeStreetCore(streetLabel) || streetLabel.toLowerCase();
-    if (!streetMap[key]) {
-      streetMap[key] = {
-        streetName: streetLabel,
-        sumLat: 0,
-        sumLng: 0,
-        pointCount: 0,
-        housesByNumber: {},
-      };
-    }
-
-    const group = streetMap[key];
+    const { key, group } = ensureStreet(streetLabel);
     const houseKey = rawNum.toLowerCase();
     if (!group.housesByNumber[houseKey]) {
       const postcode = (rec.item.code ?? '').trim() || undefined;
@@ -549,126 +779,8 @@ function groupGugikPointsByStreet(
     }
   }
 
-  return Object.values(streetMap)
-    .filter((g) => g.pointCount > 0)
-    .map((g) => ({
-      streetName: g.streetName,
-      center: {
-        lat: g.sumLat / g.pointCount,
-        lng: g.sumLng / g.pointCount,
-      },
-      houses: Object.values(g.housesByNumber).sort((a, b) =>
-        naturalHouseCompare(a.houseNumber, b.houseNumber)
-      ),
-    }))
-    .sort((a, b) => a.streetName.localeCompare(b.streetName, 'pl'));
-}
-
-/**
- * Fetches named streets & addressed houses within a parish boundary or radius.
- * Primary: official Polish PRG register via GUGiK UUG (~150 ms, zero rate limits).
- * Fallback: OpenStreetMap Overpass API.
- */
-export async function fetchParishStreetsFromOsm(params: {
-  boundary: LatLng[];
-  center: LatLng;
-  radiusMeters: number;
-}): Promise<OsmStreetGroup[]> {
-  const { boundary, center, radiusMeters } = params;
-  const hasBoundary = boundary.length >= 3;
-
-  const isInsideArea = (pt: LatLng): boolean => {
-    if (hasBoundary) {
-      return isPointInsideBoundary(pt, boundary);
-    }
-    return haversineMeters(center, pt) <= radiusMeters;
-  };
-
-  // 1. Official Polish PRG addresses (GUGiK UUG)
-  let gugikRecords: Array<{
-    item: GugikAddressItem;
-    location: LatLng;
-    distanceMeters: number;
-  }> = [];
-
-  if (hasBoundary) {
-    const polyResults = await queryGugikReversePolygon(boundary, 1000, 6500);
-    gugikRecords = polyResults;
-
-    // If polygon area was too large for GUGiK single polygon call, sample centroid + corners
-    if (polyResults.length === 0) {
-      const centroid = boundary.reduce(
-        (acc, p) => ({
-          lat: acc.lat + p.lat / boundary.length,
-          lng: acc.lng + p.lng / boundary.length,
-        }),
-        { lat: 0, lng: 0 }
-      );
-      gugikRecords = await queryGugikReversePoint(centroid, 1200, 1000, 6000);
-    }
-  } else {
-    gugikRecords = await queryGugikReversePoint(
-      center,
-      Math.min(Math.max(radiusMeters, 250), 1500),
-      1000,
-      6000
-    );
-  }
-
-  if (gugikRecords.length > 0) {
-    const grouped = groupGugikPointsByStreet(gugikRecords, isInsideArea);
-    if (grouped.length > 0) {
-      return grouped;
-    }
-  }
-
-  // 2. Fallback: Overpass API (e.g. outside Poland or missing PRG coverage)
-  const { south, west, north, east } = computeBoundingBox(
-    boundary,
-    center,
-    radiusMeters
-  );
-  const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(
-    5
-  )},${east.toFixed(5)})`;
-
-  const query = `
-[out:json][timeout:14];
-(
-  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${bbox};
-  nwr["addr:street"]["addr:housenumber"]${bbox};
-);
-out center tags qt;
-`.trim();
-
-  const elements = await runOverpassQuery(query, 15000);
-
-  const streetMap: Record<
-    string,
-    {
-      streetName: string;
-      sumLat: number;
-      sumLng: number;
-      pointCount: number;
-      housesByNumber: Record<string, OsmHousePoint>;
-    }
-  > = {};
-
-  const ensureStreet = (name: string) => {
-    const key = name.trim().toLowerCase();
-    if (!streetMap[key]) {
-      streetMap[key] = {
-        streetName: name.trim(),
-        sumLat: 0,
-        sumLng: 0,
-        pointCount: 0,
-        housesByNumber: {},
-      };
-    }
-    return streetMap[key];
-  };
-
-  for (const el of elements) {
+  // 2. Supplement & enrich from OpenStreetMap Overpass
+  for (const el of osmElements) {
     const lat = el.lat ?? el.center?.lat;
     const lng = el.lon ?? el.center?.lon;
     if (typeof lat !== 'number' || typeof lng !== 'number') continue;
@@ -679,52 +791,57 @@ out center tags qt;
     const tags = el.tags ?? {};
 
     if (tags.highway && tags.name) {
-      const group = ensureStreet(tags.name);
+      const { group } = ensureStreet(tags.name);
       group.sumLat += lat;
       group.sumLng += lng;
       group.pointCount += 1;
     }
 
-    const addrStreet = tags['addr:street'];
-    const addrNum = tags['addr:housenumber'];
+    const addrStreet = (
+      tags['addr:street'] ||
+      tags['addr:place'] ||
+      ''
+    ).trim();
+    const addrNum = (tags['addr:housenumber'] || '').trim();
     if (addrStreet && addrNum) {
-      const group = ensureStreet(addrStreet);
+      const { group } = ensureStreet(addrStreet);
       if (group.pointCount === 0) {
         group.sumLat += lat;
         group.sumLng += lng;
         group.pointCount += 1;
       }
-      const normNum = addrNum.trim();
-      const houseKey = normNum.toLowerCase();
-      if (!group.housesByNumber[houseKey]) {
+
+      const flatsRaw = Number.parseInt(
+        tags['building:flats'] || tags['addr:flats'] || '',
+        10
+      );
+      const isApartments =
+        tags.building === 'apartments' ||
+        tags.building === 'dormitory' ||
+        (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+      const suggestedUnitsCount =
+        !Number.isNaN(flatsRaw) && flatsRaw > 1
+          ? Math.min(500, flatsRaw)
+          : isApartments
+            ? 15
+            : undefined;
+
+      const houseKey = addrNum.toLowerCase();
+      const existing = group.housesByNumber[houseKey];
+      if (!existing) {
         const postcode = tags['addr:postcode'];
         const city = tags['addr:city'];
         const { label, fullAddress } = formatPolishHouseAddress(
           group.streetName,
-          normNum,
+          addrNum,
           postcode,
           city
         );
 
-        const flatsRaw = Number.parseInt(
-          tags['building:flats'] || tags['addr:flats'] || '',
-          10
-        );
-        const isApartments =
-          tags.building === 'apartments' ||
-          tags.building === 'dormitory' ||
-          (!Number.isNaN(flatsRaw) && flatsRaw > 1);
-        const suggestedUnitsCount =
-          !Number.isNaN(flatsRaw) && flatsRaw > 1
-            ? Math.min(500, flatsRaw)
-            : isApartments
-              ? 15
-              : undefined;
-
         group.housesByNumber[houseKey] = {
           id: `${el.type}-${el.id}`,
           street: group.streetName,
-          houseNumber: normNum,
+          houseNumber: addrNum,
           postcode,
           city,
           label,
@@ -732,18 +849,24 @@ out center tags qt;
           location: pt,
           ...(isApartments ? { isMultiUnit: true, suggestedUnitsCount } : {}),
         };
+      } else if (isApartments && !existing.isMultiUnit) {
+        existing.isMultiUnit = true;
+        existing.suggestedUnitsCount = suggestedUnitsCount;
       }
     }
   }
 
   return Object.values(streetMap)
-    .filter((g) => g.pointCount > 0)
+    .filter((g) => g.pointCount > 0 || Object.keys(g.housesByNumber).length > 0)
     .map((g) => ({
       streetName: g.streetName,
-      center: {
-        lat: g.sumLat / g.pointCount,
-        lng: g.sumLng / g.pointCount,
-      },
+      center:
+        g.pointCount > 0
+          ? {
+              lat: g.sumLat / g.pointCount,
+              lng: g.sumLng / g.pointCount,
+            }
+          : Object.values(g.housesByNumber)[0].location,
       houses: Object.values(g.housesByNumber).sort((a, b) =>
         naturalHouseCompare(a.houseNumber, b.houseNumber)
       ),
@@ -905,117 +1028,25 @@ export async function fetchStreetHousesAtLocation(params: {
   const { streetName, fallbackCity, fallbackPostcode, isRuralVillage } = detected;
   const hasBoundary = boundary.length >= 3;
 
-  // 1. Fetch official Polish PRG addresses from GUGiK UUG around click & inside boundary in parallel
-  const [pointNearClick, polyPoints] = await Promise.all([
-    queryGugikReversePoint(location, 950, 1000, 6000),
-    hasBoundary ? queryGugikReversePolygon(boundary, 1000, 6000) : Promise.resolve([]),
-  ]);
-
-  const combinedGugik = [...polyPoints, ...pointNearClick];
-
-  if (combinedGugik.length > 0) {
-    const byNumber: Record<string, OsmHousePoint> = {};
-
-    for (const rec of combinedGugik) {
-      const rawNum = (rec.item.number ?? '').trim();
-      if (!rawNum) continue;
-
-      const recStreet = (rec.item.street ?? '').trim();
-      const recCity = (rec.item.city ?? '').trim();
-
-      let matches = false;
-      if (isRuralVillage) {
-        matches =
-          !recStreet &&
-          recCity.length > 0 &&
-          stripPolishDiacritics(recCity) === stripPolishDiacritics(streetName);
-      } else if (recStreet) {
-        matches = streetNamesMatch(recStreet, streetName);
-      }
-
-      if (!matches) continue;
-
-      const houseKey = rawNum.toLowerCase();
-      if (byNumber[houseKey]) continue;
-
-      const canonicalStreet = recStreet || streetName;
-      const postcode = (rec.item.code ?? '').trim() || fallbackPostcode;
-      const city = recCity || fallbackCity;
-      const { label, fullAddress } = formatPolishHouseAddress(
-        canonicalStreet,
-        rawNum,
-        postcode,
-        city
-      );
-
-      byNumber[houseKey] = {
-        id: `prg_${houseKey}_${rec.location.lat.toFixed(5)}_${rec.location.lng.toFixed(5)}`,
-        street: canonicalStreet,
-        houseNumber: rawNum,
-        postcode,
-        city,
-        label,
-        fullAddress,
-        location: rec.location,
-      };
-    }
-
-    const allHouses = Object.values(byNumber).sort((a, b) =>
-      naturalHouseCompare(a.houseNumber, b.houseNumber)
-    );
-
-    if (allHouses.length > 0) {
-      if (hasBoundary) {
-        const insideOnly = allHouses.filter((h) =>
-          isPointInsideBoundary(h.location, boundary)
-        );
-        if (insideOnly.length > 0) {
-          return {
-            streetName: allHouses[0].street || streetName,
-            streetCenter: {
-              lat:
-                insideOnly.reduce((acc, h) => acc + h.location.lat, 0) /
-                insideOnly.length,
-              lng:
-                insideOnly.reduce((acc, h) => acc + h.location.lng, 0) /
-                insideOnly.length,
-            },
-            houses: insideOnly,
-            filteredByBoundary: true,
-          };
-        }
-      }
-
-      return {
-        streetName: allHouses[0].street || streetName,
-        streetCenter: {
-          lat:
-            allHouses.reduce((acc, h) => acc + h.location.lat, 0) /
-            allHouses.length,
-          lng:
-            allHouses.reduce((acc, h) => acc + h.location.lng, 0) /
-            allHouses.length,
-        },
-        houses: allHouses,
-        filteredByBoundary: false,
-      };
-    }
-  }
-
-  // 2. Fallback to Overpass API ONLY if GUGiK had zero objects (e.g. abroad) or zero matches
-  if (combinedGugik.length === 0) {
-    const { south, west, north, east } = computeBoundingBox(
-      boundary,
-      parishCenter ?? location,
-      1400,
-      location
-    );
-    const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(
-      5
-    )},${east.toFixed(5)})`;
-    const streetRegex = buildPolishStreetRegex(streetName);
-
-    const query = `
+  const { south, west, north, east } = computeBoundingBox(
+    boundary,
+    parishCenter ?? location,
+    1600,
+    location
+  );
+  const bbox = `(${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(
+    5
+  )},${east.toFixed(5)})`;
+  const streetRegex = buildPolishStreetRegex(streetName);
+  const overpassQuery = isRuralVillage
+    ? `
+[out:json][timeout:10];
+(
+  nwr["addr:place"~"${streetRegex}",i]["addr:housenumber"]${bbox};
+);
+out center tags qt;
+`.trim()
+    : `
 [out:json][timeout:10];
 (
   nwr["addr:street"~"${streetRegex}",i]["addr:housenumber"]${bbox};
@@ -1023,26 +1054,99 @@ export async function fetchStreetHousesAtLocation(params: {
 out center tags qt;
 `.trim();
 
-    const elements = await runOverpassQuery(query, 11000);
+  // Fetch PRG (around click + wider radius) & targeted Overpass street query in parallel
+  const [pointNearClickRes, pointWideRes, overpassRes] = await Promise.allSettled([
+    queryGugikReversePoint(location, 1500, 1000, 6000),
+    parishCenter
+      ? queryGugikReversePoint(parishCenter, 1500, 1000, 6000)
+      : Promise.resolve([]),
+    runOverpassQuery(overpassQuery, 11000),
+  ]);
 
-    const byNumber: Record<string, OsmHousePoint> = {};
-    let sumLat = 0;
-    let sumLng = 0;
-    let count = 0;
+  const combinedGugik = [
+    ...(pointNearClickRes.status === 'fulfilled' ? pointNearClickRes.value : []),
+    ...(pointWideRes.status === 'fulfilled' ? pointWideRes.value : []),
+  ];
+  const osmElements =
+    overpassRes.status === 'fulfilled' ? overpassRes.value : [];
 
-    for (const el of elements) {
-      const lat = el.lat ?? el.center?.lat;
-      const lng = el.lon ?? el.center?.lon;
-      if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+  const byNumber: Record<string, OsmHousePoint> = {};
 
-      const tags = el.tags ?? {};
-      const addrNum = tags['addr:housenumber']?.trim();
-      if (!addrNum) continue;
+  for (const rec of combinedGugik) {
+    const rawNum = (rec.item.number ?? '').trim();
+    if (!rawNum) continue;
 
-      const canonicalStreet = tags['addr:street']?.trim() || streetName;
-      const key = addrNum.toLowerCase();
-      if (byNumber[key]) continue;
+    const recStreet = (rec.item.street ?? '').trim();
+    const recCity = (rec.item.city ?? '').trim();
 
+    let matches = false;
+    if (isRuralVillage) {
+      matches =
+        !recStreet &&
+        recCity.length > 0 &&
+        stripPolishDiacritics(recCity) === stripPolishDiacritics(streetName);
+    } else if (recStreet) {
+      matches = streetNamesMatch(recStreet, streetName);
+    }
+
+    if (!matches) continue;
+
+    const houseKey = rawNum.toLowerCase();
+    if (byNumber[houseKey]) continue;
+
+    const canonicalStreet = recStreet || streetName;
+    const postcode = (rec.item.code ?? '').trim() || fallbackPostcode;
+    const city = recCity || fallbackCity;
+    const { label, fullAddress } = formatPolishHouseAddress(
+      canonicalStreet,
+      rawNum,
+      postcode,
+      city
+    );
+
+    byNumber[houseKey] = {
+      id: `prg_${houseKey}_${rec.location.lat.toFixed(5)}_${rec.location.lng.toFixed(5)}`,
+      street: canonicalStreet,
+      houseNumber: rawNum,
+      postcode,
+      city,
+      label,
+      fullAddress,
+      location: rec.location,
+    };
+  }
+
+  for (const el of osmElements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+
+    const tags = el.tags ?? {};
+    const addrNum = tags['addr:housenumber']?.trim();
+    if (!addrNum) continue;
+
+    const flatsRaw = Number.parseInt(
+      tags['building:flats'] || tags['addr:flats'] || '',
+      10
+    );
+    const isApartments =
+      tags.building === 'apartments' ||
+      tags.building === 'dormitory' ||
+      (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+    const suggestedUnitsCount =
+      !Number.isNaN(flatsRaw) && flatsRaw > 1
+        ? Math.min(500, flatsRaw)
+        : isApartments
+          ? 15
+          : undefined;
+
+    const key = addrNum.toLowerCase();
+    const existing = byNumber[key];
+    if (!existing) {
+      const canonicalStreet =
+        tags['addr:street']?.trim() ||
+        tags['addr:place']?.trim() ||
+        streetName;
       const postcode = tags['addr:postcode'] || fallbackPostcode;
       const city = tags['addr:city'] || fallbackCity;
       const { label, fullAddress } = formatPolishHouseAddress(
@@ -1051,21 +1155,6 @@ out center tags qt;
         postcode,
         city
       );
-
-      const flatsRaw = Number.parseInt(
-        tags['building:flats'] || tags['addr:flats'] || '',
-        10
-      );
-      const isApartments =
-        tags.building === 'apartments' ||
-        tags.building === 'dormitory' ||
-        (!Number.isNaN(flatsRaw) && flatsRaw > 1);
-      const suggestedUnitsCount =
-        !Number.isNaN(flatsRaw) && flatsRaw > 1
-          ? Math.min(500, flatsRaw)
-          : isApartments
-            ? 15
-            : undefined;
 
       byNumber[key] = {
         id: `${el.type}-${el.id}`,
@@ -1078,23 +1167,24 @@ out center tags qt;
         location: { lat, lng },
         ...(isApartments ? { isMultiUnit: true, suggestedUnitsCount } : {}),
       };
-
-      sumLat += lat;
-      sumLng += lng;
-      count += 1;
+    } else if (isApartments && !existing.isMultiUnit) {
+      existing.isMultiUnit = true;
+      existing.suggestedUnitsCount = suggestedUnitsCount;
     }
+  }
 
-    const allHouses = Object.values(byNumber).sort((a, b) =>
-      naturalHouseCompare(a.houseNumber, b.houseNumber)
-    );
+  const allHouses = Object.values(byNumber).sort((a, b) =>
+    naturalHouseCompare(a.houseNumber, b.houseNumber)
+  );
 
-    if (hasBoundary && allHouses.length > 0) {
+  if (allHouses.length > 0) {
+    if (hasBoundary) {
       const insideOnly = allHouses.filter((h) =>
         isPointInsideBoundary(h.location, boundary)
       );
       if (insideOnly.length > 0) {
         return {
-          streetName,
+          streetName: insideOnly[0].street || streetName,
           streetCenter: {
             lat:
               insideOnly.reduce((acc, h) => acc + h.location.lat, 0) /
@@ -1110,9 +1200,15 @@ out center tags qt;
     }
 
     return {
-      streetName,
-      streetCenter:
-        count > 0 ? { lat: sumLat / count, lng: sumLng / count } : location,
+      streetName: allHouses[0].street || streetName,
+      streetCenter: {
+        lat:
+          allHouses.reduce((acc, h) => acc + h.location.lat, 0) /
+          allHouses.length,
+        lng:
+          allHouses.reduce((acc, h) => acc + h.location.lng, 0) /
+          allHouses.length,
+      },
       houses: allHouses,
       filteredByBoundary: false,
     };

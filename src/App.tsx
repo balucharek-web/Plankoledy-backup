@@ -799,62 +799,94 @@ function ParishPlannerWorkspace({
   const handleBatchAddStops = useCallback(
     (places: SelectedPlaceData[]) => {
       const currentId = activeParishIdRef.current;
-      let addedStops: VisitStop[] = [];
-      let repartitionedStops: VisitStop[] = [];
+      const existingStops = stopsRef.current;
+      const baseTs = Date.now();
+      const perUnit = Math.min(12, Math.max(5, config.defaultVisitMinutes || 10));
+      const seenKeys = new Set(
+        existingStops.map(
+          (s) => `${s.label.trim().toLowerCase()}|${s.address.trim().toLowerCase()}`
+        )
+      );
+      const uniquePlaces: SelectedPlaceData[] = [];
 
-      setStops((prev) => {
-        const baseTs = Date.now();
-        const perUnit = Math.min(12, Math.max(5, config.defaultVisitMinutes || 10));
-        addedStops = places.map((place, idx) => {
-          const isBlock = Boolean(place.isMultiUnit);
-          const unitsCount = isBlock ? Math.max(1, place.unitsCount ?? 15) : 0;
-          const durationMinutes = isBlock
-            ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * perUnit))
-            : config.defaultVisitMinutes;
-
-          return {
-            id: sanitizeDocId(
-              `s_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 6)}`
-            ),
-            label: place.name,
-            address: place.address,
-            location: place.location,
-            placeId: place.placeId,
-            durationMinutes,
-            priestId: ((prev.length + idx) % config.priestCount) + 1,
-            inBoundary: isPointInsideBoundary(place.location, boundary),
-            ...(place.notes ? { notes: place.notes } : {}),
-            ...(isBlock
-              ? {
-                  isMultiUnit: true,
-                  unitsCount,
-                  minutesPerUnit: perUnit,
-                  units: [],
-                }
-              : {}),
-          };
-        });
-        const combined = [...prev, ...addedStops];
-        if (parish && config.priestCount > 1) {
-          repartitionedStops = partitionStopsBySector(
-            parish.location,
-            combined,
-            config.priestCount
-          );
-          return repartitionedStops;
-        }
-        return combined;
-      });
-      clearRoutes();
-
-      if (authUser && currentId && addedStops.length > 0) {
-        const toSave =
-          repartitionedStops.length > 0 ? repartitionedStops : addedStops;
-        const newlyAddedIds = new Set(addedStops.map((s) => s.id));
-        const newOnly = toSave.filter((s) => newlyAddedIds.has(s.id));
-        const existingToReassign = toSave.filter(
-          (s) => !newlyAddedIds.has(s.id)
+      for (const place of places) {
+        const fullKey = `${place.name.trim().toLowerCase()}|${place.address.trim().toLowerCase()}`;
+        if (seenKeys.has(fullKey)) continue;
+        const nearDuplicate = existingStops.some(
+          (s) =>
+            s.label.trim().toLowerCase() === place.name.trim().toLowerCase() &&
+            Math.abs(s.location.lat - place.location.lat) < 0.00025 &&
+            Math.abs(s.location.lng - place.location.lng) < 0.00035
         );
+        if (nearDuplicate) continue;
+        seenKeys.add(fullKey);
+        uniquePlaces.push(place);
+      }
+
+      if (uniquePlaces.length === 0) {
+        showStreetFeedback(
+          {
+            status: 'info',
+            message: 'Wszystkie zaznaczone domy znajdują się już na liście tej parafii.',
+          },
+          4500
+        );
+        return;
+      }
+
+      const addedStops: VisitStop[] = uniquePlaces.map((place, idx) => {
+        const isBlock = Boolean(place.isMultiUnit);
+        const unitsCount = isBlock ? Math.max(1, place.unitsCount ?? 15) : 0;
+        const durationMinutes = isBlock
+          ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * perUnit))
+          : config.defaultVisitMinutes;
+
+        return {
+          id: sanitizeDocId(
+            `s_${baseTs}_${idx}_${Math.random().toString(36).slice(2, 6)}`
+          ),
+          label: place.name,
+          address: place.address,
+          location: place.location,
+          placeId: place.placeId,
+          durationMinutes,
+          priestId: ((existingStops.length + idx) % config.priestCount) + 1,
+          inBoundary: isPointInsideBoundary(place.location, boundary),
+          ...(place.notes ? { notes: place.notes } : {}),
+          ...(isBlock
+            ? {
+                isMultiUnit: true,
+                unitsCount,
+                minutesPerUnit: perUnit,
+                units: [],
+              }
+            : {}),
+        };
+      });
+
+      const combined = [...existingStops, ...addedStops];
+      const nextStops =
+        parish && config.priestCount > 1
+          ? partitionStopsBySector(parish.location, combined, config.priestCount)
+          : combined;
+
+      setStops(nextStops);
+      clearRoutes();
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Dodano ${addedStops.length} nowych punktów do bazy parafii.`,
+        },
+        4500
+      );
+
+      if (authUser && currentId) {
+        const newlyAddedIds = new Set(addedStops.map((s) => s.id));
+        const newOnly = nextStops.filter((s) => newlyAddedIds.has(s.id));
+        const existingToReassign =
+          parish && config.priestCount > 1
+            ? nextStops.filter((s) => !newlyAddedIds.has(s.id))
+            : [];
         void createStopsBatchInFirestore(authUser.uid, currentId, newOnly)
           .then(() => {
             if (existingToReassign.length > 0) {
@@ -875,6 +907,7 @@ function ParishPlannerWorkspace({
       boundary,
       parish,
       clearRoutes,
+      showStreetFeedback,
     ]
   );
 

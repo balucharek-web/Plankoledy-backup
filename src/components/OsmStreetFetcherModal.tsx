@@ -102,6 +102,12 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
     return streets.filter((s) => s.streetName.toLowerCase().includes(q));
   }, [streets, filterText]);
 
+  const totalDetectedHouses = useMemo(
+    () =>
+      (streets ?? []).reduce((sum, s) => sum + s.houses.length, 0),
+    [streets]
+  );
+
   const totalSelectedCount = useMemo(() => {
     const streetCount = Object.values(selectedStreetNames).filter(Boolean).length;
     const houseCount = Object.keys(selectedHouses).length;
@@ -173,6 +179,15 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
       for (const street of filteredStreets) {
         for (const h of street.houses) {
           next[h.id] = h;
+        }
+      }
+      return next;
+    });
+    setSelectedStreetNames((prev) => {
+      const next = { ...prev };
+      for (const street of filteredStreets) {
+        if (street.houses.length === 0) {
+          next[street.streetName] = true;
         }
       }
       return next;
@@ -321,6 +336,14 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
 
           {streets && streets.length > 0 && (
             <>
+              <div className="text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  Wykryto <strong className="text-slate-900">{streets.length}</strong> ulic i{' '}
+                  <strong className="text-slate-900">{totalDetectedHouses}</strong> adresów
+                  (PRG + OpenStreetMap)
+                </span>
+              </div>
+
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="relative flex-1 min-w-[180px]">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
