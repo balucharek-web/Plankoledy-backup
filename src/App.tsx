@@ -917,10 +917,17 @@ function ParishPlannerWorkspace({
 
       const addedStops: VisitStop[] = uniquePlaces.map((place, idx) => {
         const isBlock = Boolean(place.isMultiUnit);
-        const unitsCount = isBlock ? Math.max(1, place.unitsCount ?? 15) : 0;
-        const durationMinutes = isBlock
-          ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * perUnit))
-          : config.defaultVisitMinutes;
+        const unitsList = Array.isArray(place.units) ? place.units : [];
+        const unitsCount = isBlock
+          ? Math.max(1, place.unitsCount ?? (unitsList.length > 0 ? unitsList.length : 15))
+          : 0;
+        const unitPerMin = place.minutesPerUnit ?? perUnit;
+        const durationMinutes =
+          typeof place.durationMinutes === 'number'
+            ? Math.min(1440, Math.max(1, place.durationMinutes))
+            : isBlock
+              ? Math.min(1440, Math.max(config.defaultVisitMinutes, unitsCount * unitPerMin))
+              : config.defaultVisitMinutes;
 
         return {
           id: sanitizeDocId(
@@ -934,12 +941,16 @@ function ParishPlannerWorkspace({
           priestId: ((existingStops.length + idx) % config.priestCount) + 1,
           inBoundary: isPointInsideBoundary(place.location, boundary),
           ...(place.notes ? { notes: place.notes } : {}),
+          ...(place.permanentDecline !== undefined
+            ? { permanentDecline: place.permanentDecline }
+            : {}),
+          ...(place.lastYearStatus ? { lastYearStatus: place.lastYearStatus } : {}),
           ...(isBlock
             ? {
                 isMultiUnit: true,
                 unitsCount,
-                minutesPerUnit: perUnit,
-                units: [],
+                minutesPerUnit: unitPerMin,
+                units: unitsList,
               }
             : {}),
         };
@@ -990,6 +1001,43 @@ function ParishPlannerWorkspace({
       clearRoutes,
       showStreetFeedback,
     ]
+  );
+
+  const handleEnrichStopsFromKartoteka = useCallback(
+    (patches: Array<{ id: string; patch: Partial<VisitStop> }>) => {
+      if (patches.length === 0) return;
+      const currentId = activeParishIdRef.current;
+      const patchMap = new Map(patches.map((p) => [p.id, p.patch]));
+      const updatedStops: VisitStop[] = [];
+
+      setStops((prev) =>
+        prev.map((s) => {
+          const patch = patchMap.get(s.id);
+          if (!patch) return s;
+          const next = { ...s, ...patch };
+          updatedStops.push(next);
+          return next;
+        })
+      );
+      clearRoutes();
+
+      if (authUser && currentId && updatedStops.length > 0) {
+        void batchUpdateStopFieldInFirestore(
+          currentId,
+          updatedStops,
+          'kartoteka_enrich'
+        ).catch(() => {});
+      }
+
+      showStreetFeedback(
+        {
+          status: 'success',
+          message: `Uzupełniono dane z kartoteki dla ${patches.length} budynków na mapie (bez nazwisk).`,
+        },
+        5000
+      );
+    },
+    [authUser, clearRoutes, showStreetFeedback]
   );
 
   const handleMapAddStop = useCallback(
@@ -2823,6 +2871,8 @@ function ParishPlannerWorkspace({
                     }}
                     onAddPlaceStop={handleAddPlaceStop}
                     onBatchAddStops={handleBatchAddStops}
+                    onEnrichExistingStops={handleEnrichStopsFromKartoteka}
+                    defaultVisitMinutes={config.defaultVisitMinutes}
                     onDeleteStreetStops={handleDeleteStreetStops}
                     onDeleteStop={handleDeleteStop}
                     onSelectStop={(id) => {

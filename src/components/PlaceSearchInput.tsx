@@ -7,7 +7,7 @@ import {
   searchParishesOsm,
   searchPlacesNominatim,
 } from '../services/osmSearchAndRouting';
-import { LatLng } from '../types/parish';
+import { BuildingUnit, LatLng, UnitVisitStatus } from '../types/parish';
 import { notifyIfQuotaExceeded } from '../utils/quota';
 
 export interface SelectedPlaceData {
@@ -18,7 +18,12 @@ export interface SelectedPlaceData {
   placeType?: 'parish' | 'place' | 'address';
   isMultiUnit?: boolean;
   unitsCount?: number;
+  minutesPerUnit?: number;
+  durationMinutes?: number;
+  units?: BuildingUnit[];
   notes?: string;
+  permanentDecline?: boolean;
+  lastYearStatus?: UnitVisitStatus;
 }
 
 interface PlaceSearchInputProps {

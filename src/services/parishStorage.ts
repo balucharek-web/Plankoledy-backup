@@ -642,6 +642,7 @@ export async function batchUpdateStopFieldInFirestore(
     | 'manualOrder'
     | 'manualOrder_schedule'
     | 'season_rollover'
+    | 'kartoteka_enrich'
 ): Promise<void> {
   if (stops.length === 0) return;
   const safeParishId = sanitizeDocId(parishId);
@@ -714,6 +715,38 @@ export async function batchUpdateStopFieldInFirestore(
             units: sanitizeUnitsList(stop.units),
             updatedAt: serverTimestamp(),
           });
+        } else if (mode === 'kartoteka_enrich') {
+          const units = sanitizeUnitsList(stop.units);
+          const isMultiUnit = Boolean(stop.isMultiUnit || units.length > 0);
+          const unitsCount = isMultiUnit
+            ? clampInt(
+                units.length > 0
+                  ? Math.max(units.length, stop.unitsCount ?? 0)
+                  : stop.unitsCount,
+                0,
+                500,
+                units.length
+              )
+            : 0;
+          const enrichPayload: Record<string, unknown> = {
+            durationMinutes: clampInt(stop.durationMinutes, 1, 1440, 15),
+            notes: cleanStr(stop.notes || '', 500),
+            isMultiUnit,
+            unitsCount,
+            minutesPerUnit: clampInt(stop.minutesPerUnit, 1, 60, 10),
+            units,
+            updatedAt: serverTimestamp(),
+          };
+          if (typeof stop.permanentDecline === 'boolean') {
+            enrichPayload.permanentDecline = stop.permanentDecline;
+          }
+          if (
+            stop.lastYearStatus &&
+            VALID_UNIT_STATUSES.has(stop.lastYearStatus)
+          ) {
+            enrichPayload.lastYearStatus = stop.lastYearStatus;
+          }
+          batch.update(ref, enrichPayload);
         } else {
           batch.update(ref, {
             inBoundary: stop.inBoundary ?? true,

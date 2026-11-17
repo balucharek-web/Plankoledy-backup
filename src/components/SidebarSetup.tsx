@@ -84,6 +84,10 @@ interface SidebarSetupProps {
   onToggleMapAddMode: () => void;
   onAddPlaceStop: (place: SelectedPlaceData) => void;
   onBatchAddStops: (places: SelectedPlaceData[]) => void;
+  onEnrichExistingStops?: (
+    patches: Array<{ id: string; patch: Partial<VisitStop> }>
+  ) => void;
+  defaultVisitMinutes?: number;
   onDeleteStreetStops: (stopIds: string[]) => void;
   onDeleteOutsideBoundaryStops?: () => void;
   onDeleteStop?: (stopId: string) => void;
@@ -127,6 +131,8 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onToggleMapAddMode,
   onAddPlaceStop,
   onBatchAddStops,
+  onEnrichExistingStops,
+  defaultVisitMinutes,
   onDeleteStreetStops,
   onDeleteOutsideBoundaryStops,
   onDeleteStop,
@@ -891,7 +897,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                   className="w-full min-h-[38px] py-1.5 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                  <span>Importuj adresy z pliku Excel / CSV</span>
+                  <span>Importuj z kartoteki (FARA / Excel / CSV)</span>
                 </button>
               </div>
             </div>
@@ -1111,8 +1117,10 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
             open={csvImportOpen}
             parish={parish}
             existingStops={stops}
+            defaultVisitMinutes={defaultVisitMinutes}
             onClose={() => setCsvImportOpen(false)}
             onImportPlaces={onBatchAddStops}
+            onEnrichExistingStops={onEnrichExistingStops}
           />
         </Suspense>
       )}

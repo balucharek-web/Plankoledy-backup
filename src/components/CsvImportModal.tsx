@@ -1,86 +1,38 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
   CheckCircle2,
   Download,
   FileSpreadsheet,
   Loader2,
+  ShieldCheck,
+  Sparkles,
   Upload,
+  Users,
   X,
 } from 'lucide-react';
 import { searchPlacesNominatim } from '../services/osmSearchAndRouting';
-import { ParishCenter, VisitStop } from '../types/parish';
+import { LatLng, ParishCenter, VisitStop } from '../types/parish';
+import {
+  KartotekaRowGranularity,
+  buildEnrichedStopPatch,
+  buildingToSelectedPlace,
+  matchKartotekaToExistingStops,
+  parseAndAggregateKartotekaCsv,
+} from '../utils/kartotekaImport';
 import { SelectedPlaceData } from './PlaceSearchInput';
 
 interface CsvImportModalProps {
   open: boolean;
   parish: ParishCenter | null;
   existingStops: VisitStop[];
+  defaultVisitMinutes?: number;
   onClose: () => void;
   onImportPlaces: (places: SelectedPlaceData[]) => void;
-}
-
-interface ParsedCsvRow {
-  rowIndex: number;
-  street: string;
-  houseNumber: string;
-  city: string;
-  notes: string;
-  isBlock: boolean;
-  unitsCount?: number;
-  lat?: number;
-  lng?: number;
-  rawLine: string;
-}
-
-function detectDelimiter(lines: string[]): string {
-  const sample = lines.slice(0, 5).join('\n');
-  const counts = [
-    { char: ';', count: (sample.match(/;/g) ?? []).length },
-    { char: ',', count: (sample.match(/,/g) ?? []).length },
-    { char: '\t', count: (sample.match(/\t/g) ?? []).length },
-  ].sort((a, b) => b.count - a.count);
-  return counts[0].count > 0 ? counts[0].char : ';';
-}
-
-function splitCsvLine(line: string, delimiter: string): string[] {
-  const result: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === delimiter && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += ch;
-    }
-  }
-  result.push(current.trim());
-  return result;
-}
-
-function normalizeHeaderToken(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/^\ufeff/, '')
-    .replace(/ą/g, 'a')
-    .replace(/ć/g, 'c')
-    .replace(/ę/g, 'e')
-    .replace(/ł/g, 'l')
-    .replace(/ń/g, 'n')
-    .replace(/ó/g, 'o')
-    .replace(/ś/g, 's')
-    .replace(/[źż]/g, 'z')
-    .replace(/[^a-z0-9]/g, '');
+  onEnrichExistingStops?: (
+    patches: Array<{ id: string; patch: Partial<VisitStop> }>
+  ) => void;
 }
 
 function extractCityFromParishAddress(address?: string): string {
@@ -90,141 +42,43 @@ function extractCityFromParishAddress(address?: string): string {
   return cityPart.replace(/\b\d{2}-\d{3}\b/g, '').trim();
 }
 
-function parseBooleanishBlock(val: string): { isBlock: boolean; units?: number } {
-  const v = val.trim().toLowerCase();
-  if (!v) return { isBlock: false };
-  const asNum = Number.parseInt(v, 10);
-  if (!Number.isNaN(asNum) && asNum > 1) {
-    return { isBlock: true, units: Math.min(500, asNum) };
-  }
-  if (['tak', 't', 'yes', 'y', '1', 'true', 'blok', 'wielorodzinny'].includes(v)) {
-    return { isBlock: true, units: 15 };
-  }
-  return { isBlock: false };
-}
-
-function parseCsvText(rawText: string, defaultCity: string): ParsedCsvRow[] {
-  const lines = rawText
-    .replace(/^\ufeff/, '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith('#'));
-
-  if (lines.length === 0) return [];
-
-  const delimiter = detectDelimiter(lines);
-  const firstCols = splitCsvLine(lines[0], delimiter).map(normalizeHeaderToken);
-
-  const findCol = (aliases: string[]): number =>
-    firstCols.findIndex((c) => aliases.some((a) => c === a || c.includes(a)));
-
-  const streetIdx = findCol(['ulica', 'street', 'adres', 'address', 'droga']);
-  const numberIdx = findCol(['numer', 'nrdomu', 'nr', 'housenumber', 'dom']);
-  const cityIdx = findCol(['miasto', 'miejscowosc', 'city', 'town']);
-  const notesIdx = findCol(['uwagi', 'rodzina', 'notes', 'notatka', 'nazwisko', 'opis']);
-  const blockIdx = findCol(['blok', 'block', 'lokale', 'mieszkania', 'multiunit']);
-  const latIdx = findCol(['lat', 'szerokosc']);
-  const lngIdx = findCol(['lng', 'lon', 'dlugosc']);
-
-  const hasHeader =
-    streetIdx >= 0 ||
-    numberIdx >= 0 ||
-    cityIdx >= 0 ||
-    notesIdx >= 0 ||
-    blockIdx >= 0;
-
-  const startRow = hasHeader ? 1 : 0;
-  const rows: ParsedCsvRow[] = [];
-
-  for (let r = startRow; r < lines.length; r++) {
-    const cols = splitCsvLine(lines[r], delimiter);
-    if (cols.every((c) => !c)) continue;
-
-    let street = '';
-    let houseNumber = '';
-    let city = defaultCity;
-    let notes = '';
-    let isBlock = false;
-    let unitsCount: number | undefined;
-    let lat: number | undefined;
-    let lng: number | undefined;
-
-    if (hasHeader) {
-      street = streetIdx >= 0 ? cols[streetIdx] ?? '' : cols[0] ?? '';
-      houseNumber = numberIdx >= 0 ? cols[numberIdx] ?? '' : '';
-      const rowCity = cityIdx >= 0 ? (cols[cityIdx] ?? '').trim() : '';
-      if (rowCity) city = rowCity;
-      notes = notesIdx >= 0 ? cols[notesIdx] ?? '' : '';
-      if (blockIdx >= 0) {
-        const b = parseBooleanishBlock(cols[blockIdx] ?? '');
-        isBlock = b.isBlock;
-        unitsCount = b.units;
-      }
-      if (latIdx >= 0 && lngIdx >= 0) {
-        const parsedLat = Number.parseFloat((cols[latIdx] ?? '').replace(',', '.'));
-        const parsedLng = Number.parseFloat((cols[lngIdx] ?? '').replace(',', '.'));
-        if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
-          lat = parsedLat;
-          lng = parsedLng;
-        }
-      }
-    } else if (cols.length === 1) {
-      street = cols[0];
-    } else {
-      street = cols[0] ?? '';
-      houseNumber = cols[1] ?? '';
-      if (cols[2]) city = cols[2];
-      if (cols[3]) notes = cols[3];
-      if (cols[4]) {
-        const b = parseBooleanishBlock(cols[4]);
-        isBlock = b.isBlock;
-        unitsCount = b.units;
-      }
-    }
-
-    street = street.trim();
-    houseNumber = houseNumber.trim();
-    if (!street && !houseNumber) continue;
-
-    rows.push({
-      rowIndex: r + 1,
-      street,
-      houseNumber,
-      city: city.trim(),
-      notes: notes.trim(),
-      isBlock,
-      unitsCount,
-      lat,
-      lng,
-      rawLine: lines[r],
-    });
-  }
-
-  return rows;
-}
-
-function normalizeAddrKey(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/\b(ul\.?|ulica|al\.?|aleja)\b/g, ' ')
-    .replace(/[,.;]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function haversineMeters(a: LatLng, b: LatLng): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const c =
+    sinLat * sinLat +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * sinLng * sinLng;
+  return 2 * R * Math.atan2(Math.sqrt(c), Math.sqrt(1 - c));
 }
 
 export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   open,
   parish,
   existingStops,
+  defaultVisitMinutes = 15,
   onClose,
   onImportPlaces,
+  onEnrichExistingStops,
 }) => {
   const [rawText, setRawText] = useState('');
+  const [granularity, setGranularity] =
+    useState<KartotekaRowGranularity>('auto');
+  const [splitSlashUnits, setSplitSlashUnits] = useState(true);
+  const [markMultiFamilyAsMultiUnit, setMarkMultiFamilyAsMultiUnit] =
+    useState(true);
+  const [privacyStripNotes, setPrivacyStripNotes] = useState(true);
+  const [alsoGeocodeMissing, setAlsoGeocodeMissing] = useState(true);
+
   const [isImporting, setIsImporting] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [summary, setSummary] = useState<{
+    enriched: number;
     added: number;
-    duplicates: number;
+    mapOnlyCount: number;
     failedLines: string[];
   } | null>(null);
   const cancelRef = useRef(false);
@@ -235,9 +89,30 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     [parish?.address]
   );
 
-  const parsedRows = useMemo(
-    () => parseCsvText(rawText, defaultCity),
-    [rawText, defaultCity]
+  const parsed = useMemo(
+    () =>
+      parseAndAggregateKartotekaCsv(rawText, {
+        defaultCity,
+        granularity,
+        splitSlashUnits,
+        privacyStripNotes,
+        markMultiFamilyAsMultiUnit,
+        defaultVisitMinutes,
+      }),
+    [
+      rawText,
+      defaultCity,
+      granularity,
+      splitSlashUnits,
+      privacyStripNotes,
+      markMultiFamilyAsMultiUnit,
+      defaultVisitMinutes,
+    ]
+  );
+
+  const mapMatch = useMemo(
+    () => matchKartotekaToExistingStops(parsed.buildings, existingStops),
+    [parsed.buildings, existingStops]
   );
 
   useEffect(() => {
@@ -273,10 +148,13 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   const handleDownloadTemplate = () => {
     const city = defaultCity || 'Mikołów';
     const sample = [
-      'ulica;numer;miejscowosc;uwagi;blok',
-      `Skalna;1;${city};Rodzina Kowalskich;nie`,
-      `Skalna;3A;${city};po godz. 17:00;nie`,
-      `Zielona;12;${city};Klatka A i B;24`,
+      'ulica;nr_domu;nr_lokalu;miejscowosc;liczba_osob',
+      `Skalna;1;;${city};4`,
+      `Skalna;3A;;${city};3`,
+      `Skalna;3A;;${city};2`,
+      `Zielona;12;1;${city};2`,
+      `Zielona;12;2;${city};5`,
+      `Zielona;12;4;${city};1`,
     ].join('\r\n');
     const blob = new Blob([`\uFEFF${sample}`], {
       type: 'text/csv;charset=utf-8;',
@@ -284,7 +162,7 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'szablon-adresy-koleda.csv';
+    link.download = 'szablon-kartoteka-fara-bez-nazwisk.csv';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -292,87 +170,72 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
   };
 
   const handleRunImport = async () => {
-    if (!parish || parsedRows.length === 0 || isImporting) return;
+    if (!parish || parsed.buildings.length === 0 || isImporting) return;
     cancelRef.current = false;
     setIsImporting(true);
     setSummary(null);
 
-    const existingKeys = new Set(
-      existingStops.flatMap((s) => [
-        normalizeAddrKey(s.address),
-        normalizeAddrKey(s.label),
-      ])
-    );
+    let enrichedCount = 0;
 
-    const rowsToProcess = parsedRows.slice(0, 250);
-    setProgress({ done: 0, total: rowsToProcess.length });
+    // 1. Instant local enrichment of buildings already present on map (no 250 limit, no geocoding delay)
+    if (mapMatch.matched.length > 0 && onEnrichExistingStops) {
+      const patches = mapMatch.matched.map(({ building, stop }) => ({
+        id: stop.id,
+        patch: buildEnrichedStopPatch(stop, building),
+      }));
+      onEnrichExistingStops(patches);
+      enrichedCount = patches.length;
+    }
+
+    // 2. Geocode & add missing buildings (if enabled)
+    const missingToProcess = alsoGeocodeMissing
+      ? mapMatch.unmatched.slice(0, 350)
+      : [];
+    setProgress({ done: 0, total: missingToProcess.length });
 
     const resolvedPlaces: SelectedPlaceData[] = [];
     const failedLines: string[] = [];
-    let duplicates = 0;
 
-    for (let i = 0; i < rowsToProcess.length; i++) {
+    for (let i = 0; i < missingToProcess.length; i++) {
       if (cancelRef.current) break;
-      const row = rowsToProcess[i];
-      const baseLabel = [row.street, row.houseNumber]
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-      const normalizedKey = normalizeAddrKey(baseLabel);
-      const normalizedWithCity = normalizeAddrKey(
-        [baseLabel, row.city].filter(Boolean).join(' ')
-      );
+      const b = missingToProcess[i];
+      const baseLabel = [b.street, b.buildingNumber].filter(Boolean).join(' ').trim();
 
-      if (
-        existingKeys.has(normalizedKey) ||
-        existingKeys.has(normalizedWithCity)
-      ) {
-        duplicates += 1;
-        setProgress({ done: i + 1, total: rowsToProcess.length });
+      if (typeof b.lat === 'number' && typeof b.lng === 'number') {
+        resolvedPlaces.push(
+          buildingToSelectedPlace(b, { lat: b.lat, lng: b.lng }, `csv_${Date.now()}_${i}`)
+        );
+        setProgress({ done: i + 1, total: missingToProcess.length });
         continue;
       }
 
-      if (typeof row.lat === 'number' && typeof row.lng === 'number') {
-        existingKeys.add(normalizedKey);
-        resolvedPlaces.push({
-          name: baseLabel,
-          address: row.city ? `${baseLabel}, ${row.city}` : baseLabel,
-          location: { lat: row.lat, lng: row.lng },
-          placeId: `csv_${Date.now()}_${i}`,
-          isMultiUnit: row.isBlock,
-          unitsCount: row.unitsCount,
-          notes: row.notes || undefined,
-        });
-        setProgress({ done: i + 1, total: rowsToProcess.length });
-        continue;
-      }
-
-      const queryStr = [baseLabel, row.city].filter(Boolean).join(', ');
+      const queryStr = [baseLabel, b.city].filter(Boolean).join(', ');
       let hits = await searchPlacesNominatim(queryStr, parish.location, 3);
-      if (hits.length === 0 && row.city) {
+      if (hits.length === 0 && b.city) {
         hits = await searchPlacesNominatim(baseLabel, parish.location, 3);
       }
 
-      const best = hits[0];
-      if (best) {
-        existingKeys.add(normalizedKey);
-        resolvedPlaces.push({
-          name: baseLabel || best.name,
-          address: row.city ? `${baseLabel}, ${row.city}` : best.address,
-          location: best.location,
-          placeId: best.placeId,
-          isMultiUnit: row.isBlock,
-          unitsCount: row.unitsCount,
-          notes: row.notes || undefined,
-        });
+      // Guard against geocoder returning an identically-named street in a distant city
+      const nearbyHit = hits.find(
+        (h) => haversineMeters(parish.location, h.location) <= 25000
+      );
+      if (nearbyHit) {
+        resolvedPlaces.push(
+          buildingToSelectedPlace(
+            b,
+            nearbyHit.location,
+            nearbyHit.placeId,
+            nearbyHit.address
+          )
+        );
       } else {
-        failedLines.push(baseLabel || row.rawLine);
+        failedLines.push(baseLabel || `${b.street} ${b.buildingNumber}`);
       }
 
-      setProgress({ done: i + 1, total: rowsToProcess.length });
+      setProgress({ done: i + 1, total: missingToProcess.length });
 
-      if (i + 1 < rowsToProcess.length && !cancelRef.current) {
-        await new Promise((r) => window.setTimeout(r, 260));
+      if (i + 1 < missingToProcess.length && !cancelRef.current) {
+        await new Promise((r) => window.setTimeout(r, 240));
       }
     }
 
@@ -381,12 +244,18 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
     }
 
     setSummary({
+      enriched: enrichedCount,
       added: resolvedPlaces.length,
-      duplicates,
+      mapOnlyCount: mapMatch.mapOnlyStopsCount,
       failedLines,
     });
     setIsImporting(false);
   };
+
+  const matchedKeySet = new Set(mapMatch.matched.map((m) => m.building.key));
+  const totalActionsCount =
+    (onEnrichExistingStops ? mapMatch.matched.length : 0) +
+    (alsoGeocodeMissing ? Math.min(350, mapMatch.unmatched.length) : 0);
 
   return (
     <div
@@ -401,13 +270,13 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
           <div>
             <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 uppercase tracking-wide">
               <FileSpreadsheet className="w-3.5 h-3.5" />
-              Import z Excela / CSV (kartoteka parafialna)
+              Kartoteka (FARA / Excel / CSV) — tryb bez nazwisk
             </div>
             <h2
               id="csv-import-title"
               className="text-sm sm:text-base font-bold text-slate-900 mt-0.5"
             >
-              Wgraj listę adresów parafian
+              Nanieś adresy, mieszkania i liczbę mieszkańców
             </h2>
           </div>
           <button
@@ -425,6 +294,28 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
 
         {/* Body */}
         <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4 bg-slate-50/50">
+          {/* RODO Privacy Guarantee Banner */}
+          <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 flex items-start gap-2.5 text-xs text-emerald-950">
+            <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+            <div className="space-y-0.5 leading-relaxed">
+              <div className="font-semibold">
+                Ochrona danych osobowych (RODO) działa lokalnie przed wysłaniem
+              </div>
+              <p className="text-[11px] text-emerald-900">
+                Możesz wgrać eksport prosto z programu <strong>FARA</strong> lub Excela. Kolumny z
+                nazwiskami, imionami, PESEL-em czy telefonem są odrzucane w przeglądarce — na mapę
+                trafiają tylko adresy, lokale w blokach oraz liczba mieszkańców.
+              </p>
+              {parsed.ignoredPiiColumns.length > 0 && (
+                <div className="pt-1 text-[11px] font-semibold text-emerald-800">
+                  Automatycznie pominięto kolumny osobowe:{' '}
+                  {parsed.ignoredPiiColumns.join(', ')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* File Upload & Paste Box */}
           <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -450,26 +341,26 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                   className="min-h-[40px] px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Download className="w-3.5 h-3.5 text-slate-600" />
-                  <span>Pobierz wzór CSV</span>
+                  <span>Wzór z FARY (CSV)</span>
                 </button>
               </div>
-              {parsedRows.length > 0 && (
+              {parsed.buildings.length > 0 && (
                 <span className="text-xs font-semibold text-emerald-800 tabular-nums">
-                  Rozpoznano {parsedRows.length}{' '}
-                  {parsedRows.length === 1 ? 'adres' : 'adresów'}
+                  {parsed.validRows} wierszy → {parsed.buildings.length}{' '}
+                  {parsed.buildings.length === 1 ? 'budynek' : 'budynków'}
                 </span>
               )}
             </div>
 
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Możesz też wkleić adresy bezpośrednio poniżej (jeden wiersz =
-              jeden budynek, np. <code className="text-slate-700">Skalna;12;po 18:00</code>{' '}
-              lub samo <code className="text-slate-700">Skalna 12</code>). Obsługiwane są pliki z
-              Excela (UTF-8 oraz Windows-1250).
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Obsługiwane formaty z FARY i Excela (UTF-8 / Windows-1250): osobne kolumny (
+              <code className="text-slate-700">Ulica;Nr domu;Nr lokalu;Liczba osób</code>) lub jeden
+              adres (np. <code className="text-slate-700">Słoneczna 12/5</code>,{' '}
+              <code className="text-slate-700">Słoneczna 12 m. 5</code>).
             </p>
 
             <textarea
-              rows={6}
+              rows={5}
               disabled={isImporting}
               value={rawText}
               onChange={(e) => {
@@ -477,59 +368,207 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
                 setSummary(null);
               }}
               placeholder={
-                'ulica;numer;miejscowosc;uwagi;blok\nSkalna;1;Mikołów;Rodzina Nowak;nie\nZielona;10;Mikołów;Kl. A-B;24'
+                'ulica;nr_domu;nr_lokalu;miejscowosc;liczba_osob\nSkalna;1;;Mikołów;4\nSkalna;3A;;Mikołów;3\nSkalna;3A;;Mikołów;2\nZielona;12;1;Mikołów;2\nZielona;12;2;Mikołów;5'
               }
               className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
             />
           </div>
 
-          {parsedRows.length > 0 && (
-            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
-                <span className="font-semibold text-slate-800">
-                  Podgląd pierwszych {Math.min(6, parsedRows.length)} z{' '}
-                  {parsedRows.length} pozycji
-                </span>
-                {parsedRows.length > 250 && (
-                  <span className="text-amber-800 font-medium">
-                    Import jednorazowy do 250 pozycji
-                  </span>
-                )}
+          {/* FARA Grouping & Privacy Options */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label
+                htmlFor="fara-granularity"
+                className="text-xs font-semibold text-slate-800"
+              >
+                Co oznacza 1 wiersz w Twoim pliku z FARY?
+              </label>
+              <select
+                id="fara-granularity"
+                disabled={isImporting}
+                value={granularity}
+                onChange={(e) =>
+                  setGranularity(e.target.value as KartotekaRowGranularity)
+                }
+                className="min-h-[36px] px-2.5 py-1 text-xs font-medium bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-amber-600"
+              >
+                <option value="auto">Auto (rozpoznaj z nagłówków)</option>
+                <option value="person">Osobę / mieszkańca (sumuj na adres)</option>
+                <option value="family">Rodzinę / mieszkanie</option>
+                <option value="building">Gotowy budynek (1 wiersz = 1 dom)</option>
+              </select>
+            </div>
+
+            {parsed.validRows > 0 && (
+              <div className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                <span>{parsed.detectedReason}</span>
               </div>
-              <div className="divide-y divide-slate-100 text-xs">
-                {parsedRows.slice(0, 6).map((row) => (
-                  <div
-                    key={row.rowIndex}
-                    className="px-4 py-2 flex items-center justify-between gap-2"
-                  >
-                    <div className="min-w-0">
-                      <span className="font-semibold text-slate-900">
-                        {[row.street, row.houseNumber].filter(Boolean).join(' ')}
+            )}
+
+            <div className="space-y-2 pt-0.5 text-xs text-slate-700">
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={splitSlashUnits}
+                  disabled={isImporting}
+                  onChange={(e) => setSplitSlashUnits(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-300 text-amber-700 focus:ring-amber-600"
+                />
+                <span>
+                  Rozdzielaj zapis <code className="text-slate-900">12/5</code> i{' '}
+                  <code className="text-slate-900">12 m. 5</code> na budynek + numer mieszkania (dla bloków i kamienic)
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={markMultiFamilyAsMultiUnit}
+                  disabled={isImporting}
+                  onChange={(e) =>
+                    setMarkMultiFamilyAsMultiUnit(e.target.checked)
+                  }
+                  className="mt-0.5 rounded border-slate-300 text-amber-700 focus:ring-amber-600"
+                />
+                <span>
+                  Wiele rodzin pod jednym numerem (dom wielorodzinny bez numerów lokali) oznacz jako obiekt wielorodzinny
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={privacyStripNotes}
+                  disabled={isImporting}
+                  onChange={(e) => setPrivacyStripNotes(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-300 text-amber-700 focus:ring-amber-600"
+                />
+                <span>
+                  Tylko statystyka mieszkańców i mieszkań (ignoruj kolumnę „Uwagi”, na wypadek gdyby zawierała nazwiska)
+                </span>
+              </label>
+
+              {mapMatch.unmatched.length > 0 && (
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={alsoGeocodeMissing}
+                    disabled={isImporting}
+                    onChange={(e) => setAlsoGeocodeMissing(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-amber-700 focus:ring-amber-600"
+                  />
+                  <span>
+                    Dograj na mapę także brakujące budynki spoza aktualnej mapy ({mapMatch.unmatched.length})
+                  </span>
+                </label>
+              )}
+            </div>
+          </div>
+
+          {/* Live Map Match & Aggregated Building Preview */}
+          {parsed.buildings.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-slate-900">
+                    Podsumowanie przed wgraniem ({parsed.buildings.length} budynków)
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] tabular-nums">
+                    {parsed.totalResidents > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-200/70 text-slate-800 font-semibold">
+                        <Users className="w-3 h-3" />
+                        {parsed.totalResidents} mieszk.
                       </span>
-                      {row.city && (
-                        <span className="text-slate-500"> · {row.city}</span>
-                      )}
-                      {row.notes && (
-                        <span className="text-slate-600"> — {row.notes}</span>
-                      )}
-                    </div>
-                    {row.isBlock && (
-                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold shrink-0">
-                        Blok ({row.unitsCount ?? 15})
+                    )}
+                    {parsed.multiUnitBuildingsCount > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-semibold">
+                        <Building2 className="w-3 h-3" />
+                        {parsed.multiUnitBuildingsCount} bloków / wielorodz.
                       </span>
                     )}
                   </div>
-                ))}
+                </div>
+
+                {existingStops.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] tabular-nums">
+                    <div className="px-2.5 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900">
+                      <span className="font-bold">{mapMatch.matched.length}</span> dopasowano do mapy (natychmiastowo)
+                    </div>
+                    <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900">
+                      <span className="font-bold">{mapMatch.unmatched.length}</span> nowych budynków do odnalezienia
+                    </div>
+                    <div className="px-2.5 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-slate-700">
+                      <span className="font-bold">{mapMatch.mapOnlyStopsCount}</span> domów na mapie spoza pliku
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="divide-y divide-slate-100 text-xs">
+                {parsed.buildings.slice(0, 8).map((b) => {
+                  const isMatched = matchedKeySet.has(b.key);
+                  return (
+                    <div
+                      key={b.key}
+                      className="px-4 py-2 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-semibold text-slate-900">
+                            {[b.street, b.buildingNumber].filter(Boolean).join(' ')}
+                          </span>
+                          {b.city && (
+                            <span className="text-slate-500">· {b.city}</span>
+                          )}
+                          {isMatched ? (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-semibold">
+                              Na mapie ✓
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-medium">
+                              Nowy pin
+                            </span>
+                          )}
+                        </div>
+                        {b.summaryNote && (
+                          <div className="text-[11px] text-slate-600 truncate">
+                            {b.summaryNote}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {b.totalResidents > 0 && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 text-[10px] font-semibold tabular-nums">
+                            {b.totalResidents} os.
+                          </span>
+                        )}
+                        {b.isMultiUnit && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-semibold tabular-nums">
+                            {b.units.length > 0
+                              ? `${b.units.length} lok.`
+                              : `Wielorodz. (${b.unitsCount})`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {parsed.buildings.length > 8 && (
+                  <div className="px-4 py-2 text-[11px] text-slate-500 text-center">
+                    …oraz {parsed.buildings.length - 8} kolejnych budynków
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {isImporting && (
+          {isImporting && progress.total > 0 && (
             <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
               <div className="flex items-center justify-between text-xs font-semibold text-amber-950 tabular-nums">
                 <span className="inline-flex items-center gap-1.5">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
-                  Dopasowywanie współrzędnych na mapie...
+                  Wyszukiwanie nowych budynków na mapie...
                 </span>
                 <span>
                   {progress.done} / {progress.total}
@@ -552,21 +591,39 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
 
           {summary && (
             <div className="p-4 rounded-xl bg-white border border-slate-200 space-y-2 text-xs">
-              <div className="flex items-center gap-2 font-semibold text-emerald-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-                <span>
-                  Zakończono import: dodano {summary.added}{' '}
-                  {summary.added === 1 ? 'adres' : 'adresów'}
-                  {summary.duplicates > 0
-                    ? ` · pominięto ${summary.duplicates} istniejących`
-                    : ''}
-                </span>
+              <div className="flex items-start gap-2 font-semibold text-emerald-800">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div>
+                    Zapisano dane z kartoteki (bez nazwisk):
+                  </div>
+                  <div className="text-[11px] font-medium text-slate-700 space-y-0.5">
+                    {summary.enriched > 0 && (
+                      <div>
+                        • Zaktualizowano domy już stojące na mapie:{' '}
+                        <strong>{summary.enriched}</strong>
+                      </div>
+                    )}
+                    {summary.added > 0 && (
+                      <div>
+                        • Dodano nowe budynki na mapę:{' '}
+                        <strong>{summary.added}</strong>
+                      </div>
+                    )}
+                    {summary.mapOnlyCount > 0 && (
+                      <div>
+                        • Domy obecne na mapie poza kartoteką (np. nowi mieszkańcy lub pustostany):{' '}
+                        <strong>{summary.mapOnlyCount}</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
               {summary.failedLines.length > 0 && (
                 <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 space-y-1">
                   <div className="font-semibold inline-flex items-center gap-1.5">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                    Nie odnaleziono na mapie ({summary.failedLines.length}):
+                    Nie odnaleziono współrzędnych ({summary.failedLines.length}):
                   </div>
                   <p className="text-[11px] leading-relaxed">
                     {summary.failedLines.slice(0, 8).join('; ')}
@@ -594,20 +651,27 @@ export const CsvImportModal: React.FC<CsvImportModalProps> = ({
           </button>
           <button
             type="button"
-            disabled={!parish || parsedRows.length === 0 || isImporting}
+            disabled={
+              !parish ||
+              parsed.buildings.length === 0 ||
+              totalActionsCount === 0 ||
+              isImporting
+            }
             onClick={() => void handleRunImport()}
             className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-xl inline-flex items-center gap-1.5"
           >
             {isImporting ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Importowanie...</span>
+                <span>Przetwarzanie...</span>
               </>
             ) : (
               <>
                 <FileSpreadsheet className="w-3.5 h-3.5" />
                 <span>
-                  Importuj do bazy ({Math.min(250, parsedRows.length)})
+                  {mapMatch.matched.length > 0 && !alsoGeocodeMissing
+                    ? `Uzupełnij domy na mapie (${mapMatch.matched.length})`
+                    : `Zastosuj na mapie (${totalActionsCount} bud.)`}
                 </span>
               </>
             )}
