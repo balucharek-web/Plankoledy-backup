@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Copy,
   Download,
@@ -28,6 +29,7 @@ import {
   ParishCenter,
   PlanConfig,
   PriestRouteResult,
+  ScheduledStopItem,
   SeasonPlanConfig,
   VisitStop,
 } from '../types/parish';
@@ -47,11 +49,125 @@ import {
 import {
   buildGoogleMapsStageUrls,
   exportScheduleToCsv,
+  extractHouseNumberLabel,
+  extractHouseNumberSortKey,
   extractStreetName,
   formatDistance,
   formatDurationMillis,
   formatMinutesLabel,
+  getStopUnitCount,
+  isBlockStop,
+  isEvenHouseNumberStr,
 } from '../utils/spatial';
+
+interface RouteStreetStage {
+  streetName: string;
+  startTime: string;
+  endTime: string;
+  items: ScheduledStopItem[];
+  firstHouse: string;
+  lastHouse: string;
+  blockCount: number;
+  unitsTotal: number;
+  directionHint: string;
+}
+
+function buildRouteStreetStages(
+  orderedStops: ScheduledStopItem[]
+): RouteStreetStage[] {
+  if (orderedStops.length === 0) return [];
+  const groups: Array<{ streetName: string; items: ScheduledStopItem[] }> = [];
+
+  for (const item of orderedStops) {
+    const street = extractStreetName(item.stop);
+    const prev = groups[groups.length - 1];
+    if (prev && prev.streetName === street) {
+      prev.items.push(item);
+    } else {
+      groups.push({ streetName: street, items: [item] });
+    }
+  }
+
+  return groups.map((g) => {
+    const first = g.items[0];
+    const last = g.items[g.items.length - 1];
+    const houseLabels = g.items.map((i) => extractHouseNumberLabel(i.stop));
+    const numericPairs = houseLabels
+      .map((lbl) => ({
+        lbl,
+        key: extractHouseNumberSortKey(lbl),
+        even: isEvenHouseNumberStr(lbl),
+      }))
+      .filter((p) => p.lbl && p.key < Number.MAX_SAFE_INTEGER);
+
+    const firstHouse = houseLabels[0] || '';
+    const lastHouse = houseLabels[houseLabels.length - 1] || '';
+
+    let trend = '';
+    if (numericPairs.length >= 2) {
+      let up = 0;
+      let down = 0;
+      for (let i = 1; i < numericPairs.length; i++) {
+        if (numericPairs[i].key > numericPairs[i - 1].key) up += 1;
+        else if (numericPairs[i].key < numericPairs[i - 1].key) down += 1;
+      }
+      const totalSteps = up + down;
+      if (totalSteps > 0) {
+        if (up / totalSteps >= 0.7 && numericPairs[numericPairs.length - 1].key > numericPairs[0].key) {
+          trend = 'rosnąco';
+        } else if (
+          down / totalSteps >= 0.7 &&
+          numericPairs[numericPairs.length - 1].key < numericPairs[0].key
+        ) {
+          trend = 'malejąco';
+        }
+      }
+    }
+
+    let parity = '';
+    if (numericPairs.length >= 3) {
+      const allEven = numericPairs.every((p) => p.even === true);
+      const allOdd = numericPairs.every((p) => p.even === false);
+      if (allEven) parity = 'parzyste';
+      else if (allOdd) parity = 'nieparzyste';
+    }
+
+    let directionHint = '';
+    if (g.items.length === 1) {
+      directionHint = firstHouse ? `nr ${firstHouse}` : '1 punkt';
+    } else if (firstHouse && lastHouse && firstHouse !== lastHouse) {
+      const qualifiers = [trend, parity].filter(Boolean).join(', ');
+      directionHint = `od nr ${firstHouse} do nr ${lastHouse}${
+        qualifiers ? ` (${qualifiers})` : ''
+      }`;
+    } else if (firstHouse) {
+      directionHint = `nr ${firstHouse} (${g.items.length} pkt)`;
+    } else {
+      directionHint = `${g.items.length} pkt`;
+    }
+
+    let blockCount = 0;
+    let unitsTotal = 0;
+    for (const item of g.items) {
+      if (isBlockStop(item.stop)) {
+        blockCount += 1;
+        unitsTotal += getStopUnitCount(item.stop);
+      }
+    }
+
+    return {
+      streetName: g.streetName,
+      startTime: first.arrivalTime,
+      endTime: last.departureTime || last.arrivalTime,
+      items: g.items,
+      firstHouse,
+      lastHouse,
+      blockCount,
+      unitsTotal,
+      directionHint,
+    };
+  });
+}
 
 interface PrintScheduleSheetProps {
   parish: ParishCenter | null;
@@ -133,6 +249,10 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   const [editingDayBreaks, setEditingDayBreaks] = useState<DayBreakWindow[]>([]);
   const [returnVisitDate, setReturnVisitDate] = useState<string>('');
   const [excludeDeclinedRollover, setExcludeDeclinedRollover] = useState<boolean>(true);
+  const [expandedDayDate, setExpandedDayDate] = useState<string | null>(null);
+  const [expandedFullListKeys, setExpandedFullListKeys] = useState<
+    Record<string, boolean>
+  >({});
 
   const effectiveViewMode = forcedViewMode ?? viewMode;
 
@@ -189,6 +309,284 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
     } catch {
       // Fallback ignored if clipboard blocked
     }
+  };
+
+  const renderDayItineraryBreakdown = (day: DayPlanSummary) => {
+    const isExact = Boolean(exactDayKeys[day.date]);
+    const dayRoutes = day.estimatedRoutes;
+    if (dayRoutes.length === 0) return null;
+
+    return (
+      <div className="no-print bg-slate-50/80 border border-slate-200 rounded-xl p-3.5 sm:p-4 space-y-4">
+        <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200">
+          <div>
+            <div className="text-xs font-semibold text-slate-900">
+              Rozpiska przejścia tego dnia
+            </div>
+            <div className="text-[11px] text-slate-500 tabular-nums">
+              {isExact
+                ? 'Dokładna trasa drogowa'
+                : 'Szacowana kolejność trasy'}{' '}
+              · {day.stops.length} pkt · {formatDistance(day.totalDistanceMeters)}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpandedDayDate(null);
+            }}
+            className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1 shrink-0"
+          >
+            <ChevronUp className="w-3.5 h-3.5" />
+            <span>Zwiń</span>
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          {dayRoutes.map((route) => {
+            const stages = buildRouteStreetStages(route.orderedStops);
+            const firstItem = route.orderedStops[0];
+            const lastItem = route.orderedStops[route.orderedStops.length - 1];
+            const firstStage = stages[0];
+            const lastStage = stages[stages.length - 1];
+            const listKey = `${day.date}:${route.priestId}`;
+            const showFullList = Boolean(expandedFullListKeys[listKey]);
+            const startClock = firstItem?.arrivalTime || day.startTime;
+
+            return (
+              <div
+                key={route.priestId}
+                className="space-y-3 pt-1 first:pt-0 border-t border-slate-200 first:border-t-0"
+              >
+                {dayRoutes.length > 1 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-900">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: route.color }}
+                      />
+                      <span>{route.priestName}</span>
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-600 tabular-nums">
+                      {startClock}–{route.endTime} · {route.orderedStops.length} pkt ·{' '}
+                      {formatDistance(route.totalDistanceMeters)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Gdzie i jak zaczynam -> Gdzie kończę */}
+                {firstItem && lastItem && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="bg-white border border-emerald-200 rounded-lg p-3 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-bold tracking-wide">
+                          START
+                        </span>
+                        <span className="text-xs font-mono font-semibold text-emerald-900 tabular-nums">
+                          godz. {firstItem.arrivalTime}
+                        </span>
+                      </div>
+                      <div className="text-xs font-semibold text-slate-900">
+                        {firstItem.stop.address || firstItem.stop.label}
+                        {isBlockStop(firstItem.stop) && (
+                          <span className="ml-1.5 text-[11px] font-normal text-amber-800">
+                            (Blok
+                            {getStopUnitCount(firstItem.stop) > 0
+                              ? ` · ${getStopUnitCount(firstItem.stop)} lok.`
+                              : ''}
+                            )
+                          </span>
+                        )}
+                      </div>
+                      {firstStage && (
+                        <div className="text-[11px] text-slate-600 leading-snug">
+                          Jak zaczynasz: ul. {firstStage.streetName} —{' '}
+                          {firstStage.directionHint}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-900 text-white text-[10px] font-bold tracking-wide">
+                          META
+                        </span>
+                        <span className="text-xs font-mono font-semibold text-slate-800 tabular-nums">
+                          ok. {route.endTime}
+                        </span>
+                      </div>
+                      <div className="text-xs font-semibold text-slate-900">
+                        {lastItem.stop.address || lastItem.stop.label}
+                        {isBlockStop(lastItem.stop) && (
+                          <span className="ml-1.5 text-[11px] font-normal text-amber-800">
+                            (Blok
+                            {getStopUnitCount(lastItem.stop) > 0
+                              ? ` · ${getStopUnitCount(lastItem.stop)} lok.`
+                              : ''}
+                            )
+                          </span>
+                        )}
+                      </div>
+                      {lastStage && (
+                        <div className="text-[11px] text-slate-600 leading-snug">
+                          Zakończenie: ul. {lastStage.streetName} (ostatnie wejście{' '}
+                          <span className="font-mono tabular-nums">
+                            {lastItem.arrivalTime}
+                          </span>
+                          )
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Ulice po kolei — etapy przejścia */}
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-semibold text-slate-700">
+                    Kolejność ulic i numerów ({stages.length}{' '}
+                    {stages.length === 1
+                      ? 'odcinek'
+                      : stages.length < 5
+                        ? 'odcinki'
+                        : 'odcinków'}
+                    ):
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-100">
+                    {stages.map((st, sIdx) => {
+                      const numberTokens = st.items.map((item) => {
+                        const nr =
+                          extractHouseNumberLabel(item.stop) ||
+                          item.stop.label ||
+                          item.stop.address;
+                        const blk = isBlockStop(item.stop);
+                        const uCnt = getStopUnitCount(item.stop);
+                        if (blk) {
+                          return uCnt > 0 ? `${nr} (blok ${uCnt} lok.)` : `${nr} (blok)`;
+                        }
+                        return nr;
+                      });
+
+                      return (
+                        <div
+                          key={`${st.streetName}-${sIdx}`}
+                          className="p-2.5 sm:px-3 space-y-1"
+                        >
+                          <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                            <div className="text-xs font-semibold text-slate-900">
+                              <span className="font-mono text-amber-800 mr-1.5 tabular-nums">
+                                {sIdx + 1}.
+                              </span>
+                              ul. {st.streetName}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-600 tabular-nums shrink-0">
+                              {st.startTime}–{st.endTime} · {st.items.length} pkt
+                              {st.blockCount > 0 && (
+                                <span className="text-amber-800">
+                                  {' '}
+                                  ({st.blockCount} bl.
+                                  {st.unitsTotal > 0 ? ` / ${st.unitsTotal} lok.` : ''})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-[11px] font-medium text-slate-700 tabular-nums">
+                            {st.directionHint}
+                          </div>
+
+                          <div className="text-[11px] font-mono text-slate-600 leading-relaxed break-words tabular-nums">
+                            <span className="font-sans text-slate-400 mr-1">
+                              Kolejność:
+                            </span>
+                            {numberTokens.join(' → ')}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Opcjonalna pełna lista dom po domu z godzinami */}
+                {route.orderedStops.length > 0 && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedFullListKeys((prev) => ({
+                          ...prev,
+                          [listKey]: !prev[listKey],
+                        }));
+                      }}
+                      className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1.5"
+                    >
+                      {showFullList ? (
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {showFullList
+                          ? 'Ukryj dokładną listę godzinową'
+                          : `Pokaż wszystkie punkty z godzinami (${route.orderedStops.length})`}
+                      </span>
+                    </button>
+
+                    {showFullList && (
+                      <div className="mt-2 bg-white border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                        {route.orderedStops.map((item, idx) => {
+                          const isStart = idx === 0;
+                          const isEnd = idx === route.orderedStops.length - 1;
+                          const blk = isBlockStop(item.stop);
+                          const uCnt = getStopUnitCount(item.stop);
+                          return (
+                            <div
+                              key={item.stop.id}
+                              className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-mono text-[11px] font-semibold text-slate-500 w-6 shrink-0 tabular-nums">
+                                  {item.orderIndex}.
+                                </span>
+                                <span className="font-mono text-[11px] font-semibold text-slate-900 shrink-0 tabular-nums">
+                                  {item.arrivalTime}
+                                </span>
+                                <span className="text-slate-900 font-medium truncate">
+                                  {item.stop.address || item.stop.label}
+                                </span>
+                              </div>
+                              <div className="shrink-0 flex items-center gap-1.5 text-[10px]">
+                                {isStart && (
+                                  <span className="px-1.5 py-0.5 rounded bg-emerald-700 text-white font-bold">
+                                    START
+                                  </span>
+                                )}
+                                {isEnd && !isStart && (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold">
+                                    META
+                                  </span>
+                                )}
+                                {blk && (
+                                  <span className="text-amber-800 font-semibold tabular-nums">
+                                    Blok{uCnt > 0 ? ` (${uCnt})` : ''}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   const handlePrintNow = () => {
@@ -675,15 +1073,37 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                     {plannedDays.map((day) => {
                       const isExact = Boolean(exactDayKeys[day.date]);
                       const isEditingHours = editingHoursDate === day.date;
+                      const isExpanded = expandedDayDate === day.date;
                       return (
                         <React.Fragment key={day.date}>
-                          <tr className="hover:bg-slate-50/60">
+                          <tr
+                            onClick={() =>
+                              setExpandedDayDate((prev) =>
+                                prev === day.date ? null : day.date
+                              )
+                            }
+                            aria-expanded={isExpanded}
+                            className={`cursor-pointer transition-colors ${
+                              isExpanded
+                                ? 'bg-amber-50/40'
+                                : 'hover:bg-slate-50/60'
+                            }`}
+                          >
                             <td className="py-3 px-4 print:py-1.5 print:px-2 whitespace-nowrap print:whitespace-normal align-top">
-                              <div className="text-xs font-semibold text-slate-900 tabular-nums">
-                                {day.date}
-                              </div>
-                              <div className="text-[11px] text-slate-500">
-                                {formatPolishWeekdayFull(day.date)}
+                              <div className="flex items-center gap-1.5">
+                                <ChevronRight
+                                  className={`no-print w-3.5 h-3.5 text-slate-400 transition-transform shrink-0 ${
+                                    isExpanded ? 'rotate-90 text-amber-700' : ''
+                                  }`}
+                                />
+                                <div>
+                                  <div className="text-xs font-semibold text-slate-900 tabular-nums">
+                                    {day.date}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {formatPolishWeekdayFull(day.date)}
+                                  </div>
+                                </div>
                               </div>
                             </td>
                             <td className="py-3 px-4 print:py-1.5 print:px-2 font-mono text-xs font-semibold text-slate-900 tabular-nums whitespace-nowrap print:whitespace-normal align-top">
@@ -701,7 +1121,8 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                               {onUpdateDayTimeWindow && (
                                 <button
                                   type="button"
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     if (isEditingHours) {
                                       setEditingHoursDate(null);
                                     } else {
@@ -727,6 +1148,11 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                             <td className="py-3 px-4 text-xs text-slate-700 max-w-xs print:max-w-none print:py-1.5 print:px-2 align-top break-words">
                               <div className="font-medium text-slate-900">
                                 {day.streetNames.join(', ')}
+                              </div>
+                              <div className="no-print text-[11px] text-amber-800 font-medium mt-0.5">
+                                {isExpanded
+                                  ? 'Ukryj rozpiskę przejścia'
+                                  : 'Kliknij wiersz, aby zobaczyć start, ulice i koniec'}
                               </div>
                               {isExact && (
                                 <span className="text-[11px] text-emerald-700 font-medium">
@@ -764,7 +1190,10 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 {onEditDayInPlanner && (
                                   <button
                                     type="button"
-                                    onClick={() => onEditDayInPlanner(day.date)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onEditDayInPlanner(day.date);
+                                    }}
                                     className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
                                   >
                                     <Pencil className="w-3 h-3 text-slate-500" />
@@ -773,7 +1202,10 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 )}
                                 <button
                                   type="button"
-                                  onClick={() => onViewDayOnMap(day.date)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onViewDayOnMap(day.date);
+                                  }}
                                   className="px-2.5 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
                                 >
                                   <MapIcon className="w-3.5 h-3.5 text-amber-700" />
@@ -781,7 +1213,8 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     onInspectDay(day.date);
                                     setViewMode('day');
                                   }}
@@ -793,7 +1226,10 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                 {onDeleteDayRoute && (
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteDayRoute(day.date)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDeleteDayRoute(day.date);
+                                    }}
                                     title="Usuń trasę tego dnia"
                                     aria-label={`Usuń trasę z dnia ${day.date}`}
                                     className="px-2 py-1.5 text-xs font-medium text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 rounded-lg inline-flex items-center gap-1"
@@ -804,6 +1240,13 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                               </div>
                             </td>
                           </tr>
+                          {isExpanded && (
+                            <tr className="no-print bg-slate-50/40">
+                              <td colSpan={6} className="p-3 sm:p-4">
+                                {renderDayItineraryBreakdown(day)}
+                              </td>
+                            </tr>
+                          )}
                           {isEditingHours && onUpdateDayTimeWindow && (
                             <tr className="no-print bg-slate-50">
                               <td colSpan={6} className="px-4 py-3 space-y-2">
@@ -953,50 +1396,77 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
               <div className="md:hidden print:hidden space-y-3">
                 {plannedDays.map((day, idx) => {
                   const isEditingHours = editingHoursDate === day.date;
+                  const isExpanded = expandedDayDate === day.date;
                   return (
                     <div
                       key={day.date}
                       className="bg-white border border-slate-200 rounded-xl p-4 space-y-3"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="text-[11px] font-mono font-semibold text-amber-800 tabular-nums">
-                            Dzień {idx + 1} · {day.date}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedDayDate((prev) =>
+                            prev === day.date ? null : day.date
+                          )
+                        }
+                        aria-expanded={isExpanded}
+                        className="w-full text-left space-y-2.5 rounded-lg -m-1 p-1 hover:bg-slate-50/70 transition-colors"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-[11px] font-mono font-semibold text-amber-800 tabular-nums">
+                              Dzień {idx + 1} · {day.date}
+                            </div>
+                            <div className="text-sm font-semibold text-slate-900 mt-0.5">
+                              {formatPolishWeekdayFull(day.date)}
+                            </div>
                           </div>
-                          <div className="text-sm font-semibold text-slate-900 mt-0.5">
-                            {formatPolishWeekdayFull(day.date)}
+                          <div className="text-right">
+                            <div className="text-xs font-mono font-semibold text-slate-900 tabular-nums">
+                              {day.startTime}–{day.estimatedEndTime}
+                            </div>
+                            <div className="text-[11px] text-slate-500 tabular-nums">
+                              {day.stops.length} domów ·{' '}
+                              {formatDistance(day.totalDistanceMeters)}
+                            </div>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="text-xs font-mono font-semibold text-slate-900 tabular-nums">
-                            {day.startTime}–{day.estimatedEndTime}
-                          </div>
-                          <div className="text-[11px] text-slate-500 tabular-nums">
-                            {day.stops.length} domów ·{' '}
-                            {formatDistance(day.totalDistanceMeters)}
-                          </div>
-                        </div>
-                      </div>
 
-                      <div className="text-xs text-slate-700 leading-relaxed space-y-0.5">
-                        <div>
-                          <span className="text-slate-500">Ulice: </span>
-                          <span className="font-medium text-slate-900">
-                            {day.streetNames.join(', ')}
-                          </span>
-                        </div>
-                        {(day.activeBreaks?.length ?? 0) > 0 && (
-                          <div className="text-[11px] text-slate-500">
-                            Przerwy:{' '}
-                            {day.activeBreaks!
-                              .map(
-                                (b) =>
-                                  `${b.startTime}–${b.endTime}${b.label ? ` (${b.label})` : ''}`
-                              )
-                              .join(', ')}
+                        <div className="text-xs text-slate-700 leading-relaxed space-y-1">
+                          <div>
+                            <span className="text-slate-500">Ulice: </span>
+                            <span className="font-medium text-slate-900">
+                              {day.streetNames.join(', ')}
+                            </span>
                           </div>
-                        )}
-                      </div>
+                          {(day.activeBreaks?.length ?? 0) > 0 && (
+                            <div className="text-[11px] text-slate-500">
+                              Przerwy:{' '}
+                              {day.activeBreaks!
+                                .map(
+                                  (b) =>
+                                    `${b.startTime}–${b.endTime}${b.label ? ` (${b.label})` : ''}`
+                                )
+                                .join(', ')}
+                            </div>
+                          )}
+                          <div className="pt-0.5 inline-flex items-center gap-1 text-[11px] font-semibold text-amber-800">
+                            {isExpanded ? (
+                              <>
+                                <ChevronUp className="w-3.5 h-3.5" />
+                                <span>Ukryj rozpiskę (start, ulice, koniec)</span>
+                              </>
+                            ) : (
+                              <>
+                                <ChevronDown className="w-3.5 h-3.5" />
+                                <span>Dotknij, aby zobaczyć gdzie start, ulice i koniec</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+
+                      {isExpanded && renderDayItineraryBreakdown(day)}
 
                       {isEditingHours && onUpdateDayTimeWindow && (
                         <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
