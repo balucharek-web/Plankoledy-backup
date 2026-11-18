@@ -87,6 +87,69 @@ export function isEvenHouseNumber(houseNumber: string): boolean | null {
   return num % 2 === 0;
 }
 
+/**
+ * Parses OSM `building:flats` or `addr:flats` (supports integers like "24" and Polish ranges like "1-24" or "1-12;13-24").
+ */
+export function parseOsmFlatsCount(raw?: string | null): number {
+  const value = (raw ?? '').trim();
+  if (!value) return 0;
+
+  if (/^\d+$/.test(value)) {
+    const n = Number.parseInt(value, 10);
+    return Number.isNaN(n) ? 0 : Math.min(500, n);
+  }
+
+  let total = 0;
+  const segments = value.split(/[;,]+/).map((s) => s.trim()).filter(Boolean);
+  for (const seg of segments) {
+    const rangeMatch = /^(\d+)\s*[-–]\s*(\d+)$/.exec(seg);
+    if (rangeMatch) {
+      const a = Number.parseInt(rangeMatch[1], 10);
+      const b = Number.parseInt(rangeMatch[2], 10);
+      if (!Number.isNaN(a) && !Number.isNaN(b) && b >= a && b - a <= 400) {
+        total += b - a + 1;
+        continue;
+      }
+    }
+    const single = /^(\d+)$/.exec(seg);
+    if (single) {
+      total += 1;
+    }
+  }
+
+  return Math.min(500, total);
+}
+
+function detectMultiUnitFromOsmTags(tags: Record<string, string>): {
+  isMultiUnit: boolean;
+  suggestedUnitsCount?: number;
+} {
+  const flatsCount = parseOsmFlatsCount(
+    tags['building:flats'] || tags['addr:flats']
+  );
+  const buildingType = (tags.building ?? '').toLowerCase();
+  const levels = Number.parseInt(tags['building:levels'] || '', 10);
+  const isApartmentBuilding =
+    buildingType === 'apartments' ||
+    buildingType === 'dormitory' ||
+    flatsCount > 1 ||
+    ((buildingType === 'residential' || buildingType === 'yes') &&
+      !Number.isNaN(levels) &&
+      levels >= 4 &&
+      !tags.amenity &&
+      !tags.shop &&
+      !tags.office);
+
+  if (!isApartmentBuilding) {
+    return { isMultiUnit: false };
+  }
+
+  return {
+    isMultiUnit: true,
+    suggestedUnitsCount: flatsCount > 1 ? flatsCount : 15,
+  };
+}
+
 function formatPolishHouseAddress(
   street: string,
   houseNumber: string,
@@ -693,6 +756,7 @@ export async function fetchParishStreetsFromOsm(params: {
 (
   way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${bbox};
   nwr["addr:housenumber"]${bbox};
+  way["building"="apartments"]${bbox};
 );
 out center tags qt;
 `.trim();
@@ -741,6 +805,22 @@ out center tags qt;
     return { key, group: streetMap[key] };
   };
 
+  // Collect OSM apartment polygons so PRG / entrance nodes inside an apartment block get flagged automatically
+  const apartmentBuildings: Array<{ location: LatLng; suggestedUnitsCount: number }> = [];
+  for (const el of osmElements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+    const tags = el.tags ?? {};
+    const detected = detectMultiUnitFromOsmTags(tags);
+    if (detected.isMultiUnit && (el.type === 'way' || el.type === 'relation' || tags.building === 'apartments')) {
+      apartmentBuildings.push({
+        location: { lat, lng },
+        suggestedUnitsCount: detected.suggestedUnitsCount ?? 15,
+      });
+    }
+  }
+
   // 1. Official PRG records (full tiled grid)
   for (const rec of gugikRecords) {
     if (!isInsideArea(rec.location)) continue;
@@ -763,6 +843,10 @@ out center tags qt;
         city
       );
 
+      const matchedApt = apartmentBuildings.find(
+        (b) => haversineMeters(rec.location, b.location) <= 26
+      );
+
       group.housesByNumber[houseKey] = {
         id: `prg_${key}_${houseKey}_${rec.location.lat.toFixed(5)}`,
         street: group.streetName,
@@ -772,6 +856,12 @@ out center tags qt;
         label,
         fullAddress,
         location: rec.location,
+        ...(matchedApt
+          ? {
+              isMultiUnit: true,
+              suggestedUnitsCount: matchedApt.suggestedUnitsCount,
+            }
+          : {}),
       };
       group.sumLat += rec.location.lat;
       group.sumLng += rec.location.lng;
@@ -811,20 +901,13 @@ out center tags qt;
         group.pointCount += 1;
       }
 
-      const flatsRaw = Number.parseInt(
-        tags['building:flats'] || tags['addr:flats'] || '',
-        10
-      );
-      const isApartments =
-        tags.building === 'apartments' ||
-        tags.building === 'dormitory' ||
-        (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+      const detectedBlock = detectMultiUnitFromOsmTags(tags);
+      const nearbyApt = !detectedBlock.isMultiUnit
+        ? apartmentBuildings.find((b) => haversineMeters(pt, b.location) <= 24)
+        : undefined;
+      const isApartments = detectedBlock.isMultiUnit || Boolean(nearbyApt);
       const suggestedUnitsCount =
-        !Number.isNaN(flatsRaw) && flatsRaw > 1
-          ? Math.min(500, flatsRaw)
-          : isApartments
-            ? 15
-            : undefined;
+        detectedBlock.suggestedUnitsCount ?? nearbyApt?.suggestedUnitsCount;
 
       const houseKey = addrNum.toLowerCase();
       const existing = group.housesByNumber[houseKey];
@@ -1043,6 +1126,7 @@ export async function fetchStreetHousesAtLocation(params: {
 [out:json][timeout:10];
 (
   nwr["addr:place"~"${streetRegex}",i]["addr:housenumber"]${bbox};
+  way["building"="apartments"]${bbox};
 );
 out center tags qt;
 `.trim()
@@ -1050,6 +1134,7 @@ out center tags qt;
 [out:json][timeout:10];
 (
   nwr["addr:street"~"${streetRegex}",i]["addr:housenumber"]${bbox};
+  way["building"="apartments"]${bbox};
 );
 out center tags qt;
 `.trim();
@@ -1069,6 +1154,21 @@ out center tags qt;
   ];
   const osmElements =
     overpassRes.status === 'fulfilled' ? overpassRes.value : [];
+
+  const apartmentBuildings: Array<{ location: LatLng; suggestedUnitsCount: number }> = [];
+  for (const el of osmElements) {
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+    const tags = el.tags ?? {};
+    const detectedBlock = detectMultiUnitFromOsmTags(tags);
+    if (detectedBlock.isMultiUnit && (el.type === 'way' || el.type === 'relation' || tags.building === 'apartments')) {
+      apartmentBuildings.push({
+        location: { lat, lng },
+        suggestedUnitsCount: detectedBlock.suggestedUnitsCount ?? 15,
+      });
+    }
+  }
 
   const byNumber: Record<string, OsmHousePoint> = {};
 
@@ -1104,6 +1204,10 @@ out center tags qt;
       city
     );
 
+    const matchedApt = apartmentBuildings.find(
+      (b) => haversineMeters(rec.location, b.location) <= 26
+    );
+
     byNumber[houseKey] = {
       id: `prg_${houseKey}_${rec.location.lat.toFixed(5)}_${rec.location.lng.toFixed(5)}`,
       street: canonicalStreet,
@@ -1113,6 +1217,12 @@ out center tags qt;
       label,
       fullAddress,
       location: rec.location,
+      ...(matchedApt
+        ? {
+            isMultiUnit: true,
+            suggestedUnitsCount: matchedApt.suggestedUnitsCount,
+          }
+        : {}),
     };
   }
 
@@ -1125,20 +1235,13 @@ out center tags qt;
     const addrNum = tags['addr:housenumber']?.trim();
     if (!addrNum) continue;
 
-    const flatsRaw = Number.parseInt(
-      tags['building:flats'] || tags['addr:flats'] || '',
-      10
-    );
-    const isApartments =
-      tags.building === 'apartments' ||
-      tags.building === 'dormitory' ||
-      (!Number.isNaN(flatsRaw) && flatsRaw > 1);
+    const detectedBlock = detectMultiUnitFromOsmTags(tags);
+    const nearbyApt = !detectedBlock.isMultiUnit
+      ? apartmentBuildings.find((b) => haversineMeters({ lat, lng }, b.location) <= 24)
+      : undefined;
+    const isApartments = detectedBlock.isMultiUnit || Boolean(nearbyApt);
     const suggestedUnitsCount =
-      !Number.isNaN(flatsRaw) && flatsRaw > 1
-        ? Math.min(500, flatsRaw)
-        : isApartments
-          ? 15
-          : undefined;
+      detectedBlock.suggestedUnitsCount ?? nearbyApt?.suggestedUnitsCount;
 
     const key = addrNum.toLowerCase();
     const existing = byNumber[key];

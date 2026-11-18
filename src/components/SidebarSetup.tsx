@@ -1,12 +1,15 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
+  Ban,
+  Building2,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Church,
   Cloud,
   FileSpreadsheet,
+  Home,
   Layers,
   Loader2,
   LocateFixed,
@@ -20,6 +23,7 @@ import {
   Route,
   ScanSearch,
   Search,
+  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
@@ -40,12 +44,15 @@ import {
   VisitStop,
 } from '../types/parish';
 import {
+  compareStopsByHouseNumber,
   computePolygonAreaSqMeters,
+  computeStreetNumberBounds,
   extractHouseNumberLabel,
-  extractHouseNumberSortKey,
   extractStreetName,
   findMissingHouseNumberGaps,
   formatPolygonArea,
+  getStopUnitCount,
+  isBlockStop,
 } from '../utils/spatial';
 import { PlaceSearchInput, SelectedPlaceData } from './PlaceSearchInput';
 
@@ -58,7 +65,7 @@ const OsmStreetFetcherModal = lazy(() =>
   }))
 );
 
-type SetupTab = 'parish' | 'area' | 'streets';
+export type SetupTab = 'parish' | 'area' | 'streets';
 
 interface SidebarSetupProps {
   parish: ParishCenter | null;
@@ -70,6 +77,10 @@ interface SidebarSetupProps {
   streetPickFeedback: StreetPickFeedback | null;
   isSignedIn: boolean;
   userEmail: string | null;
+  requestedTab?: { tab: SetupTab; seq: number } | null;
+  csvImportOpen?: boolean;
+  onOpenCsvImport?: () => void;
+  onCloseCsvImport?: () => void;
   onDismissStreetFeedback: () => void;
   onSignInGoogle: () => void;
   onSelectParish: (place: SelectedPlaceData) => void;
@@ -91,6 +102,9 @@ interface SidebarSetupProps {
     patches: Array<{ id: string; patch: Partial<VisitStop> }>
   ) => void;
   defaultVisitMinutes?: number;
+  onUpdateStop?: (id: string, patch: Partial<VisitStop>) => void;
+  onOpenBlockUnits?: (stopId: string) => void;
+  onClearStops?: () => void;
   onDeleteStreetStops: (stopIds: string[]) => void;
   onDeleteOutsideBoundaryStops?: () => void;
   onDeleteStop?: (stopId: string) => void;
@@ -117,6 +131,10 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   streetPickFeedback,
   isSignedIn,
   userEmail,
+  requestedTab,
+  csvImportOpen: controlledCsvOpen,
+  onOpenCsvImport,
+  onCloseCsvImport,
   onDismissStreetFeedback,
   onSignInGoogle,
   onSelectParish,
@@ -136,6 +154,9 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onBatchAddStops,
   onEnrichExistingStops,
   defaultVisitMinutes,
+  onUpdateStop,
+  onOpenBlockUnits,
+  onClearStops,
   onDeleteStreetStops,
   onDeleteOutsideBoundaryStops,
   onDeleteStop,
@@ -146,12 +167,24 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   onViewMap,
   onNextStep,
 }) => {
-  const [setupTab, setSetupTab] = useState<SetupTab>(() =>
-    !parish ? 'parish' : 'area'
-  );
+  const [setupTab, setSetupTab] = useState<SetupTab>(() => {
+    if (requestedTab?.tab) return requestedTab.tab;
+    return !parish ? 'parish' : 'area';
+  });
   const [showManualTools, setShowManualTools] = useState(false);
   const [areaScannerOpen, setAreaScannerOpen] = useState(false);
-  const [csvImportOpen, setCsvImportOpen] = useState(false);
+  const [localCsvImportOpen, setLocalCsvImportOpen] = useState(false);
+  const csvImportOpen =
+    controlledCsvOpen !== undefined ? controlledCsvOpen : localCsvImportOpen;
+  const openCsvModal = () => {
+    if (onOpenCsvImport) onOpenCsvImport();
+    else setLocalCsvImportOpen(true);
+  };
+  const closeCsvModal = () => {
+    if (onCloseCsvImport) onCloseCsvImport();
+    else setLocalCsvImportOpen(false);
+  };
+
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyError, setNearbyError] = useState<string | null>(null);
   const [nearbyChurches, setNearbyChurches] = useState<
@@ -161,13 +194,25 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   const [localityLoading, setLocalityLoading] = useState(false);
   const [localityError, setLocalityError] = useState<string | null>(null);
   const [streetFilter, setStreetFilter] = useState('');
+  const [streetsTypeFilter, setStreetsTypeFilter] = useState<
+    'all' | 'blocks' | 'declined'
+  >('all');
   const [expandedStreet, setExpandedStreet] = useState<string | null>(null);
+  const [editingStopDetailsId, setEditingStopDetailsId] = useState<string | null>(
+    null
+  );
 
   const isDrawing = interactionMode === 'draw_boundary';
   const isEditingBoundary = interactionMode === 'edit_boundary';
   const isPickingStreet = interactionMode === 'pick_street';
   const isAddingHouse = interactionMode === 'add_stop';
   const manualToolsOpen = showManualTools || isPickingStreet || isAddingHouse;
+
+  useEffect(() => {
+    if (requestedTab && requestedTab.seq > 0 && parish) {
+      setSetupTab(requestedTab.tab);
+    }
+  }, [requestedTab, parish]);
 
   // Keep tab aligned if parish is cleared or map drawing/picking mode starts
   useEffect(() => {
@@ -230,32 +275,64 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
     return Object.entries(groups)
       .map(
         ([name, list]) =>
-          [
-            name,
-            [...list].sort((a, b) => {
-              const labelA =
-                extractHouseNumberLabel(a) || a.label || a.address;
-              const labelB =
-                extractHouseNumberLabel(b) || b.label || b.address;
-              return (
-                extractHouseNumberSortKey(labelA) -
-                  extractHouseNumberSortKey(labelB) ||
-                labelA.localeCompare(labelB, 'pl', {
-                  numeric: true,
-                  sensitivity: 'base',
-                })
-              );
-            }),
-          ] as [string, VisitStop[]]
+          [name, [...list].sort(compareStopsByHouseNumber)] as [
+            string,
+            VisitStop[],
+          ]
       )
       .sort((a, b) => a[0].localeCompare(b[0], 'pl'));
   }, [stops]);
 
+  const parishBuildingStats = useMemo(() => {
+    let blocks = 0;
+    let units = 0;
+    let declined = 0;
+    for (const s of stops) {
+      if (isBlockStop(s)) {
+        blocks += 1;
+        units += getStopUnitCount(s);
+      }
+      if (s.permanentDecline || s.included === false) {
+        declined += 1;
+      }
+    }
+    return {
+      houses: stops.length - blocks,
+      blocks,
+      units,
+      declined,
+    };
+  }, [stops]);
+
   const filteredStreets = useMemo(() => {
     const q = streetFilter.trim().toLowerCase();
-    if (!q) return savedStreets;
-    return savedStreets.filter(([name]) => name.toLowerCase().includes(q));
-  }, [savedStreets, streetFilter]);
+    return savedStreets
+      .map(([name, list]) => {
+        const typeFiltered = list.filter((s) => {
+          if (streetsTypeFilter === 'blocks') return isBlockStop(s);
+          if (streetsTypeFilter === 'declined') {
+            return Boolean(s.permanentDecline || s.included === false);
+          }
+          return true;
+        });
+        if (typeFiltered.length === 0) return null;
+        if (q) {
+          const streetMatches = name.toLowerCase().includes(q);
+          if (!streetMatches) {
+            const addrMatches = typeFiltered.filter(
+              (s) =>
+                s.address.toLowerCase().includes(q) ||
+                s.label.toLowerCase().includes(q) ||
+                (s.notes && s.notes.toLowerCase().includes(q))
+            );
+            if (addrMatches.length === 0) return null;
+            return [name, addrMatches] as [string, VisitStop[]];
+          }
+        }
+        return [name, typeFiltered] as [string, VisitStop[]];
+      })
+      .filter((entry): entry is [string, VisitStop[]] => entry !== null);
+  }, [savedStreets, streetFilter, streetsTypeFilter]);
 
   const [lastGpsLocation, setLastGpsLocation] = useState<{
     location: LatLng;
@@ -844,7 +921,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
               <button
                 type="button"
                 disabled={!parish}
-                onClick={() => setCsvImportOpen(true)}
+                onClick={openCsvModal}
                 className="w-full min-h-[42px] py-2 px-3 text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-xl inline-flex items-center justify-center gap-2 transition-colors"
               >
                 <FileSpreadsheet className="w-4 h-4 text-amber-700 shrink-0" />
@@ -1046,32 +1123,74 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
           </div>
         )}
 
-        {/* TAB 3: ZAPAMIĘTANE ULICE I DOMY (Zero nested scroll traps!) */}
+        {/* TAB 3: ULICE, DOMY I BLOKI (Pełna konfiguracja parafii) */}
         {setupTab === 'streets' && (
           <div className="p-4 sm:p-5 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-xs sm:text-sm font-semibold text-slate-900">
-                Ulice w bazie parafii ({savedStreets.length})
-              </h2>
-              <span className="text-xs font-mono tabular-nums text-slate-500">
-                {stops.length}{' '}
-                {stops.length === 1
-                  ? 'dom'
-                  : stops.length < 5
-                    ? 'domy'
-                    : 'domów'}
-              </span>
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs sm:text-sm font-semibold text-slate-900">
+                  Ulice, domy i bloki ({savedStreets.length})
+                </h2>
+                <span className="text-xs font-mono tabular-nums text-slate-600">
+                  {parishBuildingStats.houses} domów
+                  {parishBuildingStats.blocks > 0
+                    ? ` · ${parishBuildingStats.blocks} bl. (${parishBuildingStats.units} lok.)`
+                    : ''}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                Tutaj oznaczysz bloki (klatki, mieszkania), stałe odmowy i czas
+                wizyty — podczas planowania dnia zostaną wykryte automatycznie.
+              </p>
             </div>
 
-            {savedStreets.length > 5 && (
+            {stops.length > 0 && (
+              <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setStreetsTypeFilter('all')}
+                  className={`min-h-[34px] px-2 py-1 text-[11px] font-semibold rounded-lg transition-colors tabular-nums ${
+                    streetsTypeFilter === 'all'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Wszystkie ({stops.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStreetsTypeFilter('blocks')}
+                  className={`min-h-[34px] px-2 py-1 text-[11px] font-semibold rounded-lg transition-colors tabular-nums ${
+                    streetsTypeFilter === 'blocks'
+                      ? 'bg-white text-amber-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Bloki ({parishBuildingStats.blocks})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStreetsTypeFilter('declined')}
+                  className={`min-h-[34px] px-2 py-1 text-[11px] font-semibold rounded-lg transition-colors tabular-nums ${
+                    streetsTypeFilter === 'declined'
+                      ? 'bg-white text-red-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Pominięte ({parishBuildingStats.declined})
+                </button>
+              </div>
+            )}
+
+            {savedStreets.length > 3 && (
               <div className="relative">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="search"
                   value={streetFilter}
                   onChange={(e) => setStreetFilter(e.target.value)}
-                  placeholder="Szukaj ulicy..."
-                  aria-label="Szukaj ulicy na liście"
+                  placeholder="Szukaj ulicy lub numeru (np. Astrów 12)..."
+                  aria-label="Szukaj ulicy lub domu na liście"
                   className="w-full min-h-[42px] pl-9 pr-3 py-2 text-base sm:text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-amber-600"
                 />
               </div>
@@ -1094,12 +1213,24 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
               </div>
             ) : filteredStreets.length === 0 ? (
               <p className="py-6 text-center text-xs text-slate-500">
-                Brak ulic pasujących do „{streetFilter}”.
+                Brak ulic ani budynków pasujących do wybranego filtra.
               </p>
             ) : (
               <ul className="border border-slate-200 rounded-xl bg-white divide-y divide-slate-100 overflow-hidden">
                 {filteredStreets.map(([streetName, streetStops]) => {
                   const isExpanded = expandedStreet === streetName;
+                  const streetBlocks = streetStops.filter(isBlockStop);
+                  const streetUnits = streetBlocks.reduce(
+                    (acc, s) => acc + getStopUnitCount(s),
+                    0
+                  );
+                  const streetBounds = computeStreetNumberBounds(streetStops);
+                  const rangeStr =
+                    streetBounds.all.minLabel && streetBounds.all.maxLabel
+                      ? streetBounds.all.minLabel === streetBounds.all.maxLabel
+                        ? `nr ${streetBounds.all.minLabel}`
+                        : `nr ${streetBounds.all.minLabel}–${streetBounds.all.maxLabel}`
+                      : '';
                   return (
                     <li key={streetName} className="bg-white">
                       <div className="px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-slate-50/70">
@@ -1108,7 +1239,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                           onClick={() =>
                             setExpandedStreet(isExpanded ? null : streetName)
                           }
-                          className="flex-1 min-w-0 text-left flex items-center gap-2 min-h-[38px]"
+                          className="flex-1 min-w-0 text-left flex items-center gap-2 min-h-[40px]"
                         >
                           {isExpanded ? (
                             <ChevronDown className="w-4 h-4 text-amber-700 shrink-0" />
@@ -1116,15 +1247,30 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                             <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
                           )}
                           <div className="min-w-0">
-                            <div className="text-xs font-medium text-slate-900 truncate">
+                            <div className="text-xs font-semibold text-slate-900 truncate">
                               {streetName}
                             </div>
-                            <div className="text-[11px] text-slate-500 tabular-nums">
-                              {streetStops.length}{' '}
-                              {streetStops.length === 1 ? 'adres' : 'adresów'} ·{' '}
-                              <span className="text-amber-700 font-medium">
-                                {isExpanded ? 'zwiń' : 'zobacz domy'}
+                            <div className="text-[11px] text-slate-500 tabular-nums flex flex-wrap items-center gap-x-1.5">
+                              <span>
+                                {streetStops.length - streetBlocks.length}{' '}
+                                {streetStops.length - streetBlocks.length === 1
+                                  ? 'dom'
+                                  : 'domów'}
                               </span>
+                              {streetBlocks.length > 0 && (
+                                <span className="text-amber-800 font-semibold">
+                                  · {streetBlocks.length}{' '}
+                                  {streetBlocks.length === 1
+                                    ? 'blok'
+                                    : 'bloki'}
+                                  {streetUnits > 0 ? ` (${streetUnits} lok.)` : ''}
+                                </span>
+                              )}
+                              {rangeStr && (
+                                <span className="text-slate-400">
+                                  · {rangeStr}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </button>
@@ -1149,7 +1295,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                             {onFocusStreetOnMap && (
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-[11px] text-slate-500">
-                                  Dotknij numer, aby wskazać dom na mapie:
+                                  Oznacz bloki lub wyklucz stałe odmowy:
                                 </span>
                                 <button
                                   type="button"
@@ -1162,50 +1308,184 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                               </div>
                             )}
 
-                            <div className="flex flex-wrap gap-1.5">
+                            <div className="divide-y divide-slate-200/70 rounded-xl border border-slate-200 bg-white overflow-hidden">
                               {streetStops.map((st) => {
                                 const numLabel =
                                   extractHouseNumberLabel(st) ||
                                   st.label ||
                                   st.address;
-                                const isBlock = Boolean(
-                                  st.isMultiUnit ||
-                                    (st.units && st.units.length > 0)
+                                const isBlock = isBlockStop(st);
+                                const unitCount = getStopUnitCount(st);
+                                const isDeclined = Boolean(
+                                  st.permanentDecline || st.included === false
                                 );
+                                const isDetailsOpen =
+                                  editingStopDetailsId === st.id;
+
                                 return (
                                   <div
                                     key={st.id}
-                                    className={`inline-flex items-center rounded-lg border text-xs font-mono tabular-nums ${
-                                      st.inBoundary === false
-                                        ? 'bg-amber-50 border-amber-300 text-amber-900'
-                                        : 'bg-white border-slate-200 text-slate-800'
+                                    className={`transition-colors ${
+                                      isDeclined ? 'bg-slate-50/80 opacity-75' : 'bg-white'
                                     }`}
                                   >
-                                    <button
-                                      type="button"
-                                      onClick={() => onSelectStop?.(st.id)}
-                                      title={st.address || st.label}
-                                      className="min-h-[34px] px-2.5 py-1 hover:bg-slate-100 rounded-l-lg inline-flex items-center gap-1"
-                                    >
-                                      <span className="font-semibold">
-                                        {numLabel}
-                                      </span>
-                                      {isBlock && (
-                                        <span className="text-[10px] font-sans font-bold text-amber-800">
-                                          BLOK
-                                        </span>
-                                      )}
-                                    </button>
-                                    {onDeleteStop && (
+                                    <div className="px-2.5 py-2 flex items-center gap-1.5">
                                       <button
                                         type="button"
-                                        onClick={() => onDeleteStop(st.id)}
-                                        aria-label={`Usuń ${st.address || numLabel}`}
-                                        title={`Usuń ${st.address || numLabel}`}
-                                        className="min-h-[34px] min-w-[30px] px-1.5 py-1 inline-flex items-center justify-center text-slate-400 hover:text-red-600 border-l border-slate-200/80 rounded-r-lg"
+                                        onClick={() => onSelectStop?.(st.id)}
+                                        title={`Pokaż ${st.address || st.label} na mapie`}
+                                        className="flex-1 min-w-0 min-h-[36px] text-left flex items-center gap-1.5"
                                       >
-                                        <X className="w-3 h-3" />
+                                        {isBlock ? (
+                                          <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                                        ) : (
+                                          <Home className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                        )}
+                                        <span className="text-xs font-mono font-semibold text-slate-900 truncate tabular-nums">
+                                          {numLabel}
+                                        </span>
+                                        {isBlock && (
+                                          <span className="text-[10px] font-semibold text-amber-900 bg-amber-100 px-1.5 py-0.5 rounded tabular-nums shrink-0">
+                                            Blok{unitCount > 0 ? ` · ${unitCount}` : ''}
+                                          </span>
+                                        )}
+                                        {isDeclined && (
+                                          <span className="text-[10px] font-semibold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded shrink-0">
+                                            Odmowa
+                                          </span>
+                                        )}
+                                        {st.inBoundary === false && (
+                                          <span className="text-[10px] font-medium text-amber-800 shrink-0">
+                                            · poza
+                                          </span>
+                                        )}
                                       </button>
+
+                                      {onOpenBlockUnits && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onOpenBlockUnits(st.id)}
+                                          title={
+                                            isBlock
+                                              ? 'Edytuj mieszkania i klatki w bloku'
+                                              : 'Ustaw jako blok / dom wielorodzinny'
+                                          }
+                                          className={`min-h-[34px] px-2 py-1 text-[11px] font-semibold rounded-lg border inline-flex items-center gap-1 shrink-0 transition-colors ${
+                                            isBlock
+                                              ? 'bg-amber-50 border-amber-300 text-amber-950 hover:bg-amber-100'
+                                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                                          }`}
+                                        >
+                                          <Building2 className="w-3 h-3" />
+                                          <span>{isBlock ? 'Lokale' : 'Blok'}</span>
+                                        </button>
+                                      )}
+
+                                      {onUpdateStop && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setEditingStopDetailsId(
+                                              isDetailsOpen ? null : st.id
+                                            )
+                                          }
+                                          aria-label={`Opcje budynku ${st.address || numLabel}`}
+                                          title="Czas wizyty, uwagi i stała odmowa"
+                                          className={`min-h-[34px] min-w-[34px] px-1.5 py-1 rounded-lg border inline-flex items-center justify-center shrink-0 transition-colors ${
+                                            isDetailsOpen
+                                              ? 'bg-slate-900 border-slate-900 text-white'
+                                              : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900'
+                                          }`}
+                                        >
+                                          <SlidersHorizontal className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+
+                                      {onDeleteStop && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onDeleteStop(st.id)}
+                                          aria-label={`Usuń ${st.address || numLabel}`}
+                                          title={`Usuń ${st.address || numLabel}`}
+                                          className="min-h-[34px] min-w-[32px] inline-flex items-center justify-center text-slate-400 hover:text-red-600 rounded-lg shrink-0"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
+
+                                    {isDetailsOpen && onUpdateStop && (
+                                      <div className="px-2.5 pb-2.5 pt-2 bg-slate-50 border-t border-slate-100 space-y-2">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <div className="flex items-center gap-1">
+                                            <label className="text-[11px] text-slate-600">
+                                              Czas:
+                                            </label>
+                                            <input
+                                              type="number"
+                                              min={3}
+                                              max={1440}
+                                              value={st.durationMinutes}
+                                              onChange={(e) =>
+                                                onUpdateStop(st.id, {
+                                                  durationMinutes: Math.max(
+                                                    3,
+                                                    Math.min(
+                                                      1440,
+                                                      Number.parseInt(
+                                                        e.target.value || '15',
+                                                        10
+                                                      )
+                                                    )
+                                                  ),
+                                                })
+                                              }
+                                              className="w-16 px-2 py-1 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-900 text-right focus:outline-none focus:border-amber-600"
+                                            />
+                                            <span className="text-[11px] text-slate-500">
+                                              min
+                                            </span>
+                                          </div>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              onUpdateStop(st.id, {
+                                                permanentDecline: !isDeclined,
+                                                included: isDeclined ? true : false,
+                                              })
+                                            }
+                                            className={`min-h-[32px] px-2.5 py-1 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 transition-colors ml-auto ${
+                                              isDeclined
+                                                ? 'bg-red-50 border-red-300 text-red-800 hover:bg-red-100'
+                                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                                            }`}
+                                          >
+                                            <Ban className="w-3 h-3" />
+                                            <span>
+                                              {isDeclined
+                                                ? 'Przywróć do kolędy'
+                                                : 'Stała odmowa'}
+                                            </span>
+                                          </button>
+                                        </div>
+
+                                        <input
+                                          type="text"
+                                          value={st.notes ?? ''}
+                                          onChange={(e) =>
+                                            onUpdateStop(st.id, {
+                                              notes: e.target.value,
+                                            })
+                                          }
+                                          placeholder={
+                                            isBlock
+                                              ? 'Uwagi do bloku (klatki, kod domofonu)'
+                                              : 'Uwagi / liczba rodzin'
+                                          }
+                                          className="w-full px-2.5 py-1.5 text-base sm:text-xs bg-white border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-amber-600"
+                                        />
+                                      </div>
                                     )}
                                   </div>
                                 );
@@ -1241,6 +1521,18 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                   );
                 })}
               </ul>
+            )}
+
+            {stops.length > 0 && onClearStops && (
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={onClearStops}
+                  className="min-h-[36px] px-3 py-1.5 text-xs font-medium text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+                >
+                  Usuń całą bazę domów ({stops.length})
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -1279,7 +1571,7 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
             parish={parish}
             existingStops={stops}
             defaultVisitMinutes={defaultVisitMinutes}
-            onClose={() => setCsvImportOpen(false)}
+            onClose={closeCsvModal}
             onImportPlaces={onBatchAddStops}
             onEnrichExistingStops={onEnrichExistingStops}
           />

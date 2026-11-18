@@ -625,6 +625,109 @@ export function extractHouseNumberSortKey(houseNumber: string): number {
   return Number.parseInt(match[0], 10);
 }
 
+export function isBlockStop(
+  stop: Pick<VisitStop, 'isMultiUnit' | 'units' | 'unitsCount'>
+): boolean {
+  return Boolean(
+    stop.isMultiUnit ||
+      (stop.units && stop.units.length > 0) ||
+      (stop.unitsCount ?? 0) > 1
+  );
+}
+
+export function getStopUnitCount(
+  stop: Pick<VisitStop, 'units' | 'unitsCount'>
+): number {
+  return stop.units && stop.units.length > 0
+    ? stop.units.length
+    : (stop.unitsCount ?? 0);
+}
+
+export function compareStopsByHouseNumber(
+  a: Pick<VisitStop, 'address' | 'label'>,
+  b: Pick<VisitStop, 'address' | 'label'>
+): number {
+  const labelA = extractHouseNumberLabel(a) || a.label || a.address;
+  const labelB = extractHouseNumberLabel(b) || b.label || b.address;
+  return (
+    extractHouseNumberSortKey(labelA) - extractHouseNumberSortKey(labelB) ||
+    labelA.localeCompare(labelB, 'pl', { numeric: true, sensitivity: 'base' })
+  );
+}
+
+export interface HouseParityBounds {
+  count: number;
+  minLabel: string;
+  maxLabel: string;
+  minNum: number | null;
+  maxNum: number | null;
+}
+
+export interface StreetNumberBoundsSummary {
+  all: HouseParityBounds;
+  even: HouseParityBounds;
+  odd: HouseParityBounds;
+}
+
+function summarizeGroupBounds(
+  items: Array<Pick<VisitStop, 'address' | 'label'>>
+): HouseParityBounds {
+  if (items.length === 0) {
+    return { count: 0, minLabel: '', maxLabel: '', minNum: null, maxNum: null };
+  }
+  const numericEntries = items
+    .map((s) => {
+      const lbl = extractHouseNumberLabel(s);
+      const key = extractHouseNumberSortKey(lbl);
+      return { lbl, key };
+    })
+    .filter((e) => e.lbl && e.key < Number.MAX_SAFE_INTEGER)
+    .sort(
+      (a, b) =>
+        a.key - b.key ||
+        a.lbl.localeCompare(b.lbl, 'pl', { numeric: true, sensitivity: 'base' })
+    );
+
+  if (numericEntries.length === 0) {
+    return {
+      count: items.length,
+      minLabel: '',
+      maxLabel: '',
+      minNum: null,
+      maxNum: null,
+    };
+  }
+
+  const first = numericEntries[0];
+  const last = numericEntries[numericEntries.length - 1];
+  return {
+    count: items.length,
+    minLabel: first.lbl,
+    maxLabel: last.lbl,
+    minNum: first.key,
+    maxNum: last.key,
+  };
+}
+
+export function computeStreetNumberBounds(
+  stops: Array<Pick<VisitStop, 'address' | 'label'>>
+): StreetNumberBoundsSummary {
+  const evenStops: Array<Pick<VisitStop, 'address' | 'label'>> = [];
+  const oddStops: Array<Pick<VisitStop, 'address' | 'label'>> = [];
+
+  for (const s of stops) {
+    const isEven = isEvenHouseNumberStr(extractHouseNumberLabel(s));
+    if (isEven === true) evenStops.push(s);
+    else if (isEven === false) oddStops.push(s);
+  }
+
+  return {
+    all: summarizeGroupBounds(stops),
+    even: summarizeGroupBounds(evenStops),
+    odd: summarizeGroupBounds(oddStops),
+  };
+}
+
 /**
  * Formats a concise human-readable range of house numbers for parish bulletin announcements,
  * e.g. "1–45" or "2, 4, 6" when sparse.

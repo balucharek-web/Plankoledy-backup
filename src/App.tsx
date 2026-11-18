@@ -49,7 +49,7 @@ import { PlanDashboard, WorkspaceSection } from './components/PlanDashboard';
 import { SelectedPlaceData } from './components/PlaceSearchInput';
 import { SidebarRoutes } from './components/SidebarRoutes';
 import { SidebarSettings } from './components/SidebarSettings';
-import { SidebarSetup } from './components/SidebarSetup';
+import { SidebarSetup, SetupTab } from './components/SidebarSetup';
 import {
   CustomDayPlanPayload,
   SidebarStops,
@@ -192,6 +192,8 @@ function clearLegacyLocalStorage() {
 function ParishPlannerWorkspace({
   authUser,
   pendingVerificationEmail,
+  authModalOpen,
+  onCloseAuthModal,
   onSignInGoogle,
   onSignOutGoogle,
   optimizer,
@@ -199,6 +201,8 @@ function ParishPlannerWorkspace({
 }: {
   authUser: User | null;
   pendingVerificationEmail: string | null;
+  authModalOpen: boolean;
+  onCloseAuthModal: () => void;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
   optimizer: RouteOptimizerHandle;
@@ -230,11 +234,21 @@ function ParishPlannerWorkspace({
 
   const [activeSection, setActiveSection] =
     useState<WorkspaceSection>('overview');
+  const [sectionHistory, setSectionHistory] = useState<WorkspaceSection[]>([
+    'overview',
+  ]);
+  const [setupTabRequest, setSetupTabRequest] = useState<{
+    tab: SetupTab;
+    seq: number;
+  } | null>(null);
   const [plannerLoadState, setPlannerLoadState] = useState<{
     date: string | null;
     seq: number;
   }>({ date: null, seq: 0 });
   const [mobilePane, setMobilePane] = useState<MobilePane>('panel');
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 1024 : false
+  );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [interactionMode, setInteractionMode] =
     useState<MapInteractionMode>('pan');
@@ -245,6 +259,7 @@ function ParishPlannerWorkspace({
     useState<StreetPickFeedback | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [areaScannerOpen, setAreaScannerOpen] = useState(false);
+  const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [postBoundaryBanner, setPostBoundaryBanner] = useState(false);
   const [lassoSelectedStopIds, setLassoSelectedStopIds] = useState<string[]>([]);
   const [lassoAssignDate, setLassoAssignDate] = useState<string>('');
@@ -280,6 +295,15 @@ function ParishPlannerWorkspace({
   const stopsRef = useRef<VisitStop[]>(stops);
   stopsRef.current = stops;
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(max-width: 1023px)');
+    const sync = () => setIsMobileViewport(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+
   const navigateToSection = useCallback((section: WorkspaceSection) => {
     if (section !== 'stops') {
       setPlannerLoadState((prev) =>
@@ -287,9 +311,22 @@ function ParishPlannerWorkspace({
       );
     }
     setActiveSection(section);
+    setSectionHistory((prev) => {
+      if (section === 'overview') return ['overview'];
+      if (prev[prev.length - 1] === section) return prev;
+      return [...prev.slice(-9), section];
+    });
     setMobilePane('panel');
     setMobileMenuOpen(false);
   }, []);
+
+  const navigateToSetupTab = useCallback(
+    (tab: SetupTab) => {
+      setSetupTabRequest((prev) => ({ tab, seq: (prev?.seq ?? 0) + 1 }));
+      navigateToSection('parish');
+    },
+    [navigateToSection]
+  );
 
   const handleEditDayInPlanner = useCallback(
     (date: string) => {
@@ -1328,35 +1365,6 @@ function ParishPlannerWorkspace({
     [authUser, clearRoutes, showUndoToast]
   );
 
-  const handleToggleStreetIncluded = useCallback(
-    (stopIds: string[], included: boolean) => {
-      if (stopIds.length === 0) return;
-      const idSet = new Set(stopIds);
-      const currentId = activeParishIdRef.current;
-      const changed: VisitStop[] = [];
-
-      setStops((prev) =>
-        prev.map((s) => {
-          if (!idSet.has(s.id)) return s;
-          if ((s.included !== false) === included) return s;
-          const next = { ...s, included };
-          changed.push(next);
-          return next;
-        })
-      );
-      clearRoutes();
-
-      if (authUser && currentId && changed.length > 0) {
-        void batchUpdateStopFieldInFirestore(
-          currentId,
-          changed,
-          'included'
-        ).catch(() => {});
-      }
-    },
-    [authUser, clearRoutes]
-  );
-
   const handleAssignStreetPriest = useCallback(
     (stopIds: string[], priestId: number) => {
       if (stopIds.length === 0) return;
@@ -1385,59 +1393,6 @@ function ParishPlannerWorkspace({
     },
     [authUser, clearRoutes]
   );
-
-  const handleSetAllIncluded = useCallback(
-    (included: boolean) => {
-      const currentId = activeParishIdRef.current;
-      const changed: VisitStop[] = [];
-
-      setStops((prev) =>
-        prev.map((s) => {
-          if ((s.included !== false) === included) return s;
-          const next = { ...s, included };
-          changed.push(next);
-          return next;
-        })
-      );
-      clearRoutes();
-
-      if (authUser && currentId && changed.length > 0) {
-        void batchUpdateStopFieldInFirestore(
-          currentId,
-          changed,
-          'included'
-        ).catch(() => {});
-      }
-    },
-    [authUser, clearRoutes]
-  );
-
-  const handleAutoPartition = useCallback(() => {
-    if (!parish) return;
-    const currentId = activeParishIdRef.current;
-    let changedActive: VisitStop[] = [];
-
-    setStops((prev) => {
-      const activeOnly = prev.filter((s) => s.included !== false);
-      const partitionedActive = partitionStopsBySector(
-        parish.location,
-        activeOnly,
-        config.priestCount
-      );
-      const byId = new Map(partitionedActive.map((s) => [s.id, s]));
-      changedActive = partitionedActive;
-      return prev.map((s) => byId.get(s.id) ?? s);
-    });
-    clearRoutes();
-
-    if (authUser && currentId && changedActive.length > 0) {
-      void batchUpdateStopFieldInFirestore(
-        currentId,
-        changedActive,
-        'priestId'
-      ).catch(() => {});
-    }
-  }, [authUser, parish, config.priestCount, clearRoutes]);
 
   const handleAutoScheduleSeason = useCallback(
     (targetMode: 'all' | 'unscheduled') => {
@@ -2382,7 +2337,7 @@ function ParishPlannerWorkspace({
       setPlannerDraftStreets([]);
       setMarkerLabelMode('numbers');
       setInteractionMode('pan');
-      setActiveSection('routes');
+      navigateToSection('routes');
       setMobilePane('map');
 
       if (authUser && currentId && changed.length > 0) {
@@ -2496,6 +2451,120 @@ function ParishPlannerWorkspace({
     setInteractionMode('pan');
     setMobilePane('map');
   }, []);
+
+  // Mobile & Browser Hardware Back Button Support (History API guard)
+  const hasBackLayer =
+    authModalOpen ||
+    Boolean(confirmState) ||
+    guideOpen ||
+    areaScannerOpen ||
+    csvImportOpen ||
+    Boolean(editingBlockStopId) ||
+    mobileMenuOpen ||
+    validLassoSelectedIds.length > 0 ||
+    interactionMode !== 'pan' ||
+    fieldModeOnMap ||
+    (isMobileViewport && mobilePane === 'map') ||
+    sectionHistory.length > 1 ||
+    activeSection !== 'overview';
+
+  const handleHardwareBackRef = useRef<() => void>(() => {});
+  handleHardwareBackRef.current = () => {
+    if (authModalOpen) {
+      onCloseAuthModal();
+      return;
+    }
+    if (confirmState) {
+      setConfirmState(null);
+      return;
+    }
+    if (guideOpen) {
+      setGuideOpen(false);
+      return;
+    }
+    if (areaScannerOpen) {
+      setAreaScannerOpen(false);
+      return;
+    }
+    if (csvImportOpen) {
+      setCsvImportOpen(false);
+      return;
+    }
+    if (editingBlockStopId) {
+      setEditingBlockStopId(null);
+      return;
+    }
+    if (mobileMenuOpen) {
+      setMobileMenuOpen(false);
+      return;
+    }
+    if (validLassoSelectedIds.length > 0) {
+      setLassoSelectedStopIds([]);
+      return;
+    }
+    if (interactionMode !== 'pan') {
+      setInteractionMode('pan');
+      return;
+    }
+    if (fieldModeOnMap) {
+      setFieldModeOnMap(false);
+      return;
+    }
+    if (isMobileViewport && mobilePane === 'map') {
+      setMobilePane('panel');
+      return;
+    }
+    if (sectionHistory.length > 1) {
+      const trimmed = sectionHistory.slice(0, -1);
+      const prevSection = trimmed[trimmed.length - 1] ?? 'overview';
+      setSectionHistory(trimmed);
+      setActiveSection(prevSection);
+      setMobilePane('panel');
+      return;
+    }
+    if (activeSection !== 'overview') {
+      setSectionHistory(['overview']);
+      setActiveSection('overview');
+      setMobilePane('panel');
+    }
+  };
+
+  const guardActiveRef = useRef(false);
+  const ignoreNextPopRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      if (ignoreNextPopRef.current) {
+        ignoreNextPopRef.current = false;
+        return;
+      }
+      guardActiveRef.current = false;
+      handleHardwareBackRef.current();
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (hasBackLayer && !guardActiveRef.current) {
+      try {
+        window.history.pushState({ __pkBackGuard: true }, '', window.location.href);
+        guardActiveRef.current = true;
+      } catch {
+        // Ignore restricted history environments
+      }
+    } else if (!hasBackLayer && guardActiveRef.current) {
+      guardActiveRef.current = false;
+      ignoreNextPopRef.current = true;
+      try {
+        window.history.back();
+      } catch {
+        ignoreNextPopRef.current = false;
+      }
+    }
+  }, [hasBackLayer]);
 
   const navItems: Array<{
     id: WorkspaceSection;
@@ -2751,7 +2820,7 @@ function ParishPlannerWorkspace({
                 onDeleteDayRoute={handleDeleteDayPlan}
                 onStartNewSeason={handleStartNewSeason}
                 onBackToMap={() => {
-                  setActiveSection('overview');
+                  navigateToSection('overview');
                   setMobilePane('map');
                 }}
               />
@@ -2845,6 +2914,10 @@ function ParishPlannerWorkspace({
                     streetPickFeedback={streetPickFeedback}
                     isSignedIn={Boolean(authUser)}
                     userEmail={authUser?.email ?? null}
+                    requestedTab={setupTabRequest}
+                    csvImportOpen={csvImportOpen}
+                    onOpenCsvImport={() => setCsvImportOpen(true)}
+                    onCloseCsvImport={() => setCsvImportOpen(false)}
                     onDismissStreetFeedback={() => setStreetPickFeedback(null)}
                     onSignInGoogle={onSignInGoogle}
                     onSelectParish={handleSelectParish}
@@ -2896,6 +2969,9 @@ function ParishPlannerWorkspace({
                     onBatchAddStops={handleBatchAddStops}
                     onEnrichExistingStops={handleEnrichStopsFromKartoteka}
                     defaultVisitMinutes={config.defaultVisitMinutes}
+                    onUpdateStop={handleUpdateStop}
+                    onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
+                    onClearStops={handleClearStops}
                     onDeleteStreetStops={handleDeleteStreetStops}
                     onDeleteStop={handleDeleteStop}
                     onSelectStop={(id) => {
@@ -2929,29 +3005,16 @@ function ParishPlannerWorkspace({
                       setSelectedDate(d);
                       setFocusedPriestId(null);
                     }}
-                    onAssignStopsDate={handleAssignStopsDate}
-                    onToggleStreetIncluded={handleToggleStreetIncluded}
-                    onAssignStreetPriest={handleAssignStreetPriest}
-                    onSetAllIncluded={handleSetAllIncluded}
-                    onUpdateStop={handleUpdateStop}
-                    onDeleteStop={handleDeleteStop}
-                    onClearStops={handleClearStops}
-                    onAutoPartition={handleAutoPartition}
                     onSelectStop={(id) => {
                       setHighlightedStopId(id);
                       setMobilePane('map');
                     }}
-                    onOpenBlockUnits={(id) => setEditingBlockStopId(id)}
                     onAddMissingOnStreet={handleAddMissingOnStreet}
-                    onComputeDayRoute={(d) =>
-                      void handleComputeRoutesForDate(d)
-                    }
                     onPlanCustomDay={handlePlanCustomDay}
                     onDeleteDayPlan={handleDeleteDayPlan}
-                    onGoToSetup={() => navigateToSection('parish')}
+                    onGoToSetup={() => navigateToSetupTab('streets')}
                     onGoToSchedule={() => navigateToSection('schedule')}
                     isComputing={isComputing}
-                    progressLabel={progressLabel}
                   />
                 )}
 
@@ -3807,7 +3870,7 @@ function ParishPlannerWorkspace({
         <button
           type="button"
           onClick={() => {
-            if (activeSection === 'schedule') setActiveSection('overview');
+            if (activeSection === 'schedule') navigateToSection('overview');
             setMobilePane((p) => (p === 'map' ? 'panel' : 'map'));
           }}
           className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
@@ -4071,11 +4134,15 @@ function ParishPlannerWorkspace({
 function GoogleMapsWorkspace({
   authUser,
   pendingVerificationEmail,
+  authModalOpen,
+  onCloseAuthModal,
   onSignInGoogle,
   onSignOutGoogle,
 }: {
   authUser: User | null;
   pendingVerificationEmail: string | null;
+  authModalOpen: boolean;
+  onCloseAuthModal: () => void;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
 }) {
@@ -4085,6 +4152,8 @@ function GoogleMapsWorkspace({
       <ParishPlannerWorkspace
         authUser={authUser}
         pendingVerificationEmail={pendingVerificationEmail}
+        authModalOpen={authModalOpen}
+        onCloseAuthModal={onCloseAuthModal}
         onSignInGoogle={onSignInGoogle}
         onSignOutGoogle={onSignOutGoogle}
         optimizer={optimizer}
@@ -4097,11 +4166,15 @@ function GoogleMapsWorkspace({
 function OsmFreeWorkspace({
   authUser,
   pendingVerificationEmail,
+  authModalOpen,
+  onCloseAuthModal,
   onSignInGoogle,
   onSignOutGoogle,
 }: {
   authUser: User | null;
   pendingVerificationEmail: string | null;
+  authModalOpen: boolean;
+  onCloseAuthModal: () => void;
   onSignInGoogle: () => void;
   onSignOutGoogle: () => void;
 }) {
@@ -4111,6 +4184,8 @@ function OsmFreeWorkspace({
       <ParishPlannerWorkspace
         authUser={authUser}
         pendingVerificationEmail={pendingVerificationEmail}
+        authModalOpen={authModalOpen}
+        onCloseAuthModal={onCloseAuthModal}
         onSignInGoogle={onSignInGoogle}
         onSignOutGoogle={onSignOutGoogle}
         optimizer={optimizer}
@@ -4220,6 +4295,8 @@ export default function App() {
         <OsmFreeWorkspace
           authUser={verifiedAuthUser}
           pendingVerificationEmail={pendingVerificationEmail}
+          authModalOpen={authModalOpen}
+          onCloseAuthModal={() => setAuthModalOpen(false)}
           onSignInGoogle={() => setAuthModalOpen(true)}
           onSignOutGoogle={handleSignOutGoogle}
         />
@@ -4233,6 +4310,8 @@ export default function App() {
           <GoogleMapsWorkspace
             authUser={verifiedAuthUser}
             pendingVerificationEmail={pendingVerificationEmail}
+            authModalOpen={authModalOpen}
+            onCloseAuthModal={() => setAuthModalOpen(false)}
             onSignInGoogle={() => setAuthModalOpen(true)}
             onSignOutGoogle={handleSignOutGoogle}
           />
