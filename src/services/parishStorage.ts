@@ -17,11 +17,14 @@ import {
 import { db } from '../firebase';
 import {
   BuildingUnit,
+  DayBreakWindow,
+  DayTimeWindow,
   LatLng,
   ParishCenter,
   PlanConfig,
   SavedParishRecord,
   SeasonPlanConfig,
+  SeasonPlanningRules,
   UnitVisitStatus,
   VisitStop,
 } from '../types/parish';
@@ -38,7 +41,8 @@ export const DEFAULT_PLAN_CONFIG: PlanConfig = {
 export const DEFAULT_SEASON_CONFIG: SeasonPlanConfig = {
   startDate: '2026-12-28',
   weekdayStartTime: '15:30',
-  weekendStartTime: '10:00',
+  saturdayStartTime: '10:00',
+  weekendStartTime: '14:00',
   dailyEndTime: '20:30',
   weekdaysMask: '1,2,3,4,5,6',
 };
@@ -102,6 +106,26 @@ export function sanitizeConfig(config: PlanConfig): PlanConfig {
   };
 }
 
+function sanitizeBreakWindows(
+  rawBreaks?: DayBreakWindow[] | null
+): DayBreakWindow[] {
+  if (!Array.isArray(rawBreaks)) return [];
+  const out: DayBreakWindow[] = [];
+  for (let i = 0; i < rawBreaks.length && out.length < 10; i++) {
+    const bw = rawBreaks[i];
+    if (!bw || typeof bw !== 'object') continue;
+    const st = cleanStr(bw.startTime, 5);
+    const et = cleanStr(bw.endTime, 5);
+    if (!/^\d{1,2}:\d{2}$/.test(st) || !/^\d{1,2}:\d{2}$/.test(et)) continue;
+    const id = cleanStr(bw.id, 60) || `brk_${i + 1}`;
+    const label = cleanStr(bw.label, 80);
+    const entry: DayBreakWindow = { id, startTime: st, endTime: et };
+    if (label) entry.label = label;
+    out.push(entry);
+  }
+  return out;
+}
+
 export function sanitizeSeasonConfig(
   sc?: Partial<SeasonPlanConfig> | null
 ): SeasonPlanConfig {
@@ -109,34 +133,96 @@ export function sanitizeSeasonConfig(
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
     ? rawDate
     : DEFAULT_SEASON_CONFIG.startDate;
+
+  const rawEndDate = cleanStr(sc?.endDate, 10);
+  const endDate =
+    /^\d{4}-\d{2}-\d{2}$/.test(rawEndDate) && rawEndDate >= startDate
+      ? rawEndDate
+      : '';
+
   const weekdayStartTime =
-    cleanStr(sc?.weekdayStartTime, 5).length >= 4
+    /^\d{1,2}:\d{2}$/.test(cleanStr(sc?.weekdayStartTime, 5))
       ? cleanStr(sc?.weekdayStartTime, 5)
       : DEFAULT_SEASON_CONFIG.weekdayStartTime;
+  const saturdayStartRaw = cleanStr(sc?.saturdayStartTime, 5);
+  const saturdayStartTime = /^\d{1,2}:\d{2}$/.test(saturdayStartRaw)
+    ? saturdayStartRaw
+    : '';
   const weekendStartTime =
-    cleanStr(sc?.weekendStartTime, 5).length >= 4
+    /^\d{1,2}:\d{2}$/.test(cleanStr(sc?.weekendStartTime, 5))
       ? cleanStr(sc?.weekendStartTime, 5)
       : DEFAULT_SEASON_CONFIG.weekendStartTime;
   const dailyEndTime =
-    cleanStr(sc?.dailyEndTime, 5).length >= 4
+    /^\d{1,2}:\d{2}$/.test(cleanStr(sc?.dailyEndTime, 5))
       ? cleanStr(sc?.dailyEndTime, 5)
       : DEFAULT_SEASON_CONFIG.dailyEndTime;
   const rawMask = cleanStr(sc?.weekdaysMask, 20).replace(/[^0-6,]/g, '');
 
-  const sanitizedOverrides: Record<string, { startTime: string; endTime: string }> = {};
+  const excludedDates = Array.isArray(sc?.excludedDates)
+    ? Array.from(
+        new Set(
+          sc.excludedDates
+            .map((d) => cleanStr(d, 10))
+            .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+        )
+      )
+        .sort()
+        .slice(0, 150)
+    : [];
+
+  const defaultBreaks = sanitizeBreakWindows(sc?.defaultBreaks);
+
+  const sanitizedOverrides: Record<string, DayTimeWindow> = {};
   if (sc?.dayTimeOverrides && typeof sc.dayTimeOverrides === 'object') {
     for (const [dateKey, win] of Object.entries(sc.dayTimeOverrides)) {
-      if (Object.keys(sanitizedOverrides).length >= 120) break;
+      if (Object.keys(sanitizedOverrides).length >= 150) break;
       const cleanDate = cleanStr(dateKey, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate) || !win || typeof win !== 'object') {
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(cleanDate) ||
+        !win ||
+        typeof win !== 'object'
+      ) {
         continue;
       }
       const st = cleanStr(win.startTime, 5);
       const et = cleanStr(win.endTime, 5);
       if (/^\d{1,2}:\d{2}$/.test(st) && /^\d{1,2}:\d{2}$/.test(et)) {
-        sanitizedOverrides[cleanDate] = { startTime: st, endTime: et };
+        const entry: DayTimeWindow = { startTime: st, endTime: et };
+        if (Array.isArray(win.breaks)) {
+          entry.breaks = sanitizeBreakWindows(win.breaks);
+        }
+        sanitizedOverrides[cleanDate] = entry;
       }
     }
+  }
+
+  let sanitizedRules: SeasonPlanningRules | undefined;
+  if (sc?.planningRules && typeof sc.planningRules === 'object') {
+    const pr = sc.planningRules;
+    const splitMode =
+      pr.splitMode === 'parity' ||
+      pr.splitMode === 'strict_budget' ||
+      pr.splitMode === 'whole_or_half'
+        ? pr.splitMode
+        : 'whole_or_half';
+    const zoneDirection =
+      pr.zoneDirection === 'nearest_first' ||
+      pr.zoneDirection === 'farthest_first' ||
+      pr.zoneDirection === 'clockwise'
+        ? pr.zoneDirection
+        : 'clockwise';
+    const blockPreference =
+      pr.blockPreference === 'blocks_weekdays_houses_weekend' ||
+      pr.blockPreference === 'any'
+        ? pr.blockPreference
+        : 'any';
+    const safetyBufferMinutes = clampInt(pr.safetyBufferMinutes, 0, 120, 15);
+    sanitizedRules = {
+      splitMode,
+      zoneDirection,
+      blockPreference,
+      safetyBufferMinutes,
+    };
   }
 
   const result: SeasonPlanConfig = {
@@ -146,6 +232,21 @@ export function sanitizeSeasonConfig(
     dailyEndTime,
     weekdaysMask: rawMask || DEFAULT_SEASON_CONFIG.weekdaysMask,
   };
+  if (endDate) {
+    result.endDate = endDate;
+  }
+  if (saturdayStartTime) {
+    result.saturdayStartTime = saturdayStartTime;
+  }
+  if (excludedDates.length > 0) {
+    result.excludedDates = excludedDates;
+  }
+  if (defaultBreaks.length > 0) {
+    result.defaultBreaks = defaultBreaks;
+  }
+  if (sanitizedRules) {
+    result.planningRules = sanitizedRules;
+  }
   if (Object.keys(sanitizedOverrides).length > 0) {
     result.dayTimeOverrides = sanitizedOverrides;
   }

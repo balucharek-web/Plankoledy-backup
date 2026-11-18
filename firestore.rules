@@ -52,16 +52,44 @@ service cloud.firestore {
         && cfg.returnToParish is bool;
     }
 
+    function isValidTimeStr(val) {
+      return val is string && val.size() >= 4 && val.size() <= 5 && val.matches('^[0-9]{1,2}:[0-9]{2}$');
+    }
+
+    function isValidBreakWindow(bw) {
+      return bw is map
+        && bw.keys().hasAll(['id', 'startTime', 'endTime'])
+        && bw.keys().hasOnly(['id', 'startTime', 'endTime', 'label'])
+        && bw.id is string && bw.id.size() >= 1 && bw.id.size() <= 60
+        && isValidTimeStr(bw.startTime)
+        && isValidTimeStr(bw.endTime)
+        && (!('label' in bw) || (bw.label is string && bw.label.size() <= 80));
+    }
+
+    function isValidPlanningRules(pr) {
+      return pr is map
+        && pr.keys().hasOnly(['splitMode', 'zoneDirection', 'blockPreference', 'safetyBufferMinutes'])
+        && (!('splitMode' in pr) || (pr.splitMode in ['whole_or_half', 'parity', 'strict_budget']))
+        && (!('zoneDirection' in pr) || (pr.zoneDirection in ['clockwise', 'nearest_first', 'farthest_first']))
+        && (!('blockPreference' in pr) || (pr.blockPreference in ['any', 'blocks_weekdays_houses_weekend']))
+        && (!('safetyBufferMinutes' in pr) || (pr.safetyBufferMinutes is number && pr.safetyBufferMinutes >= 0 && pr.safetyBufferMinutes <= 120));
+    }
+
     function isValidSeasonConfig(sc) {
       return sc is map
         && sc.keys().hasAll(['startDate', 'weekdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask'])
-        && sc.keys().hasOnly(['startDate', 'weekdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask', 'dayTimeOverrides'])
+        && sc.keys().hasOnly(['startDate', 'endDate', 'weekdayStartTime', 'saturdayStartTime', 'weekendStartTime', 'dailyEndTime', 'weekdaysMask', 'excludedDates', 'defaultBreaks', 'planningRules', 'dayTimeOverrides'])
         && sc.startDate is string && sc.startDate.size() == 10 && sc.startDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
-        && sc.weekdayStartTime is string && sc.weekdayStartTime.size() >= 4 && sc.weekdayStartTime.size() <= 5
-        && sc.weekendStartTime is string && sc.weekendStartTime.size() >= 4 && sc.weekendStartTime.size() <= 5
-        && sc.dailyEndTime is string && sc.dailyEndTime.size() >= 4 && sc.dailyEndTime.size() <= 5
+        && (!('endDate' in sc) || (sc.endDate is string && sc.endDate.size() == 10 && sc.endDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')))
+        && isValidTimeStr(sc.weekdayStartTime)
+        && (!('saturdayStartTime' in sc) || isValidTimeStr(sc.saturdayStartTime))
+        && isValidTimeStr(sc.weekendStartTime)
+        && isValidTimeStr(sc.dailyEndTime)
         && sc.weekdaysMask is string && sc.weekdaysMask.size() <= 20 && sc.weekdaysMask.matches('^[0-6,]*$')
-        && (!('dayTimeOverrides' in sc) || (sc.dayTimeOverrides is map && sc.dayTimeOverrides.size() <= 120));
+        && (!('excludedDates' in sc) || (sc.excludedDates is list && sc.excludedDates.size() <= 150 && (sc.excludedDates.size() == 0 || (sc.excludedDates[0] is string && sc.excludedDates[0].size() == 10))))
+        && (!('defaultBreaks' in sc) || (sc.defaultBreaks is list && sc.defaultBreaks.size() <= 10 && (sc.defaultBreaks.size() == 0 || isValidBreakWindow(sc.defaultBreaks[0]))))
+        && (!('planningRules' in sc) || isValidPlanningRules(sc.planningRules))
+        && (!('dayTimeOverrides' in sc) || (sc.dayTimeOverrides is map && sc.dayTimeOverrides.size() <= 150));
     }
 
     function isValidParish(data) {

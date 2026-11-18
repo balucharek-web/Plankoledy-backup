@@ -813,6 +813,7 @@ export interface StopMarkerAppearance {
   fillColorOverride?: string;
   zIndexPriority: number;
   isStartPoint?: boolean;
+  isEndPoint?: boolean;
 }
 
 export function computeStopMarkerAppearance({
@@ -857,25 +858,29 @@ export function computeStopMarkerAppearance({
 
   if (!isActiveInView || isDimmedByStreet) {
     return {
-      size: isSelected ? 22 : 6,
+      size: isSelected ? 22 : 5,
       showLabel: isSelected,
       labelText: isSelected && routeMeta ? String(routeMeta.orderNumber) : '',
       fontSize: 9,
-      opacity: isSelected ? 1 : isDimmedByStreet ? 0.34 : 0.36,
+      opacity: isSelected ? 1 : isDimmedByStreet ? 0.28 : 0.22,
       borderWidth: isSelected ? 2 : 1,
       fillColorOverride: isDimmedByStreet ? '#94A3B8' : '#CBD5E1',
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
-      zIndexPriority: isSelected ? 400 : 15,
+      zIndexPriority: isSelected ? 400 : 10,
     };
   }
 
   const orderNumber = routeMeta?.orderNumber;
   const isStartPoint = Boolean(routeMeta?.isFirstInRoute) && !isDimmedByPriest;
-  const opacity = isDimmedByPriest ? 0.28 : 1;
+  const isEndPoint =
+    Boolean(routeMeta?.isLastInRoute) &&
+    !routeMeta?.isFirstInRoute &&
+    !isDimmedByPriest;
+  const opacity = isDimmedByPriest ? 0.24 : 1;
 
   // Compact tiny pin size based on zoom level so adjacent houses don't blot out the map
   const tinyDotSize =
-    zoom <= 13 ? 6 : zoom === 14 ? 7 : zoom === 15 ? 9 : 11;
+    zoom <= 13 ? 6 : zoom === 14 ? 8 : zoom === 15 ? 10 : 12;
 
   // Mode 'dots' OR unrouted houses (no orderNumber yet, e.g. parish overview):
   // never draw giant empty circles — use tiny crisp dots at houses.
@@ -891,7 +896,7 @@ export function computeStopMarkerAppearance({
       : showKeyBadge
         ? isStartPoint
           ? 22
-          : 17
+          : 18
         : showBlockLetter
           ? 15
           : isBlock
@@ -911,8 +916,8 @@ export function computeStopMarkerAppearance({
             ? 'B'
             : '',
       fontSize: 9,
-      opacity: isDimmedByPriest ? 0.25 : 0.94,
-      borderWidth: isStartPoint ? 2.5 : showKeyBadge ? 1.5 : 1.25,
+      opacity: isDimmedByPriest ? 0.24 : 0.96,
+      borderWidth: isStartPoint || isEndPoint ? 2.5 : showKeyBadge ? 1.5 : 1.25,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
@@ -925,46 +930,52 @@ export function computeStopMarkerAppearance({
               ? 140
               : 80,
       isStartPoint,
+      isEndPoint,
     };
   }
 
   // Routed stops with orderNumber:
   // In 'numbers' mode always show numbers; in 'auto' mode show numbers when zoomed in (>= 15),
-  // focused on a street, or viewing a compact route (<= 24 stops); otherwise show tiny dots + key anchors.
+  // focused on a street, or viewing a typical daily route (<= 35 stops); otherwise show tiny dots + key anchors.
   const showEveryHouseNumber =
     markerLabelMode === 'numbers' ||
     hasFocusedStreet ||
-    activeVisibleCount <= 24 ||
+    activeVisibleCount <= 35 ||
     zoom >= 15;
 
   if (showEveryHouseNumber) {
-    const baseSize = zoom <= 14 ? 17 : zoom === 15 ? 20 : 22;
+    const baseSize = zoom <= 14 ? 18 : zoom === 15 ? 21 : 23;
     const size = isSelected
       ? 26
       : isStartPoint
         ? baseSize + 3
-        : baseSize;
+        : isEndPoint
+          ? baseSize + 1
+          : baseSize;
     return {
       size,
       showLabel: true,
       labelText: String(orderNumber),
       fontSize: orderNumber >= 100 || zoom <= 14 ? 8.5 : 9.5,
       opacity,
-      borderWidth: isStartPoint ? 2.5 : 1.5,
+      borderWidth: isStartPoint || isEndPoint ? 2.5 : 1.5,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
         ? 450
         : isStartPoint
           ? 390
-          : isDimmedByPriest
-            ? 40
-            : 300 - Math.min(200, orderNumber),
+          : isEndPoint
+            ? 340
+            : isDimmedByPriest
+              ? 40
+              : 300 - Math.min(200, orderNumber),
       isStartPoint,
+      isEndPoint,
     };
   }
 
-  // Overview with >24 routed stops zoomed out in 'auto' mode: highlight key points & use tiny dots in between
+  // Overview with >35 routed stops zoomed out in 'auto' mode: highlight key points & use tiny dots in between
   const showOverviewAnchor =
     isSelected ||
     isStartPoint ||
@@ -974,12 +985,12 @@ export function computeStopMarkerAppearance({
 
   if (showOverviewAnchor) {
     return {
-      size: isSelected ? 24 : isStartPoint ? 22 : 17,
+      size: isSelected ? 24 : isStartPoint ? 22 : isEndPoint ? 19 : 17,
       showLabel: true,
       labelText: String(orderNumber),
       fontSize: orderNumber >= 100 ? 8 : 8.5,
       opacity,
-      borderWidth: isStartPoint ? 2.5 : 1.5,
+      borderWidth: isStartPoint || isEndPoint ? 2.5 : 1.5,
       fillColorOverride: isStartPoint && !isSelected ? '#15803D' : undefined,
       borderColorOverride: isSelected ? '#0F172A' : '#FFFFFF',
       zIndexPriority: isSelected
@@ -990,6 +1001,7 @@ export function computeStopMarkerAppearance({
             ? 340
             : 290,
       isStartPoint,
+      isEndPoint,
     };
   }
 

@@ -14,16 +14,11 @@ import {
   ArrowLeft,
   CalendarCheck,
   CalendarPlus,
-  ChevronLeft,
-  ChevronRight,
   Church,
   ClipboardCheck,
   Crosshair,
-  Eye,
-  EyeOff,
   HelpCircle,
   LayoutDashboard,
-  ListOrdered,
   LogIn,
   LogOut,
   Map as MapIcon,
@@ -41,6 +36,7 @@ import {
 } from 'lucide-react';
 import { AuthModal } from './components/AuthModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { MapDayRouteBar } from './components/MapDayRouteBar';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { OsmParishMap } from './components/OsmParishMap';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -115,6 +111,7 @@ import {
   updateStopInFirestore,
 } from './services/parishStorage';
 import {
+  DayBreakWindow,
   LatLng,
   MapInteractionMode,
   MarkerLabelMode,
@@ -135,6 +132,7 @@ import {
   computeManualOrderForStops,
   formatPolishDateChip,
   formatPolishDateFull,
+  getDayActiveBreaks,
   getDayEndTime,
   getDayStartTime,
 } from './utils/seasonScheduler';
@@ -172,7 +170,8 @@ interface RouteOptimizerHandle {
   computeAllRoutes: (
     parish: ParishCenter,
     stops: VisitStop[],
-    config: PlanConfig
+    config: PlanConfig,
+    activeBreaks?: DayBreakWindow[]
   ) => Promise<{
     routes: PriestRouteResult[];
     routeObjects: RoutePolylineEntry[];
@@ -1398,12 +1397,36 @@ function ParishPlannerWorkspace({
     (targetMode: 'all' | 'unscheduled') => {
       if (!parish || stopsRef.current.length === 0) return;
       const currentId = activeParishIdRef.current;
+      const prevStops = stopsRef.current;
+      const prevSnapshot = new Map(
+        prevStops.map((s) => [
+          s.id,
+          {
+            visitDate: s.visitDate ?? '',
+            priestId: s.priestId,
+            manualOrder: s.manualOrder ?? 0,
+            included: s.included !== false,
+          },
+        ])
+      );
+
       const scheduled = autoScheduleSeason({
         parish,
-        stops: stopsRef.current,
+        stops: prevStops,
         config,
         seasonConfig,
         targetMode,
+      });
+
+      const changed = scheduled.filter((next) => {
+        const prev = prevSnapshot.get(next.id);
+        if (!prev) return true;
+        return (
+          (next.visitDate ?? '') !== prev.visitDate ||
+          next.priestId !== prev.priestId ||
+          (next.manualOrder ?? 0) !== prev.manualOrder ||
+          (next.included !== false) !== prev.included
+        );
       });
 
       setStops(scheduled);
@@ -1419,15 +1442,52 @@ function ParishPlannerWorkspace({
       }
       setFocusedPriestId(null);
 
-      if (authUser && currentId) {
+      if (authUser && currentId && changed.length > 0) {
         void batchUpdateStopFieldInFirestore(
           currentId,
-          scheduled,
-          'schedule'
+          changed,
+          'manualOrder_schedule'
         ).catch(() => {});
       }
+
+      if (changed.length > 0) {
+        showUndoToast(
+          `Rozpisano automatycznie cały okres (${changed.length} zmian).`,
+          () => {
+            const restored: VisitStop[] = [];
+            setStops((curr) =>
+              curr.map((s) => {
+                const snap = prevSnapshot.get(s.id);
+                if (!snap) return s;
+                const next: VisitStop = {
+                  ...s,
+                  visitDate: snap.visitDate,
+                  priestId: snap.priestId,
+                  manualOrder: snap.manualOrder,
+                  included: snap.included,
+                };
+                restored.push(next);
+                return next;
+              })
+            );
+            clearRoutes();
+            if (authUser && currentId && restored.length > 0) {
+              const restoredChanged = restored.filter((r) =>
+                changed.some((c) => c.id === r.id)
+              );
+              if (restoredChanged.length > 0) {
+                void batchUpdateStopFieldInFirestore(
+                  currentId,
+                  restoredChanged,
+                  'manualOrder_schedule'
+                ).catch(() => {});
+              }
+            }
+          }
+        );
+      }
     },
-    [authUser, clearRoutes, config, parish, seasonConfig]
+    [authUser, clearRoutes, config, parish, seasonConfig, showUndoToast]
   );
 
   const handleClearAllDates = useCallback(() => {
@@ -2167,13 +2227,28 @@ function ParishPlannerWorkspace({
   );
 
   const handleUpdateDayTimeWindow = useCallback(
-    (date: string, startTime: string, endTime: string) => {
+    (
+      date: string,
+      startTime: string,
+      endTime: string,
+      breaks?: DayBreakWindow[]
+    ) => {
       if (!date) return;
+      const existingBreaks = seasonConfig.dayTimeOverrides?.[date]?.breaks;
+      const nextWin = {
+        startTime,
+        endTime,
+        ...(breaks !== undefined
+          ? { breaks }
+          : existingBreaks !== undefined
+            ? { breaks: existingBreaks }
+            : {}),
+      };
       const nextSeason: SeasonPlanConfig = {
         ...seasonConfig,
         dayTimeOverrides: {
           ...(seasonConfig.dayTimeOverrides ?? {}),
-          [date]: { startTime, endTime },
+          [date]: nextWin,
         },
       };
       handleChangeSeasonConfig(nextSeason);
@@ -2217,6 +2292,7 @@ function ParishPlannerWorkspace({
         effectiveSeason,
         config.startTime
       );
+      const dayBreaks = getDayActiveBreaks(targetDate, effectiveSeason);
       const dayConfig: PlanConfig = { ...config, startTime: dayStart };
 
       setInteractionMode('pan');
@@ -2225,7 +2301,12 @@ function ParishPlannerWorkspace({
         setMobilePane('panel');
       }
 
-      const computed = await computeAllRoutes(parish, targetStops, dayConfig);
+      const computed = await computeAllRoutes(
+        parish,
+        targetStops,
+        dayConfig,
+        dayBreaks
+      );
       if (computed) {
         const key = targetDate ?? 'current';
         setExactRoutesCache((prev) => ({ ...prev, [key]: computed }));
@@ -2249,6 +2330,8 @@ function ParishPlannerWorkspace({
   const handlePlanCustomDay = useCallback(
     (payload: CustomDayPlanPayload) => {
       if (!payload.date || payload.stopIds.length === 0) return;
+      const existingBreaks =
+        seasonConfig.dayTimeOverrides?.[payload.date]?.breaks;
       const nextSeason: SeasonPlanConfig = {
         ...seasonConfig,
         dayTimeOverrides: {
@@ -2256,6 +2339,9 @@ function ParishPlannerWorkspace({
           [payload.date]: {
             startTime: payload.startTime,
             endTime: payload.endTime,
+            ...(existingBreaks !== undefined
+              ? { breaks: existingBreaks }
+              : {}),
           },
         },
       };
@@ -2445,12 +2531,18 @@ function ParishPlannerWorkspace({
     [authUser, clearRoutes, config.priestCount, parish, showStreetFeedback]
   );
 
-  const handleViewDayOnMap = useCallback((date: string | null) => {
-    setSelectedDate(date);
-    setFocusedPriestId(null);
-    setInteractionMode('pan');
-    setMobilePane('map');
-  }, []);
+  const handleViewDayOnMap = useCallback(
+    (date: string | null) => {
+      setSelectedDate(date);
+      setFocusedPriestId(null);
+      setFocusedStreet(null);
+      setShowRouteLines(true);
+      setInteractionMode('pan');
+      navigateToSection('routes');
+      setMobilePane('map');
+    },
+    [navigateToSection]
+  );
 
   // Mobile & Browser Hardware Back Button Support (History API guard)
   const hasBackLayer =
@@ -3075,6 +3167,7 @@ function ParishPlannerWorkspace({
                     onChangeConfig={handleChangeConfig}
                     onChangeSeasonConfig={handleChangeSeasonConfig}
                     onOpenGuide={() => setGuideOpen(true)}
+                    onOpenSchedule={() => navigateToSection('schedule')}
                   />
                 )}
               </div>
@@ -3525,198 +3618,48 @@ function ParishPlannerWorkspace({
                 (plannedDays.length > 0 ||
                   displayedRoutes.length > 0 ||
                   activeStopsCount > 0) && (
-                  <div className="no-print absolute bottom-6 right-3 sm:right-4 sm:bottom-5 z-[460] w-fit max-w-[calc(100%-24px)] bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-lg p-1.5 flex flex-wrap items-center justify-end gap-1.5">
-                    {plannedDays.length > 0 && (
-                      <div className="flex items-center gap-0.5 min-w-0">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const idx = plannedDays.findIndex(
-                              (d) => d.date === selectedDate
-                            );
-                            const nextIdx =
-                              idx <= 0 ? plannedDays.length - 1 : idx - 1;
-                            setSelectedDate(plannedDays[nextIdx].date);
-                            setFocusedPriestId(null);
-                          }}
-                          aria-label="Poprzedni dzień"
-                          className="min-w-[32px] min-h-[32px] inline-flex items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
-                        >
-                          <ChevronLeft className="w-4 h-4" />
-                        </button>
-
-                        <select
-                          value={selectedDate ?? ''}
-                          onChange={(e) => {
-                            setSelectedDate(e.target.value || null);
-                            setFocusedPriestId(null);
-                          }}
-                          aria-label="Wybierz dzień na mapie"
-                          className="min-h-[32px] px-2 py-1 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-lg text-slate-900 tabular-nums focus:outline-none focus:border-amber-600 max-w-[165px]"
-                        >
-                          {plannedDays.map((d) => (
-                            <option key={d.date} value={d.date}>
-                              {formatPolishDateChip(d.date)} · {d.startTime}–
-                              {d.estimatedEndTime}
-                            </option>
-                          ))}
-                          <option value="">Wszystkie zaznaczone</option>
-                        </select>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const idx = plannedDays.findIndex(
-                              (d) => d.date === selectedDate
-                            );
-                            const nextIdx =
-                              idx < 0 || idx >= plannedDays.length - 1
-                                ? 0
-                                : idx + 1;
-                            setSelectedDate(plannedDays[nextIdx].date);
-                            setFocusedPriestId(null);
-                          }}
-                          aria-label="Następny dzień"
-                          className="min-w-[32px] min-h-[32px] inline-flex items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
-                        >
-                          <ChevronRight className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )}
-
-                    {displayedRoutes.length > 1 && (
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setFocusedPriestId(null)}
-                          className={`min-h-[32px] px-2 py-1 text-[11px] font-medium rounded-lg transition-colors ${
-                            focusedPriestId === null
-                              ? 'bg-slate-900 text-white'
-                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          Wszyscy
-                        </button>
-                        {displayedRoutes.map((r) => (
-                          <button
-                            key={r.priestId}
-                            type="button"
-                            onClick={() =>
-                              setFocusedPriestId(
-                                focusedPriestId === r.priestId
-                                  ? null
-                                  : r.priestId
-                              )
-                            }
-                            className={`min-h-[32px] px-2 py-1 text-[11px] font-medium rounded-lg inline-flex items-center gap-1 transition-colors ${
-                              focusedPriestId === r.priestId
-                                ? 'bg-slate-900 text-white'
-                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                            }`}
-                          >
-                            <span
-                              className="w-2 h-2 rounded-full"
-                              style={{ backgroundColor: r.color }}
-                            />
-                            Ks. {r.priestId}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {availableMapStreets.length > 1 && (
-                      <select
-                        value={focusedStreet ?? ''}
-                        onChange={(e) =>
-                          setFocusedStreet(e.target.value || null)
-                        }
-                        aria-label="Filtruj ulicę na mapie"
-                        className={`min-h-[32px] px-2 py-1 text-[11px] font-medium border rounded-lg focus:outline-none max-w-[165px] ${
-                          focusedStreet
-                            ? 'bg-amber-50 border-amber-400 text-amber-950 font-semibold'
-                            : 'bg-slate-50 border-slate-200 text-slate-800'
-                        }`}
-                      >
-                        <option value="">
-                          Wszystkie ulice ({availableMapStreets.length})
-                        </option>
-                        {availableMapStreets.map((st) => (
-                          <option key={st.name} value={st.name}>
-                            {st.name} ({st.count})
-                          </option>
-                        ))}
-                      </select>
-                    )}
-
-                    {activeStopsCount > 0 && (
-                      <div
-                        role="group"
-                        aria-label="Sposób wyświetlania punktów na mapie"
-                        className="inline-flex items-center rounded-lg bg-slate-100 p-0.5"
-                      >
-                        {(
-                          [
-                            { id: 'auto', label: 'Auto' },
-                            { id: 'numbers', label: 'Numery' },
-                            { id: 'dots', label: 'Kropki' },
-                          ] as const
-                        ).map((opt) => (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            onClick={() => setMarkerLabelMode(opt.id)}
-                            className={`min-h-[28px] px-2 py-0.5 text-[11px] font-semibold rounded-md transition-colors whitespace-nowrap ${
-                              markerLabelMode === opt.id
-                                ? 'bg-white text-slate-900 shadow-xs'
-                                : 'text-slate-600 hover:text-slate-900'
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {displayedRoutes.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setShowRouteLines((v) => !v)}
-                        title={
-                          showRouteLines
-                            ? 'Ukryj linię trasy'
-                            : 'Pokaż linię trasy'
-                        }
-                        className={`min-h-[32px] px-2.5 py-1 text-[11px] font-semibold rounded-lg inline-flex items-center gap-1 transition-colors whitespace-nowrap ${
-                          showRouteLines
-                            ? 'bg-slate-900 text-white hover:bg-slate-800'
-                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                        }`}
-                      >
-                        {showRouteLines ? (
-                          <Eye className="w-3.5 h-3.5" />
-                        ) : (
-                          <EyeOff className="w-3.5 h-3.5" />
-                        )}
-                        <span>Trasa</span>
-                      </button>
-                    )}
-
-                    {displayedRoutes.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => navigateToSection('routes')}
-                        className="lg:hidden min-h-[32px] px-2.5 py-1 text-[11px] font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg inline-flex items-center gap-1 whitespace-nowrap"
-                      >
-                        <ListOrdered className="w-3.5 h-3.5" />
-                        Szczegóły
-                      </button>
-                    )}
-                  </div>
+                  <MapDayRouteBar
+                    plannedDays={plannedDays}
+                    selectedDate={selectedDate}
+                    selectedDaySummary={selectedDaySummary}
+                    routes={displayedRoutes}
+                    isExactRoute={isExactRoute}
+                    isComputingExact={isComputing}
+                    focusedPriestId={focusedPriestId}
+                    availableStreets={availableMapStreets}
+                    focusedStreet={focusedStreet}
+                    activeStopsCount={activeStopsCount}
+                    markerLabelMode={markerLabelMode}
+                    showRouteLines={showRouteLines}
+                    onSelectDate={setSelectedDate}
+                    onFocusPriest={setFocusedPriestId}
+                    onFocusStreet={setFocusedStreet}
+                    onChangeMarkerLabelMode={setMarkerLabelMode}
+                    onToggleRouteLines={() => setShowRouteLines((v) => !v)}
+                    onComputeExactDayRoute={() =>
+                      void handleComputeRoutesForDate(selectedDate, {
+                        preserveMobilePane: true,
+                      })
+                    }
+                    onOpenRouteList={() => {
+                      navigateToSection('routes');
+                      setMobilePane('panel');
+                    }}
+                    onOpenFieldMode={() => {
+                      setFieldModeOnMap(true);
+                      setInteractionMode('pan');
+                      setMobilePane('map');
+                    }}
+                  />
                 )
               )}
 
-              {/* Top-left Map Route Info Pill (START + Streets) & Priest Legend */}
-              <div className="no-print absolute top-3 left-3 z-[450] flex flex-col items-start gap-1.5 max-w-[calc(100%-136px)] sm:max-w-[420px] pointer-events-none">
+              {/* Top-left Map Route Info Pill (START + Streets) & Pre-Route Priest Legend */}
+              <div
+                className={`no-print absolute ${
+                  useGoogleMaps ? 'top-14 left-2.5 sm:left-3' : 'top-3 left-3'
+                } z-[450] flex flex-col items-start gap-1.5 max-w-[calc(100%-148px)] sm:max-w-[420px] pointer-events-none`}
+              >
                 {interactionMode === 'pan' &&
                   !streetPickFeedback &&
                   !postBoundaryBanner &&
@@ -3743,7 +3686,7 @@ function ParishPlannerWorkspace({
                     );
                     if (!primaryStart) return null;
                     return (
-                      <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl px-3 py-2 shadow-md text-[11px] text-slate-800 space-y-0.5 pointer-events-auto">
+                      <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl px-2.5 sm:px-3 py-1.5 sm:py-2 shadow-md text-[11px] text-slate-800 space-y-0.5 pointer-events-auto">
                         <div className="flex flex-wrap items-center gap-1.5 font-semibold">
                           {selectedDate && (
                             <span className="text-slate-900 tabular-nums">
@@ -3754,7 +3697,7 @@ function ParishPlannerWorkspace({
                           <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-700 text-white text-[10px] font-extrabold uppercase tracking-wide">
                             START
                           </span>
-                          <span className="text-emerald-900 truncate max-w-[200px]">
+                          <span className="text-emerald-900 truncate max-w-[160px] sm:max-w-[220px]">
                             {primaryStart.stop.address ||
                               primaryStart.stop.label}
                           </span>
@@ -3777,22 +3720,24 @@ function ParishPlannerWorkspace({
                     );
                   })()}
 
-                {activeStopsCount > 0 && config.priestCount > 1 && (
-                  <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700">
-                    {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
-                      <span
-                        key={p.id}
-                        className="inline-flex items-center gap-1.5"
-                      >
+                {activeStopsCount > 0 &&
+                  displayedRoutes.length === 0 &&
+                  config.priestCount > 1 && (
+                    <div className="bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-sm flex flex-wrap items-center gap-2.5 text-xs text-slate-700">
+                      {PRIEST_PALETTE.slice(0, config.priestCount).map((p) => (
                         <span
-                          className="w-2.5 h-2.5 rounded-full"
-                          style={{ backgroundColor: p.color }}
-                        />
-                        Ks. {p.id}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                          key={p.id}
+                          className="inline-flex items-center gap-1.5"
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full"
+                            style={{ backgroundColor: p.color }}
+                          />
+                          Ks. {p.id}
+                        </span>
+                      ))}
+                    </div>
+                  )}
               </div>
               </div>
             </section>
@@ -3803,6 +3748,7 @@ function ParishPlannerWorkspace({
                 parish={parish}
                 boundary={boundary}
                 config={config}
+                seasonConfig={seasonConfig}
                 routes={displayedRoutes}
                 isExactRoute={isExactRoute}
                 plannedDays={plannedDays}

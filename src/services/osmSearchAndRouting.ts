@@ -1,5 +1,6 @@
 import type { SelectedPlaceData } from '../components/PlaceSearchInput';
 import {
+  DayBreakWindow,
   LatLng,
   PRIEST_PALETTE,
   ParishCenter,
@@ -8,7 +9,13 @@ import {
   ScheduledStopItem,
   VisitStop,
 } from '../types/parish';
-import { addMinutesToHHMM, extractStreetName } from '../utils/spatial';
+import { extractStreetName, isBlockStop } from '../utils/spatial';
+import {
+  advanceStopClockWithBreaks,
+  formatAbsMinutesToHHMM,
+  getEffectiveStopDurationMinutes,
+  parseHHMMToMinutes,
+} from '../utils/seasonScheduler';
 import { fetchNearbyParishesOsm } from './overpassStreets';
 
 interface NominatimSearchItem {
@@ -826,7 +833,8 @@ export async function computeOsmParishRoutes(
   parish: ParishCenter,
   stops: VisitStop[],
   config: PlanConfig,
-  onProgress?: (label: string) => void
+  onProgress?: (label: string) => void,
+  activeBreaks: DayBreakWindow[] = []
 ): Promise<PriestRouteResult[]> {
   if (stops.length === 0) return [];
 
@@ -880,7 +888,7 @@ export async function computeOsmParishRoutes(
       }
     );
 
-    let elapsedMinutes = 0;
+    let cursorAbs = parseHHMMToMinutes(config.startTime, 930);
     let totalVisitMinutes = 0;
 
     const scheduledItems: ScheduledStopItem[] = orderedStops.map(
@@ -889,21 +897,26 @@ export async function computeOsmParishRoutes(
         const legDist = leg?.distanceMeters ?? 0;
         const legDurMs = leg?.durationMillis ?? 0;
         const legMins = Math.round(legDurMs / 60000);
-
-        elapsedMinutes += legMins;
-        const arrivalTime = addMinutesToHHMM(config.startTime, elapsedMinutes);
-        elapsedMinutes += stop.durationMinutes;
-        totalVisitMinutes += stop.durationMinutes;
-        const departureTime = addMinutesToHHMM(
-          config.startTime,
-          elapsedMinutes
+        const stopDuration = getEffectiveStopDurationMinutes(
+          stop,
+          config.defaultVisitMinutes
         );
+
+        const timing = advanceStopClockWithBreaks(
+          cursorAbs,
+          legMins,
+          stopDuration,
+          isBlockStop(stop),
+          activeBreaks
+        );
+        cursorAbs = timing.endCursorAbs;
+        totalVisitMinutes += stopDuration;
 
         return {
           stop,
           orderIndex: idx + 1,
-          arrivalTime,
-          departureTime,
+          arrivalTime: formatAbsMinutesToHHMM(timing.arrivalAbs),
+          departureTime: formatAbsMinutesToHHMM(timing.departureAbs),
           legDistanceMeters: legDist,
           legDurationMillis: legDurMs,
         };
@@ -916,10 +929,10 @@ export async function computeOsmParishRoutes(
       const returnLeg = osrm.legs[orderedStops.length];
       returnLegDistanceMeters = returnLeg?.distanceMeters ?? 0;
       returnLegDurationMillis = returnLeg?.durationMillis ?? 0;
-      elapsedMinutes += Math.round(returnLegDurationMillis / 60000);
+      cursorAbs += Math.round(returnLegDurationMillis / 60000);
     }
 
-    const endTime = addMinutesToHHMM(config.startTime, elapsedMinutes);
+    const endTime = formatAbsMinutesToHHMM(cursorAbs);
 
     results.push({
       priestId,

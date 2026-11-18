@@ -3,6 +3,7 @@ import { useMapsLibrary } from '@vis.gl/react-google-maps';
 import { RoutePolylineEntry } from '../components/ParishMap';
 import { orderStopsTsp } from '../services/osmSearchAndRouting';
 import {
+  DayBreakWindow,
   LatLng,
   PRIEST_PALETTE,
   ParishCenter,
@@ -14,8 +15,14 @@ import {
 import { notifyIfQuotaExceeded } from '../utils/quota';
 import {
   MAX_ROUTES_API_INTERMEDIATES,
-  addMinutesToHHMM,
+  isBlockStop,
 } from '../utils/spatial';
+import {
+  advanceStopClockWithBreaks,
+  formatAbsMinutesToHHMM,
+  getEffectiveStopDurationMinutes,
+  parseHHMMToMinutes,
+} from '../utils/seasonScheduler';
 
 export function useParishRouteOptimizer() {
   const routesLib = useMapsLibrary('routes');
@@ -33,7 +40,12 @@ export function useParishRouteOptimizer() {
   }, []);
 
   const computeAllRoutes = useCallback(
-    async (parish: ParishCenter, stops: VisitStop[], config: PlanConfig) => {
+    async (
+      parish: ParishCenter,
+      stops: VisitStop[],
+      config: PlanConfig,
+      activeBreaks: DayBreakWindow[] = []
+    ) => {
       if (!routesLib) {
         setError('Biblioteka tras Google Maps jeszcze się ładuje.');
         return;
@@ -309,7 +321,7 @@ export function useParishRouteOptimizer() {
             }
           }
 
-          let elapsedMinutes = 0;
+          let cursorAbs = parseHHMMToMinutes(config.startTime, 930);
           let totalVisitMinutes = 0;
 
           const scheduledItems: ScheduledStopItem[] = orderedVisitSequence.map(
@@ -318,24 +330,26 @@ export function useParishRouteOptimizer() {
               const legDist = leg?.distanceMeters ?? 0;
               const legDurMs = leg?.durationMillis ?? 0;
               const legMins = Math.round(legDurMs / 60000);
+              const stopDuration = getEffectiveStopDurationMinutes(
+                stop,
+                config.defaultVisitMinutes
+              );
 
-              elapsedMinutes += legMins;
-              const arrivalTime = addMinutesToHHMM(
-                config.startTime,
-                elapsedMinutes
+              const timing = advanceStopClockWithBreaks(
+                cursorAbs,
+                legMins,
+                stopDuration,
+                isBlockStop(stop),
+                activeBreaks
               );
-              elapsedMinutes += stop.durationMinutes;
-              totalVisitMinutes += stop.durationMinutes;
-              const departureTime = addMinutesToHHMM(
-                config.startTime,
-                elapsedMinutes
-              );
+              cursorAbs = timing.endCursorAbs;
+              totalVisitMinutes += stopDuration;
 
               return {
                 stop,
                 orderIndex: idx + 1,
-                arrivalTime,
-                departureTime,
+                arrivalTime: formatAbsMinutesToHHMM(timing.arrivalAbs),
+                departureTime: formatAbsMinutesToHHMM(timing.departureAbs),
                 legDistanceMeters: legDist,
                 legDurationMillis: legDurMs,
               };
@@ -351,10 +365,10 @@ export function useParishRouteOptimizer() {
             const returnLeg = combinedLegs[orderedVisitSequence.length];
             returnLegDistanceMeters = returnLeg?.distanceMeters ?? 0;
             returnLegDurationMillis = returnLeg?.durationMillis ?? 0;
-            elapsedMinutes += Math.round(returnLegDurationMillis / 60000);
+            cursorAbs += Math.round(returnLegDurationMillis / 60000);
           }
 
-          const endTime = addMinutesToHHMM(config.startTime, elapsedMinutes);
+          const endTime = formatAbsMinutesToHHMM(cursorAbs);
 
           nextRoutes.push({
             priestId,

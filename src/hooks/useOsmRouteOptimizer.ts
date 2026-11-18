@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { RoutePolylineEntry } from '../components/ParishMap';
 import { computeOsmParishRoutes } from '../services/osmSearchAndRouting';
-import { ParishCenter, PlanConfig, PriestRouteResult, VisitStop } from '../types/parish';
+import { DayBreakWindow, ParishCenter, PlanConfig, PriestRouteResult, VisitStop } from '../types/parish';
 
 export function useOsmRouteOptimizer() {
   const [routes, setRoutes] = useState<PriestRouteResult[]>([]);
@@ -17,7 +17,12 @@ export function useOsmRouteOptimizer() {
   }, []);
 
   const computeAllRoutes = useCallback(
-    async (parish: ParishCenter, stops: VisitStop[], config: PlanConfig) => {
+    async (
+      parish: ParishCenter,
+      stops: VisitStop[],
+      config: PlanConfig,
+      activeBreaks: DayBreakWindow[] = []
+    ) => {
       if (stops.length === 0) {
         clearRoutes();
         return;
@@ -31,7 +36,8 @@ export function useOsmRouteOptimizer() {
           parish,
           stops,
           config,
-          (label) => setProgressLabel(label)
+          (label) => setProgressLabel(label),
+          activeBreaks
         );
         setRoutes(nextRoutes);
         return {

@@ -106,17 +106,51 @@ export interface PlanConfig {
   returnToParish: boolean;
 }
 
+export interface DayBreakWindow {
+  id: string;
+  startTime: string; // HH:MM
+  endTime: string; // HH:MM
+  label?: string;
+}
+
 export interface DayTimeWindow {
   startTime: string; // HH:MM
   endTime: string; // HH:MM
+  breaks?: DayBreakWindow[];
+}
+
+export type SeasonStreetSplitMode =
+  | 'whole_or_half'
+  | 'parity'
+  | 'strict_budget';
+
+export type SeasonZoneDirection =
+  | 'clockwise'
+  | 'nearest_first'
+  | 'farthest_first';
+
+export type SeasonBlockPreference =
+  | 'any'
+  | 'blocks_weekdays_houses_weekend';
+
+export interface SeasonPlanningRules {
+  splitMode: SeasonStreetSplitMode;
+  zoneDirection: SeasonZoneDirection;
+  blockPreference: SeasonBlockPreference;
+  safetyBufferMinutes: number;
 }
 
 export interface SeasonPlanConfig {
   startDate: string; // YYYY-MM-DD
+  endDate?: string; // YYYY-MM-DD optional horizon
   weekdayStartTime: string; // HH:MM
+  saturdayStartTime?: string; // HH:MM optional override for Saturdays
   weekendStartTime: string; // HH:MM
   dailyEndTime: string; // HH:MM
   weekdaysMask: string; // comma-separated JS day indices 0..6 (e.g. '1,2,3,4,5,6')
+  excludedDates?: string[]; // YYYY-MM-DD explicit days off (holidays, funerals, etc.)
+  defaultBreaks?: DayBreakWindow[]; // default break windows inside a day
+  planningRules?: SeasonPlanningRules;
   dayTimeOverrides?: Record<string, DayTimeWindow>;
 }
 
@@ -127,12 +161,24 @@ export interface DayPlanSummary {
   startTime: string;
   plannedEndTime?: string;
   estimatedEndTime: string;
+  activeBreaks?: DayBreakWindow[];
   stops: VisitStop[];
   streetNames: string[];
   estimatedRoutes: PriestRouteResult[];
   totalDistanceMeters: number;
   totalVisitMinutes: number;
   totalTravelMillis: number;
+}
+
+export interface AutoSeasonSimulationResult {
+  scheduledStops: VisitStop[];
+  simulatedDays: DayPlanSummary[];
+  newlyScheduledCount: number;
+  preservedDaysCount: number;
+  skippedPermanentDeclineCount: number;
+  unscheduledRemainingCount: number;
+  excludedHolidaysUsed: string[];
+  hasOverflowPastHorizon: boolean;
 }
 
 export const PRIEST_PALETTE: PriestProfile[] = [

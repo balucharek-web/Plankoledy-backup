@@ -1,4 +1,6 @@
 import {
+  AutoSeasonSimulationResult,
+  DayBreakWindow,
   DayPlanSummary,
   LatLng,
   PRIEST_PALETTE,
@@ -7,6 +9,7 @@ import {
   PriestRouteResult,
   ScheduledStopItem,
   SeasonPlanConfig,
+  SeasonPlanningRules,
   VisitStop,
 } from '../types/parish';
 import {
@@ -15,6 +18,8 @@ import {
   extractHouseNumberSortKey,
   extractStreetName,
   formatStreetHouseRange,
+  getStopUnitCount,
+  isBlockStop,
   isEvenHouseNumberStr,
   partitionStopsBySector,
 } from './spatial';
@@ -156,6 +161,53 @@ export function toggleWeekdayInMask(mask: string, dayIndex: number): string {
   return order.filter((d) => set.has(d)).join(',');
 }
 
+export const DEFAULT_PLANNING_RULES: SeasonPlanningRules = {
+  splitMode: 'whole_or_half',
+  zoneDirection: 'clockwise',
+  blockPreference: 'any',
+  safetyBufferMinutes: 15,
+};
+
+/**
+ * Computes traditional Polish Christmas & New Year holiday dates for the kolęda season anchored by startDateIso.
+ */
+export function getPolishKoledaHolidayDates(startDateIso: string): string[] {
+  const start = parseIsoDateLocal(startDateIso);
+  const month = start.getMonth() + 1;
+  const seasonBaseYear = month <= 4 ? start.getFullYear() - 1 : start.getFullYear();
+  return [
+    `${seasonBaseYear}-12-24`, // Wigilia
+    `${seasonBaseYear}-12-25`, // Boże Narodzenie I
+    `${seasonBaseYear}-12-26`, // Boże Narodzenie II
+    `${seasonBaseYear}-12-31`, // Sylwester
+    `${seasonBaseYear + 1}-01-01`, // Nowy Rok
+    `${seasonBaseYear + 1}-01-06`, // Objawienie Pańskie (Trzech Króli)
+  ];
+}
+
+/**
+ * Finds First Fridays of the month within the season window (min 60 days scan from startDateIso).
+ */
+export function getFirstFridayDatesInSeason(
+  startDateIso: string,
+  endDateIso?: string
+): string[] {
+  const out: string[] = [];
+  const limitIso =
+    endDateIso && endDateIso >= startDateIso
+      ? endDateIso
+      : addDaysToIsoDate(startDateIso, 75);
+  for (let offset = 0; offset <= 120; offset++) {
+    const iso = addDaysToIsoDate(startDateIso, offset);
+    if (iso > limitIso) break;
+    const d = parseIsoDateLocal(iso);
+    if (d.getDay() === 5 && d.getDate() <= 7) {
+      out.push(iso);
+    }
+  }
+  return out;
+}
+
 export function getDayStartTime(
   dateStr: string | null | undefined,
   seasonConfig: SeasonPlanConfig,
@@ -166,9 +218,18 @@ export function getDayStartTime(
   if (override && /^\d{1,2}:\d{2}$/.test(override.trim())) {
     return override.trim();
   }
-  return isWeekendDate(dateStr)
-    ? seasonConfig.weekendStartTime || fallbackStartTime
-    : seasonConfig.weekdayStartTime || fallbackStartTime;
+  const weekday = getPolishWeekdayIndex(dateStr);
+  if (weekday === 6) {
+    return (
+      seasonConfig.saturdayStartTime ||
+      seasonConfig.weekendStartTime ||
+      fallbackStartTime
+    );
+  }
+  if (weekday === 0) {
+    return seasonConfig.weekendStartTime || fallbackStartTime;
+  }
+  return seasonConfig.weekdayStartTime || fallbackStartTime;
 }
 
 export function getDayEndTime(
@@ -183,6 +244,148 @@ export function getDayEndTime(
     }
   }
   return seasonConfig.dailyEndTime || fallbackEndTime;
+}
+
+export function getDayActiveBreaks(
+  dateStr: string | null | undefined,
+  seasonConfig: SeasonPlanConfig
+): DayBreakWindow[] {
+  const raw =
+    dateStr && seasonConfig.dayTimeOverrides?.[dateStr]?.breaks !== undefined
+      ? seasonConfig.dayTimeOverrides[dateStr].breaks ?? []
+      : seasonConfig.defaultBreaks ?? [];
+
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+
+  return raw
+    .filter((bw) => {
+      const s = parseHHMMToMinutes(bw.startTime, -1);
+      const e = parseHHMMToMinutes(bw.endTime, -1);
+      return s >= 0 && e > s;
+    })
+    .sort(
+      (a, b) =>
+        parseHHMMToMinutes(a.startTime) - parseHHMMToMinutes(b.startTime)
+    );
+}
+
+export function computeBreakOverlapMinutes(
+  windowStartAbs: number,
+  windowEndAbs: number,
+  breaks: DayBreakWindow[]
+): number {
+  if (breaks.length === 0 || windowEndAbs <= windowStartAbs) return 0;
+  let total = 0;
+  for (const bw of breaks) {
+    const bs = parseHHMMToMinutes(bw.startTime, 0);
+    const be = parseHHMMToMinutes(bw.endTime, 0);
+    if (be <= bs) continue;
+    const overlapStart = Math.max(windowStartAbs, bs);
+    const overlapEnd = Math.min(windowEndAbs, be);
+    if (overlapEnd > overlapStart) {
+      total += overlapEnd - overlapStart;
+    }
+  }
+  return total;
+}
+
+/**
+ * Advances route clock cleanly over configured breaks (lunch, evening Mass, etc.),
+ * preventing house visits from overlapping break windows.
+ */
+export function advanceStopClockWithBreaks(
+  currentAbsMinutes: number,
+  travelMinutes: number,
+  visitMinutes: number,
+  isMultiUnit: boolean,
+  breaks: DayBreakWindow[]
+): {
+  arrivalAbs: number;
+  departureAbs: number;
+  endCursorAbs: number;
+} {
+  let arrival = currentAbsMinutes + travelMinutes;
+  const normalizedBreaks = breaks
+    .map((b) => ({
+      start: parseHHMMToMinutes(b.startTime, 0),
+      end: parseHHMMToMinutes(b.endTime, 0),
+    }))
+    .filter((b) => b.end > b.start)
+    .sort((a, b) => a.start - b.start);
+
+  if (normalizedBreaks.length === 0) {
+    const dep = arrival + visitMinutes;
+    return { arrivalAbs: arrival, departureAbs: dep, endCursorAbs: dep };
+  }
+
+  // Push arrival out if arriving inside a break
+  for (const br of normalizedBreaks) {
+    if (arrival >= br.start && arrival < br.end) {
+      arrival = br.end;
+    }
+  }
+
+  // For single houses / compact stops, defer stop until after break if visit overlaps break start
+  if (!isMultiUnit || visitMinutes <= 45) {
+    let shifted = true;
+    let guard = 0;
+    while (shifted && guard < 10) {
+      shifted = false;
+      guard += 1;
+      for (const br of normalizedBreaks) {
+        if (arrival < br.end && arrival + visitMinutes > br.start) {
+          arrival = br.end;
+          shifted = true;
+        }
+      }
+    }
+    const dep = arrival + visitMinutes;
+    return { arrivalAbs: arrival, departureAbs: dep, endCursorAbs: dep };
+  }
+
+  // For large blocks (> 45 min), pause during breaks inside the block visit and resume after
+  let cursor = arrival;
+  let remainingVisit = visitMinutes;
+  for (const br of normalizedBreaks) {
+    if (br.end <= cursor) continue;
+    if (br.start >= cursor + remainingVisit) break;
+    const preBreakWork = Math.max(0, br.start - cursor);
+    remainingVisit = Math.max(0, remainingVisit - preBreakWork);
+    cursor = br.end;
+  }
+  const dep = cursor + remainingVisit;
+  return { arrivalAbs: arrival, departureAbs: dep, endCursorAbs: dep };
+}
+
+export function formatAbsMinutesToHHMM(absMinutes: number): string {
+  const m = ((Math.round(absMinutes) % 1440) + 1440) % 1440;
+  const hh = String(Math.floor(m / 60)).padStart(2, '0');
+  const mm = String(m % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+export function getEffectiveStopDurationMinutes(
+  stop: VisitStop,
+  defaultVisitMinutes = 15
+): number {
+  if (!isBlockStop(stop)) {
+    return Math.max(1, stop.durationMinutes || defaultVisitMinutes);
+  }
+  const perUnit = Math.max(3, stop.minutesPerUnit || 8);
+  if (stop.units && stop.units.length > 0) {
+    const activeUnits = stop.units.filter((u) => u.status !== 'declined');
+    if (activeUnits.length === 0) return 2;
+    const summed = activeUnits.reduce(
+      (acc, u) => acc + (u.durationMinutes ?? perUnit),
+      0
+    );
+    return Math.max(stop.durationMinutes || 0, summed);
+  }
+  const unitCount = getStopUnitCount(stop);
+  if (unitCount > 1) {
+    return Math.max(stop.durationMinutes || 0, unitCount * perUnit);
+  }
+  return Math.max(1, stop.durationMinutes || defaultVisitMinutes);
 }
 
 export function haversineMeters(a: LatLng, b: LatLng): number {
@@ -208,7 +411,6 @@ function estimateLegMetrics(
   const straightMeters = haversineMeters(from, to);
   const roadMeters = Math.round(straightMeters * 1.3);
   if (travelMode === 'DRIVING') {
-    // 28 km/h average parish driving + 0.6 min parking/exit buffer if > 40 m
     const speedMetersPerSec = (28 * 1000) / 3600;
     const bufferSec = roadMeters > 40 ? 35 : 8;
     const durationSec = roadMeters / speedMetersPerSec + bufferSec;
@@ -217,7 +419,6 @@ function estimateLegMetrics(
       durationMillis: Math.round(durationSec * 1000),
     };
   }
-  // 4.2 km/h parish walking
   const speedMetersPerSec = (4.2 * 1000) / 3600;
   const durationSec = roadMeters / speedMetersPerSec;
   return {
@@ -228,13 +429,14 @@ function estimateLegMetrics(
 
 /**
  * Fast, deterministic client-side day route estimator.
- * Keeps adjacent houses on the same street contiguous and calculates exact arrival/departure windows.
+ * Keeps adjacent houses on the same street contiguous and calculates exact arrival/departure windows respecting daily breaks.
  */
 export function estimateDayRoutes(
   parish: ParishCenter,
   dayStops: VisitStop[],
   config: PlanConfig,
-  startTimeOverride?: string
+  startTimeOverride?: string,
+  activeBreaks: DayBreakWindow[] = []
 ): {
   routes: PriestRouteResult[];
   endTime: string;
@@ -264,7 +466,8 @@ export function estimateDayRoutes(
   let totalDistanceMeters = 0;
   let totalVisitMinutes = 0;
   let totalTravelMillis = 0;
-  let latestEndMinutes = parseHHMMToMinutes(startTime);
+  const startAbsBase = parseHHMMToMinutes(startTime, 930);
+  let latestEndMinutes = startAbsBase;
 
   for (const priestId of activePriestIds) {
     const profile =
@@ -288,7 +491,6 @@ export function estimateDayRoutes(
       );
       ordered.push(...sorted);
     } else {
-      // Street-coherent greedy nearest neighbor
       let cursor = parish.location;
       let currentStreet = '';
 
@@ -314,7 +516,7 @@ export function estimateDayRoutes(
       }
     }
 
-    let elapsedMinutes = 0;
+    let cursorAbs = startAbsBase;
     let priestVisitMinutes = 0;
     let priestDistanceMeters = 0;
     let priestTravelMillis = 0;
@@ -328,21 +530,27 @@ export function estimateDayRoutes(
 
       priestDistanceMeters += leg.distanceMeters;
       priestTravelMillis += leg.durationMillis;
-      elapsedMinutes += leg.durationMillis / 60000;
 
-      const arrivalTime = addMinutesToHHMM(startTime, Math.round(elapsedMinutes));
-      elapsedMinutes += stop.durationMinutes;
-      priestVisitMinutes += stop.durationMinutes;
-      const departureTime = addMinutesToHHMM(
-        startTime,
-        Math.round(elapsedMinutes)
+      const travelMins = leg.durationMillis / 60000;
+      const stopDuration = getEffectiveStopDurationMinutes(
+        stop,
+        config.defaultVisitMinutes
       );
+      const timing = advanceStopClockWithBreaks(
+        cursorAbs,
+        travelMins,
+        stopDuration,
+        isBlockStop(stop),
+        activeBreaks
+      );
+      cursorAbs = timing.endCursorAbs;
+      priestVisitMinutes += stopDuration;
 
       return {
         stop,
         orderIndex: idx + 1,
-        arrivalTime,
-        departureTime,
+        arrivalTime: formatAbsMinutesToHHMM(timing.arrivalAbs),
+        departureTime: formatAbsMinutesToHHMM(timing.departureAbs),
         legDistanceMeters: leg.distanceMeters,
         legDurationMillis: leg.durationMillis,
       };
@@ -360,13 +568,12 @@ export function estimateDayRoutes(
       returnLegDurationMillis = ret.durationMillis;
       priestDistanceMeters += ret.distanceMeters;
       priestTravelMillis += ret.durationMillis;
-      elapsedMinutes += ret.durationMillis / 60000;
+      cursorAbs += ret.durationMillis / 60000;
       pathPoints.push(parish.location);
     }
 
-    const endTime = addMinutesToHHMM(startTime, Math.round(elapsedMinutes));
-    const endAbsMinutes =
-      parseHHMMToMinutes(startTime) + Math.round(elapsedMinutes);
+    const endAbsMinutes = Math.round(cursorAbs);
+    const endTime = formatAbsMinutesToHHMM(endAbsMinutes);
     if (endAbsMinutes > latestEndMinutes) {
       latestEndMinutes = endAbsMinutes;
     }
@@ -390,15 +597,9 @@ export function estimateDayRoutes(
     });
   }
 
-  const endHH = String(Math.floor((latestEndMinutes % 1440) / 60)).padStart(
-    2,
-    '0'
-  );
-  const endMM = String(latestEndMinutes % 60).padStart(2, '0');
-
   return {
     routes,
-    endTime: `${endHH}:${endMM}`,
+    endTime: formatAbsMinutesToHHMM(latestEndMinutes),
     totalDistanceMeters,
     totalVisitMinutes,
     totalTravelMillis,
@@ -436,6 +637,7 @@ export function buildSeasonDaySummaries(
     const dayStops = byDate[date];
     const startTime = getDayStartTime(date, seasonConfig, config.startTime);
     const plannedEndTime = getDayEndTime(date, seasonConfig);
+    const activeBreaks = getDayActiveBreaks(date, seasonConfig);
 
     const streetCountMap: Record<string, number> = {};
     for (const s of dayStops) {
@@ -473,6 +675,7 @@ export function buildSeasonDaySummaries(
         startTime,
         plannedEndTime,
         estimatedEndTime,
+        activeBreaks,
         stops: dayStops,
         streetNames,
         estimatedRoutes: exact,
@@ -484,7 +687,8 @@ export function buildSeasonDaySummaries(
 
     if (!parish) {
       const totalVisitMinutes = dayStops.reduce(
-        (acc, s) => acc + s.durationMinutes,
+        (acc, s) =>
+          acc + getEffectiveStopDurationMinutes(s, config.defaultVisitMinutes),
         0
       );
       const avgPerPriest = Math.round(
@@ -497,6 +701,7 @@ export function buildSeasonDaySummaries(
         startTime,
         plannedEndTime,
         estimatedEndTime: addMinutesToHHMM(startTime, avgPerPriest),
+        activeBreaks,
         stops: dayStops,
         streetNames,
         estimatedRoutes: [],
@@ -506,7 +711,13 @@ export function buildSeasonDaySummaries(
       };
     }
 
-    const est = estimateDayRoutes(parish, dayStops, config, startTime);
+    const est = estimateDayRoutes(
+      parish,
+      dayStops,
+      config,
+      startTime,
+      activeBreaks
+    );
     return {
       date,
       weekdayLabel: formatPolishWeekdayShort(date),
@@ -514,6 +725,7 @@ export function buildSeasonDaySummaries(
       startTime,
       plannedEndTime,
       estimatedEndTime: est.endTime,
+      activeBreaks,
       stops: dayStops,
       streetNames,
       estimatedRoutes: est.routes,
@@ -526,88 +738,406 @@ export function buildSeasonDaySummaries(
   return { days, unscheduledStops };
 }
 
-/**
- * Orders stops along street clusters so streets stay contiguous and geographically chained.
- */
-function orderStopsByStreetClusters(
-  parishCenter: LatLng,
-  stops: VisitStop[]
-): VisitStop[] {
-  if (stops.length <= 1) return [...stops];
+interface StreetWorkUnit {
+  id: string;
+  streetName: string;
+  stops: VisitStop[];
+  centroid: LatLng;
+  estimatedMinutes: number;
+  hasBlocks: boolean;
+  angleFromParish: number;
+  distanceFromParishMeters: number;
+}
 
+function orderStopsAlongStreet(
+  referencePoint: LatLng,
+  streetStops: VisitStop[]
+): VisitStop[] {
+  if (streetStops.length <= 1) return [...streetStops];
+  const pool = [...streetStops];
+  // Start from extreme house closest to referencePoint or lowest numeric corner
+  let startIdx = 0;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < pool.length; i++) {
+    const d = haversineMeters(referencePoint, pool[i].location);
+    if (d < bestDist) {
+      bestDist = d;
+      startIdx = i;
+    }
+  }
+  const ordered: VisitStop[] = [pool.splice(startIdx, 1)[0]];
+  let cursor = ordered[0].location;
+  while (pool.length > 0) {
+    let nextIdx = 0;
+    let nextDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < pool.length; i++) {
+      const d = haversineMeters(cursor, pool[i].location);
+      if (d < nextDist) {
+        nextDist = d;
+        nextIdx = i;
+      }
+    }
+    const chosen = pool.splice(nextIdx, 1)[0];
+    ordered.push(chosen);
+    cursor = chosen.location;
+  }
+  return ordered;
+}
+
+function makeWorkUnit(
+  id: string,
+  streetName: string,
+  orderedStops: VisitStop[],
+  parishLocation: LatLng,
+  defaultVisitMinutes: number,
+  perStopTravelEstimate: number
+): StreetWorkUnit {
+  const centroid = {
+    lat:
+      orderedStops.reduce((acc, s) => acc + s.location.lat, 0) /
+      orderedStops.length,
+    lng:
+      orderedStops.reduce((acc, s) => acc + s.location.lng, 0) /
+      orderedStops.length,
+  };
+  const estimatedMinutes = orderedStops.reduce(
+    (acc, s) =>
+      acc +
+      getEffectiveStopDurationMinutes(s, defaultVisitMinutes) +
+      perStopTravelEstimate,
+    0
+  );
+  const blockCount = orderedStops.filter((s) => isBlockStop(s)).length;
+  const totalUnits = orderedStops.reduce(
+    (acc, s) => acc + getStopUnitCount(s),
+    0
+  );
+  const hasBlocks = blockCount > 0 && (blockCount >= orderedStops.length * 0.35 || totalUnits >= 15);
+  return {
+    id,
+    streetName,
+    stops: orderedStops,
+    centroid,
+    estimatedMinutes,
+    hasBlocks,
+    angleFromParish: Math.atan2(
+      centroid.lat - parishLocation.lat,
+      centroid.lng - parishLocation.lng
+    ),
+    distanceFromParishMeters: haversineMeters(parishLocation, centroid),
+  };
+}
+
+function buildStreetWorkUnits({
+  parishLocation,
+  candidates,
+  splitMode,
+  typicalTeamDayBudget,
+  defaultVisitMinutes,
+  perStopTravelEstimate,
+}: {
+  parishLocation: LatLng;
+  candidates: VisitStop[];
+  splitMode: SeasonPlanningRules['splitMode'];
+  typicalTeamDayBudget: number;
+  defaultVisitMinutes: number;
+  perStopTravelEstimate: number;
+}): StreetWorkUnit[] {
   const byStreet = new Map<string, VisitStop[]>();
-  for (const s of stops) {
+  for (const s of candidates) {
     const name = extractStreetName(s);
     const list = byStreet.get(name);
     if (list) list.push(s);
     else byStreet.set(name, [s]);
   }
 
-  interface StreetCluster {
-    name: string;
-    stops: VisitStop[];
-    centroid: LatLng;
-  }
+  const units: StreetWorkUnit[] = [];
+  const softChunkTarget = Math.max(90, Math.round(typicalTeamDayBudget * 0.85));
 
-  const remaining: StreetCluster[] = Array.from(byStreet.entries()).map(
-    ([name, streetStops]) => {
-      const centroid = {
-        lat:
-          streetStops.reduce((acc, s) => acc + s.location.lat, 0) /
-          streetStops.length,
-        lng:
-          streetStops.reduce((acc, s) => acc + s.location.lng, 0) /
-          streetStops.length,
-      };
-      return { name, stops: streetStops, centroid };
-    }
-  );
+  for (const [streetName, rawStops] of byStreet.entries()) {
+    const orderedStops = orderStopsAlongStreet(parishLocation, rawStops);
+    const fullUnit = makeWorkUnit(
+      streetName,
+      streetName,
+      orderedStops,
+      parishLocation,
+      defaultVisitMinutes,
+      perStopTravelEstimate
+    );
 
-  // Chain street clusters via nearest neighbor starting from closest to church
-  const orderedAll: VisitStop[] = [];
-  let cursor = parishCenter;
-
-  while (remaining.length > 0) {
-    let bestIdx = 0;
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < remaining.length; i++) {
-      const d = haversineMeters(cursor, remaining[i].centroid);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
+    if (splitMode === 'parity' && (fullUnit.estimatedMinutes > softChunkTarget * 0.72 || orderedStops.length >= 16)) {
+      const evens: VisitStop[] = [];
+      const odds: VisitStop[] = [];
+      const other: VisitStop[] = [];
+      for (const s of orderedStops) {
+        const isEven = isEvenHouseNumberStr(extractHouseNumberLabel(s));
+        if (isEven === true) evens.push(s);
+        else if (isEven === false) odds.push(s);
+        else other.push(s);
       }
-    }
-
-    const cluster = remaining.splice(bestIdx, 1)[0];
-    // Order houses within this street starting from the house closest to cursor
-    const streetPool = [...cluster.stops];
-    let localCursor = cursor;
-    while (streetPool.length > 0) {
-      let hIdx = 0;
-      let hDist = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < streetPool.length; i++) {
-        const d = haversineMeters(localCursor, streetPool[i].location);
-        if (d < hDist) {
-          hDist = d;
-          hIdx = i;
+      if (evens.length > 0 && odds.length > 0) {
+        const evenBatch = evens.length <= odds.length ? [...evens, ...other] : evens;
+        const oddBatch = evens.length <= odds.length ? odds : [...odds, ...other];
+        const subBatches = [
+          { tag: `${streetName} (parzyste)`, items: evenBatch },
+          { tag: `${streetName} (nieparzyste)`, items: oddBatch },
+        ];
+        for (const sub of subBatches) {
+          const subUnit = makeWorkUnit(
+            sub.tag,
+            streetName,
+            sub.items,
+            parishLocation,
+            defaultVisitMinutes,
+            perStopTravelEstimate
+          );
+          if (subUnit.estimatedMinutes <= typicalTeamDayBudget * 1.05 || sub.items.length <= 2) {
+            units.push(subUnit);
+          } else {
+            // Subdivide huge side sequentially into balanced segments
+            let chunk: VisitStop[] = [];
+            let chunkCost = 0;
+            let part = 1;
+            for (const s of sub.items) {
+              const c = getEffectiveStopDurationMinutes(s, defaultVisitMinutes) + perStopTravelEstimate;
+              if (chunk.length > 0 && chunkCost + c > softChunkTarget) {
+                units.push(
+                  makeWorkUnit(
+                    `${sub.tag} #${part++}`,
+                    streetName,
+                    chunk,
+                    parishLocation,
+                    defaultVisitMinutes,
+                    perStopTravelEstimate
+                  )
+                );
+                chunk = [];
+                chunkCost = 0;
+              }
+              chunk.push(s);
+              chunkCost += c;
+            }
+            if (chunk.length > 0) {
+              units.push(
+                makeWorkUnit(
+                  `${sub.tag} #${part}`,
+                  streetName,
+                  chunk,
+                  parishLocation,
+                  defaultVisitMinutes,
+                  perStopTravelEstimate
+                )
+              );
+            }
+          }
         }
+        continue;
       }
-      const nextHouse = streetPool.splice(hIdx, 1)[0];
-      orderedAll.push(nextHouse);
-      localCursor = nextHouse.location;
     }
 
-    cursor = localCursor;
+    if (splitMode === 'strict_budget' && orderedStops.length > 6 && fullUnit.estimatedMinutes > softChunkTarget * 0.55) {
+      let chunk: VisitStop[] = [];
+      let chunkCost = 0;
+      let part = 1;
+      for (const s of orderedStops) {
+        const c = getEffectiveStopDurationMinutes(s, defaultVisitMinutes) + perStopTravelEstimate;
+        if (chunk.length > 0 && chunkCost + c > Math.max(60, softChunkTarget * 0.5)) {
+          units.push(
+            makeWorkUnit(
+              `${streetName} #${part++}`,
+              streetName,
+              chunk,
+              parishLocation,
+              defaultVisitMinutes,
+              perStopTravelEstimate
+            )
+          );
+          chunk = [];
+          chunkCost = 0;
+        }
+        chunk.push(s);
+        chunkCost += c;
+      }
+      if (chunk.length > 0) {
+        units.push(
+          makeWorkUnit(
+            `${streetName} #${part}`,
+            streetName,
+            chunk,
+            parishLocation,
+            defaultVisitMinutes,
+            perStopTravelEstimate
+          )
+        );
+      }
+      continue;
+    }
+
+    // whole_or_half (default): keep whole street intact unless it overflows a single day
+    if (fullUnit.estimatedMinutes > typicalTeamDayBudget * 0.92 && orderedStops.length >= 4) {
+      const partCount = Math.max(2, Math.ceil(fullUnit.estimatedMinutes / softChunkTarget));
+      const targetPerPart = fullUnit.estimatedMinutes / partCount;
+      let chunk: VisitStop[] = [];
+      let chunkCost = 0;
+      let part = 1;
+      for (let idx = 0; idx < orderedStops.length; idx++) {
+        const s = orderedStops[idx];
+        const c = getEffectiveStopDurationMinutes(s, defaultVisitMinutes) + perStopTravelEstimate;
+        const remainingParts = partCount - part;
+        if (
+          remainingParts > 0 &&
+          chunk.length >= 2 &&
+          chunkCost + c > targetPerPart &&
+          orderedStops.length - idx >= remainingParts * 2
+        ) {
+          units.push(
+            makeWorkUnit(
+              `${streetName} (cz. ${part++})`,
+              streetName,
+              chunk,
+              parishLocation,
+              defaultVisitMinutes,
+              perStopTravelEstimate
+            )
+          );
+          chunk = [];
+          chunkCost = 0;
+        }
+        chunk.push(s);
+        chunkCost += c;
+      }
+      if (chunk.length > 0) {
+        units.push(
+          makeWorkUnit(
+            `${streetName} (cz. ${part})`,
+            streetName,
+            chunk,
+            parishLocation,
+            defaultVisitMinutes,
+            perStopTravelEstimate
+          )
+        );
+      }
+    } else {
+      units.push(fullUnit);
+    }
   }
 
-  return orderedAll;
+  return units;
 }
 
 /**
- * Automatically distributes stops across a multi-day kolęda schedule respecting weekday/weekend start times,
- * daily end time limit, active days of week, priest count, and Google 25-waypoint per priest cap.
+ * Coordinates multi-priest assignment on a single day cleanly:
+ * assigns whole adjacent streets to priests when balanced, or splits by even/odd side or local spatial sector around day centroid.
  */
-export function autoScheduleSeason({
+function coordinateDayStopsAcrossPriests(
+  parishLocation: LatLng,
+  dayStops: VisitStop[],
+  priestCount: number,
+  defaultVisitMinutes: number
+): VisitStop[] {
+  if (dayStops.length === 0) return dayStops;
+  if (priestCount <= 1) {
+    return dayStops.map((s) => ({ ...s, priestId: 1 }));
+  }
+
+  const byStreet = new Map<string, VisitStop[]>();
+  for (const s of dayStops) {
+    const name = extractStreetName(s);
+    const list = byStreet.get(name);
+    if (list) list.push(s);
+    else byStreet.set(name, [s]);
+  }
+
+  if (byStreet.size >= priestCount) {
+    // Try street-level balanced assignment ordered by angle around day centroid
+    const dayCentroid = {
+      lat: dayStops.reduce((a, s) => a + s.location.lat, 0) / dayStops.length,
+      lng: dayStops.reduce((a, s) => a + s.location.lng, 0) / dayStops.length,
+    };
+    const streetGroups = Array.from(byStreet.entries())
+      .map(([streetName, list]) => {
+        const cx = list.reduce((a, s) => a + s.location.lng, 0) / list.length;
+        const cy = list.reduce((a, s) => a + s.location.lat, 0) / list.length;
+        const load = list.reduce(
+          (a, s) => a + getEffectiveStopDurationMinutes(s, defaultVisitMinutes) + 2,
+          0
+        );
+        const angle = Math.atan2(cy - dayCentroid.lat, cx - dayCentroid.lng);
+        return { streetName, list, load, angle };
+      })
+      .sort((a, b) => a.angle - b.angle);
+
+    const loads = Array.from({ length: priestCount }, () => 0);
+    const assigned = new Map<string, number>();
+
+    // Greedy LPT / contiguous bin assignment if streets don't wildly skew balance
+    const totalLoad = streetGroups.reduce((a, g) => a + g.load, 0);
+    const maxSingleStreet = Math.max(...streetGroups.map((g) => g.load));
+
+    if (maxSingleStreet <= (totalLoad / priestCount) * 1.45) {
+      // Assign contiguous street arcs first, picking the lowest-loaded neighboring bucket
+      for (const grp of streetGroups) {
+        let bestP = 0;
+        let minLoad = Number.POSITIVE_INFINITY;
+        for (let p = 0; p < priestCount; p++) {
+          if (loads[p] < minLoad) {
+            minLoad = loads[p];
+            bestP = p;
+          }
+        }
+        loads[bestP] += grp.load;
+        for (const s of grp.list) {
+          assigned.set(s.id, bestP + 1);
+        }
+      }
+      return dayStops.map((s) => ({
+        ...s,
+        priestId: assigned.get(s.id) ?? 1,
+      }));
+    }
+  }
+
+  // Single long street / large block area: if 2 priests and clear even/odd parity, put Ks 1 = parzyste, Ks 2 = nieparzyste
+  if (priestCount === 2 && byStreet.size === 1) {
+    const evens = dayStops.filter(
+      (s) => isEvenHouseNumberStr(extractHouseNumberLabel(s)) === true
+    );
+    const odds = dayStops.filter(
+      (s) => isEvenHouseNumberStr(extractHouseNumberLabel(s)) === false
+    );
+    if (
+      evens.length >= 2 &&
+      odds.length >= 2 &&
+      Math.max(evens.length, odds.length) <= Math.min(evens.length, odds.length) * 1.8
+    ) {
+      const evenSet = new Set(evens.map((s) => s.id));
+      const oddSet = new Set(odds.map((s) => s.id));
+      return dayStops.map((s, idx) => ({
+        ...s,
+        priestId: evenSet.has(s.id) ? 1 : oddSet.has(s.id) ? 2 : (idx % 2) + 1,
+      }));
+    }
+  }
+
+  // Fallback: partition spatially around the day's own cluster center (keeps priests separated cleanly inside today's zone)
+  const dayCentroid = {
+    lat: dayStops.reduce((a, s) => a + s.location.lat, 0) / dayStops.length,
+    lng: dayStops.reduce((a, s) => a + s.location.lng, 0) / dayStops.length,
+  };
+  const anchorOrigin =
+    haversineMeters(parishLocation, dayCentroid) > 250
+      ? dayCentroid
+      : parishLocation;
+  return partitionStopsBySector(anchorOrigin, dayStops, priestCount);
+}
+
+/**
+ * Simulates an entire kolęda season using zone-first clustering, holidays/days off,
+ * lunch/Mass breaks, realistic block workload, and coordinated multi-priest teams.
+ * Runs 100% locally without mutating saved state so users can preview before applying.
+ */
+export function simulateAutoScheduleSeason({
   parish,
   stops,
   config,
@@ -619,15 +1149,22 @@ export function autoScheduleSeason({
   config: PlanConfig;
   seasonConfig: SeasonPlanConfig;
   targetMode: 'all' | 'unscheduled';
-}): VisitStop[] {
+}): AutoSeasonSimulationResult {
+  const skippedPermanentDeclineCount = stops.filter(
+    (s) => Boolean(s.permanentDecline) || s.included === false
+  ).length;
+
+  const eligiblePool = stops.filter(
+    (s) => !s.permanentDecline && s.included !== false
+  );
+
   const candidates =
     targetMode === 'unscheduled'
-      ? stops.filter((s) => !(s.visitDate ?? '').trim())
-      : [...stops];
-
-  if (candidates.length === 0) return stops;
+      ? eligiblePool.filter((s) => !(s.visitDate ?? '').trim())
+      : eligiblePool;
 
   const existingByDate = new Map<string, VisitStop[]>();
+  let preservedDaysCount = 0;
   if (targetMode === 'unscheduled') {
     for (const s of stops) {
       const d = (s.visitDate ?? '').trim();
@@ -637,25 +1174,87 @@ export function autoScheduleSeason({
         else existingByDate.set(d, [s]);
       }
     }
+    preservedDaysCount = existingByDate.size;
   }
 
-  const orderedQueue = orderStopsByStreetClusters(parish.location, candidates);
+  if (candidates.length === 0) {
+    const summary = buildSeasonDaySummaries(stops, parish, config, seasonConfig);
+    return {
+      scheduledStops: stops,
+      simulatedDays: summary.days,
+      newlyScheduledCount: 0,
+      preservedDaysCount,
+      skippedPermanentDeclineCount,
+      unscheduledRemainingCount: 0,
+      excludedHolidaysUsed: [],
+      hasOverflowPastHorizon: false,
+    };
+  }
+
+  const rules: SeasonPlanningRules = {
+    splitMode: seasonConfig.planningRules?.splitMode ?? DEFAULT_PLANNING_RULES.splitMode,
+    zoneDirection:
+      seasonConfig.planningRules?.zoneDirection ?? DEFAULT_PLANNING_RULES.zoneDirection,
+    blockPreference:
+      seasonConfig.planningRules?.blockPreference ??
+      DEFAULT_PLANNING_RULES.blockPreference,
+    safetyBufferMinutes: Math.max(
+      0,
+      Math.min(120, seasonConfig.planningRules?.safetyBufferMinutes ?? 15)
+    ),
+  };
+
   const allowedWeekdays = parseWeekdaysMask(seasonConfig.weekdaysMask);
+  const excludedSet = new Set(seasonConfig.excludedDates ?? []);
   const priestCount = Math.max(1, Math.min(4, config.priestCount));
   const dailyEndMinutes = parseHHMMToMinutes(seasonConfig.dailyEndTime, 20 * 60 + 30);
-  const perStopTravelEstimate = config.travelMode === 'DRIVING' ? 2.5 : 1.8;
+  const perStopTravelEstimate = config.travelMode === 'DRIVING' ? 2.6 : 1.9;
+  const returnReserveMinutes = config.returnToParish ? 8 : 0;
+
+  const sampleWeekdayBudget = Math.max(
+    90,
+    (dailyEndMinutes -
+      parseHHMMToMinutes(seasonConfig.weekdayStartTime, 15 * 60 + 30) -
+      rules.safetyBufferMinutes -
+      returnReserveMinutes) *
+      priestCount
+  );
+
+  const remainingUnits = buildStreetWorkUnits({
+    parishLocation: parish.location,
+    candidates,
+    splitMode: rules.splitMode,
+    typicalTeamDayBudget: sampleWeekdayBudget,
+    defaultVisitMinutes: config.defaultVisitMinutes,
+    perStopTravelEstimate,
+  });
 
   const updatedById = new Map<string, VisitStop>();
-  let cursorIdx = 0;
+  const excludedHolidaysUsed: string[] = [];
+  let newlyScheduledCount = 0;
+  let lastZoneCentroid: LatLng | null = null;
   let dayOffset = 0;
-  const MAX_DAYS_SCAN = 120;
+  const MAX_DAYS_SCAN = 180;
+  const endHorizon =
+    seasonConfig.endDate && /^\d{4}-\d{2}-\d{2}$/.test(seasonConfig.endDate)
+      ? seasonConfig.endDate
+      : '';
 
-  while (cursorIdx < orderedQueue.length && dayOffset < MAX_DAYS_SCAN) {
+  while (remainingUnits.length > 0 && dayOffset < MAX_DAYS_SCAN) {
     const currentDate = addDaysToIsoDate(seasonConfig.startDate, dayOffset);
     dayOffset += 1;
 
+    if (endHorizon && currentDate > endHorizon) {
+      break;
+    }
+
     const weekday = getPolishWeekdayIndex(currentDate);
     if (!allowedWeekdays.has(weekday)) continue;
+
+    if (excludedSet.has(currentDate)) {
+      excludedHolidaysUsed.push(currentDate);
+      continue;
+    }
 
     const dayStartTime = getDayStartTime(
       currentDate,
@@ -663,78 +1262,236 @@ export function autoScheduleSeason({
       config.startTime
     );
     const dayEndTime = getDayEndTime(currentDate, seasonConfig);
-    const dayStartMinutes = parseHHMMToMinutes(dayStartTime, 15 * 60 + 30);
-    const dayEndMinutes = parseHHMMToMinutes(dayEndTime, dailyEndMinutes);
-    let rawBudgetPerPriest = dayEndMinutes - dayStartMinutes;
-    if (rawBudgetPerPriest <= 30) rawBudgetPerPriest += 24 * 60;
-    rawBudgetPerPriest = Math.max(60, rawBudgetPerPriest);
+    const dayStartAbs = parseHHMMToMinutes(dayStartTime, 15 * 60 + 30);
+    let dayEndAbs = parseHHMMToMinutes(dayEndTime, dailyEndMinutes);
+    if (dayEndAbs <= dayStartAbs + 30) dayEndAbs += 24 * 60;
 
-    const returnReserveMinutes = config.returnToParish ? 10 : 0;
-    const totalDayTeamBudget = Math.max(
-      45,
-      (rawBudgetPerPriest - returnReserveMinutes) * priestCount
+    const dayBreaks = getDayActiveBreaks(currentDate, seasonConfig);
+    const breakOverlap = computeBreakOverlapMinutes(
+      dayStartAbs,
+      dayEndAbs,
+      dayBreaks
     );
+
+    const effectiveMinutesPerPriest = Math.max(
+      45,
+      dayEndAbs -
+        dayStartAbs -
+        breakOverlap -
+        rules.safetyBufferMinutes -
+        returnReserveMinutes
+    );
+    const totalDayTeamBudget = effectiveMinutesPerPriest * priestCount;
 
     const alreadyOnDay = existingByDate.get(currentDate) ?? [];
     const usedMinutesOnDay = alreadyOnDay.reduce(
-      (acc, s) => acc + s.durationMinutes + perStopTravelEstimate,
+      (acc, s) =>
+        acc +
+        getEffectiveStopDurationMinutes(s, config.defaultVisitMinutes) +
+        perStopTravelEstimate,
       0
     );
 
-    if (usedMinutesOnDay >= totalDayTeamBudget - 15) {
+    if (usedMinutesOnDay >= totalDayTeamBudget - 20) {
       continue;
     }
 
     const dayBatch: VisitStop[] = [];
     let dayMinutesAccum = usedMinutesOnDay;
+    const isWeekendDay = weekday === 0 || weekday === 6;
 
-    while (cursorIdx < orderedQueue.length) {
-      const nextStop = orderedQueue[cursorIdx];
-      const cost = nextStop.durationMinutes + perStopTravelEstimate;
+    // Anchor today's zone close to existing stops on this day, or previous day's zone, or direction seed
+    let todayCursor: LatLng =
+      alreadyOnDay.length > 0
+        ? {
+            lat:
+              alreadyOnDay.reduce((a, s) => a + s.location.lat, 0) /
+              alreadyOnDay.length,
+            lng:
+              alreadyOnDay.reduce((a, s) => a + s.location.lng, 0) /
+              alreadyOnDay.length,
+          }
+        : lastZoneCentroid ?? parish.location;
 
-      // Always allow at least 1 stop on an empty day so scheduler always progresses
-      if (
-        dayBatch.length > 0 &&
-        dayMinutesAccum + cost > totalDayTeamBudget
-      ) {
-        break;
+    while (remainingUnits.length > 0) {
+      // Choose next compact work unit
+      let bestIdx = 0;
+      let bestScore = Number.POSITIVE_INFINITY;
+
+      for (let i = 0; i < remainingUnits.length; i++) {
+        const unit = remainingUnits[i];
+        const wouldFit =
+          dayBatch.length === 0 ||
+          dayMinutesAccum + unit.estimatedMinutes <=
+            totalDayTeamBudget * (rules.splitMode === 'strict_budget' ? 1.0 : 1.08);
+
+        if (!wouldFit) continue;
+
+        let score: number;
+        if (!lastZoneCentroid && dayBatch.length === 0 && alreadyOnDay.length === 0) {
+          // Very first day seed according to zoneDirection
+          if (rules.zoneDirection === 'farthest_first') {
+            score = -unit.distanceFromParishMeters;
+          } else if (rules.zoneDirection === 'clockwise') {
+            // Normalize polar angle from North-East clockwise
+            const normAngle =
+              (Math.PI / 2 - unit.angleFromParish + Math.PI * 2) % (Math.PI * 2);
+            score = normAngle * 250 + unit.distanceFromParishMeters * 0.2;
+          } else {
+            score = unit.distanceFromParishMeters;
+          }
+        } else {
+          const distFromCursor = haversineMeters(todayCursor, unit.centroid);
+          const radialBias =
+            rules.zoneDirection === 'farthest_first'
+              ? -unit.distanceFromParishMeters * 0.12
+              : rules.zoneDirection === 'nearest_first'
+                ? unit.distanceFromParishMeters * 0.15
+                : 0;
+          score = distFromCursor + radialBias;
+        }
+
+        // Apply optional pastoral preference (blocks on weekday afternoons, houses on weekends)
+        if (rules.blockPreference === 'blocks_weekdays_houses_weekend') {
+          if (!isWeekendDay) {
+            score *= unit.hasBlocks ? 0.55 : 1.55;
+          } else {
+            score *= !unit.hasBlocks ? 0.55 : 1.65;
+          }
+        }
+
+        // Strongly prefer units that fit today cleanly without excess idle gap
+        if (score < bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
       }
 
-      dayBatch.push(nextStop);
-      dayMinutesAccum += cost;
-      cursorIdx += 1;
+      const candidateUnit = remainingUnits[bestIdx];
+      const willFit =
+        dayBatch.length === 0 ||
+        dayMinutesAccum + candidateUnit.estimatedMinutes <=
+          totalDayTeamBudget * (rules.splitMode === 'strict_budget' ? 1.0 : 1.08);
+
+      if (!willFit) {
+        // Check if any smaller nearby unit fits nicely into remaining time on this day
+        let fallbackIdx = -1;
+        let fallbackScore = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < remainingUnits.length; i++) {
+          const unit = remainingUnits[i];
+          if (dayMinutesAccum + unit.estimatedMinutes > totalDayTeamBudget * 1.04) {
+            continue;
+          }
+          const d = haversineMeters(todayCursor, unit.centroid);
+          // Only pull another street if it's genuinely adjacent (< 900 m) to prevent zigzagging across parish!
+          if (d <= 900 && d < fallbackScore) {
+            fallbackScore = d;
+            fallbackIdx = i;
+          }
+        }
+
+        if (fallbackIdx < 0) {
+          break;
+        }
+
+        const pulled = remainingUnits.splice(fallbackIdx, 1)[0];
+        dayBatch.push(...pulled.stops);
+        dayMinutesAccum += pulled.estimatedMinutes;
+        todayCursor = pulled.centroid;
+        continue;
+      }
+
+      const chosen = remainingUnits.splice(bestIdx, 1)[0];
+      dayBatch.push(...chosen.stops);
+      dayMinutesAccum += chosen.estimatedMinutes;
+      todayCursor = chosen.centroid;
     }
 
     if (dayBatch.length > 0) {
+      lastZoneCentroid = todayCursor;
       const combinedDayStops = [...alreadyOnDay, ...dayBatch];
-      const partitioned = partitionStopsBySector(
+      const coordinated = coordinateDayStopsAcrossPriests(
         parish.location,
         combinedDayStops,
-        priestCount
+        priestCount,
+        config.defaultVisitMinutes
       );
-      const partById = new Map(partitioned.map((s) => [s.id, s]));
+      const coordById = new Map(coordinated.map((s) => [s.id, s]));
 
       for (const s of dayBatch) {
-        const p = partById.get(s.id) ?? s;
+        const c = coordById.get(s.id) ?? s;
         updatedById.set(s.id, {
-          ...p,
+          ...c,
           visitDate: currentDate,
           included: true,
+          manualOrder: 0,
         });
+        newlyScheduledCount += 1;
       }
-      // Also rebalance existing stops on that day if combined
-      for (const s of alreadyOnDay) {
-        const p = partById.get(s.id) ?? s;
-        updatedById.set(s.id, {
-          ...p,
-          visitDate: currentDate,
-          included: true,
-        });
+
+      if (alreadyOnDay.length > 0 && targetMode === 'unscheduled') {
+        for (const s of alreadyOnDay) {
+          const c = coordById.get(s.id) ?? s;
+          updatedById.set(s.id, {
+            ...c,
+            visitDate: currentDate,
+            included: true,
+          });
+        }
       }
     }
   }
 
-  return stops.map((s) => updatedById.get(s.id) ?? s);
+  // Clear visitDate for excluded stops ONLY in 'all' mode if they had a previous date
+  const scheduledStops = stops.map((s) => {
+    const updated = updatedById.get(s.id);
+    if (updated) return updated;
+    if (
+      targetMode === 'all' &&
+      (s.permanentDecline || s.included === false) &&
+      (s.visitDate ?? '').trim() !== ''
+    ) {
+      return { ...s, visitDate: '', manualOrder: 0 };
+    }
+    return s;
+  });
+
+  const unscheduledRemainingCount = remainingUnits.reduce(
+    (acc, u) => acc + u.stops.length,
+    0
+  );
+
+  const simulatedSummary = buildSeasonDaySummaries(
+    scheduledStops,
+    parish,
+    config,
+    seasonConfig
+  );
+
+  return {
+    scheduledStops,
+    simulatedDays: simulatedSummary.days,
+    newlyScheduledCount,
+    preservedDaysCount,
+    skippedPermanentDeclineCount,
+    unscheduledRemainingCount,
+    excludedHolidaysUsed,
+    hasOverflowPastHorizon: Boolean(endHorizon && unscheduledRemainingCount > 0),
+  };
+}
+
+/**
+ * Automatically distributes stops across a multi-day kolęda schedule respecting holidays, breaks,
+ * weekday/Saturday/Sunday start times, daily end time limit, priest count, and spatial zones.
+ */
+export function autoScheduleSeason(params: {
+  parish: ParishCenter;
+  stops: VisitStop[];
+  config: PlanConfig;
+  seasonConfig: SeasonPlanConfig;
+  targetMode: 'all' | 'unscheduled';
+}): VisitStop[] {
+  return simulateAutoScheduleSeason(params).scheduledStops;
 }
 
 export function exportFullSeasonToCsv(

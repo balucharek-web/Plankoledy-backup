@@ -256,8 +256,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         parish?.location.lng ?? DEFAULT_POLAND_CENTER.lng,
       ],
       zoom: parish ? 15 : 6,
-      zoomControl: true,
+      zoomControl: false,
     });
+
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
@@ -1236,7 +1238,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
       const startBadgeHtml = appearance.isStartPoint
         ? `<div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:2px;background:#15803D;color:#FFFFFF;font-family:sans-serif;font-size:9px;font-weight:800;letter-spacing:0.04em;padding:1px 5px;border-radius:4px;border:1.5px solid #FFFFFF;box-shadow:0 1px 4px rgba(0,0,0,0.28);white-space:nowrap;pointer-events:none;">START</div>`
-        : '';
+        : appearance.isEndPoint &&
+            (focusedPriestId !== null || routes.length === 1)
+          ? `<div style="position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:2px;background:#0F172A;color:#FFFFFF;font-family:sans-serif;font-size:9px;font-weight:800;letter-spacing:0.04em;padding:1px 5px;border-radius:4px;border:1.5px solid #FFFFFF;box-shadow:0 1px 4px rgba(0,0,0,0.28);white-space:nowrap;pointer-events:none;">META</div>`
+          : '';
 
       const icon = L.divIcon({
         className: '',
@@ -1370,6 +1375,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   }, [
     stops,
     routeMetaByStopId,
+    routes.length,
     highlightedStopId,
     selectedDate,
     focusedPriestId,
@@ -1443,33 +1449,51 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
 
     if (!showRouteLines) return;
 
-    const routesWithPath = routes.filter((r) => r.encodedPathPoints.length >= 2);
-    if (routesWithPath.length === 0) return;
+    const routesWithStops = routes.filter((r) => r.orderedStops.length > 0);
+    if (routesWithStops.length === 0) return;
 
-    const routeSignature = `${isExactRoute ? 'exact' : 'est'}:${routesWithPath
+    const routeSignature = `${selectedDate ?? 'all'}:${isExactRoute ? 'exact' : 'est'}:${routesWithStops
       .map(
         (r) =>
-          `${r.priestId}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
+          `${r.priestId}:${r.orderedStops[0]?.stop.id ?? ''}:${r.orderedStops[r.orderedStops.length - 1]?.stop.id ?? ''}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
       )
       .join(',')}:${focusedPriestId ?? 'all'}`;
 
     const bounds = L.latLngBounds([]);
     let hasBounds = false;
-    routesWithPath.forEach((route) => {
+    routesWithStops.forEach((route) => {
       const isFocused =
         focusedPriestId === null || focusedPriestId === route.priestId;
-      const latLngs = route.encodedPathPoints.map(
-        (p) => [p.lat, p.lng] as [number, number]
-      );
-      L.polyline(latLngs, {
-        color: route.color,
-        weight: isFocused ? 3.5 : 2,
-        opacity: isFocused ? 0.78 : 0.2,
-        dashArray: isExactRoute ? undefined : '7, 8',
-      }).addTo(layer);
-      if (isFocused) {
-        latLngs.forEach((ll) => {
-          bounds.extend(ll);
+      if (route.encodedPathPoints.length >= 2) {
+        const latLngs = route.encodedPathPoints.map(
+          (p) => [p.lat, p.lng] as [number, number]
+        );
+        // White under-halo for crisp street contrast
+        L.polyline(latLngs, {
+          color: '#FFFFFF',
+          weight: isFocused ? 6.5 : 3.5,
+          opacity: isFocused ? 0.88 : 0.22,
+          dashArray: isExactRoute ? undefined : '8, 7',
+          interactive: false,
+        }).addTo(layer);
+
+        L.polyline(latLngs, {
+          color: route.color,
+          weight: isFocused ? 3.5 : 2,
+          opacity: isFocused ? 0.92 : 0.24,
+          dashArray: isExactRoute ? undefined : '8, 7',
+          interactive: false,
+        }).addTo(layer);
+
+        if (isFocused) {
+          latLngs.forEach((ll) => {
+            bounds.extend(ll);
+            hasBounds = true;
+          });
+        }
+      } else if (isFocused) {
+        route.orderedStops.forEach((item) => {
+          bounds.extend([item.stop.location.lat, item.stop.location.lng]);
           hasBounds = true;
         });
       }
@@ -1481,9 +1505,19 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       lastFittedKeyRef.current !== routeSignature
     ) {
       lastFittedKeyRef.current = routeSignature;
-      map.fitBounds(bounds, { padding: [48, 84] });
+      map.fitBounds(bounds, {
+        paddingTopLeft: [36, 56],
+        paddingBottomRight: [44, 138],
+        maxZoom: 17,
+      });
     }
-  }, [routes, isExactRoute, focusedPriestId, showRouteLines]);
+  }, [
+    routes,
+    isExactRoute,
+    selectedDate,
+    focusedPriestId,
+    showRouteLines,
+  ]);
 
   useEffect(() => {
     const map = mapRef.current;

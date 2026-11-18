@@ -22,6 +22,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  DayBreakWindow,
   DayPlanSummary,
   LatLng,
   ParishCenter,
@@ -31,8 +32,8 @@ import {
   VisitStop,
 } from '../types/parish';
 import { PrintableRouteMap } from './PrintableRouteMap';
+import { SeasonCalendarPlanner } from './SeasonCalendarPlanner';
 import {
-  WEEKDAY_OPTIONS,
   addDaysToIsoDate,
   buildAnnouncementDays,
   collectReturnVisitCandidates,
@@ -41,8 +42,7 @@ import {
   formatPolishDateChip,
   formatPolishDateFull,
   formatPolishWeekdayFull,
-  parseWeekdaysMask,
-  toggleWeekdayInMask,
+  getDayActiveBreaks,
 } from '../utils/seasonScheduler';
 import {
   buildGoogleMapsStageUrls,
@@ -78,7 +78,8 @@ interface PrintScheduleSheetProps {
   onUpdateDayTimeWindow?: (
     date: string,
     startTime: string,
-    endTime: string
+    endTime: string,
+    breaks?: DayBreakWindow[]
   ) => void;
   onScheduleReturnVisits?: (targetDate: string) => void;
   onGoToDayPlanner?: () => void;
@@ -129,14 +130,18 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
   const [editingHoursDate, setEditingHoursDate] = useState<string | null>(null);
   const [editingHoursStart, setEditingHoursStart] = useState<string>('15:30');
   const [editingHoursEnd, setEditingHoursEnd] = useState<string>('20:30');
+  const [editingDayBreaks, setEditingDayBreaks] = useState<DayBreakWindow[]>([]);
   const [returnVisitDate, setReturnVisitDate] = useState<string>('');
   const [excludeDeclinedRollover, setExcludeDeclinedRollover] = useState<boolean>(true);
 
   const effectiveViewMode = forcedViewMode ?? viewMode;
 
-  const activeWeekdaysSet = useMemo(
-    () => parseWeekdaysMask(seasonConfig?.weekdaysMask ?? '1,2,3,4,5,6'),
-    [seasonConfig?.weekdaysMask]
+  const selectedDayBreaks = useMemo(
+    () =>
+      selectedDate && seasonConfig
+        ? getDayActiveBreaks(selectedDate, seasonConfig)
+        : [],
+    [selectedDate, seasonConfig]
   );
 
   const returnCandidates = useMemo(
@@ -412,166 +417,51 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                 seasonConfig &&
                 onChangeSeasonConfig &&
                 onAutoScheduleSeason && (
-                  <div className="pt-3 border-t border-slate-200 space-y-3">
-                    <p className="text-xs text-slate-600 leading-relaxed">
-                      Automatyczny generator ułoży wszystkie ulice parafii w
-                      kolejne dni kolędy według wybranych godzin i dni tygodnia
-                      (dla {config.priestCount}{' '}
-                      {config.priestCount === 1 ? 'księdza' : 'księży'}).
-                    </p>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                      <div>
-                        <label
-                          htmlFor="season-start-date-hub"
-                          className="block text-[11px] font-medium text-slate-600 mb-1"
-                        >
-                          Pierwszy dzień
-                        </label>
-                        <input
-                          id="season-start-date-hub"
-                          type="date"
-                          value={seasonConfig.startDate}
-                          onChange={(e) =>
-                            onChangeSeasonConfig({
-                              ...seasonConfig,
-                              startDate: e.target.value,
-                            })
-                          }
-                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
-                        />
-                      </div>
-                      <div>
-                        <label
-                          htmlFor="season-daily-end-hub"
-                          className="block text-[11px] font-medium text-slate-600 mb-1"
-                        >
-                          Koniec dnia do
-                        </label>
-                        <input
-                          id="season-daily-end-hub"
-                          type="time"
-                          value={seasonConfig.dailyEndTime}
-                          onChange={(e) =>
-                            onChangeSeasonConfig({
-                              ...seasonConfig,
-                              dailyEndTime: e.target.value,
-                            })
-                          }
-                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
-                        />
-                      </div>
-                      <div>
-                        <label
-                          htmlFor="season-weekday-start-hub"
-                          className="block text-[11px] font-medium text-slate-600 mb-1"
-                        >
-                          Start (robocze)
-                        </label>
-                        <input
-                          id="season-weekday-start-hub"
-                          type="time"
-                          value={seasonConfig.weekdayStartTime}
-                          onChange={(e) =>
-                            onChangeSeasonConfig({
-                              ...seasonConfig,
-                              weekdayStartTime: e.target.value,
-                            })
-                          }
-                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
-                        />
-                      </div>
-                      <div>
-                        <label
-                          htmlFor="season-weekend-start-hub"
-                          className="block text-[11px] font-medium text-slate-600 mb-1"
-                        >
-                          Start (sob./nd.)
-                        </label>
-                        <input
-                          id="season-weekend-start-hub"
-                          type="time"
-                          value={seasonConfig.weekendStartTime}
-                          onChange={(e) =>
-                            onChangeSeasonConfig({
-                              ...seasonConfig,
-                              weekendStartTime: e.target.value,
-                            })
-                          }
-                          className="w-full min-h-[40px] px-2.5 py-1.5 text-base sm:text-xs font-mono tabular-nums bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:border-amber-600"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <span className="block text-[11px] font-medium text-slate-600 mb-1.5">
-                        Dni tygodnia z kolędą
-                      </span>
-                      <div className="grid grid-cols-7 gap-1.5">
-                        {WEEKDAY_OPTIONS.map((opt) => {
-                          const checked = activeWeekdaysSet.has(opt.dayIndex);
-                          return (
-                            <button
-                              key={opt.dayIndex}
-                              type="button"
-                              onClick={() =>
-                                onChangeSeasonConfig({
-                                  ...seasonConfig,
-                                  weekdaysMask: toggleWeekdayInMask(
-                                    seasonConfig.weekdaysMask,
-                                    opt.dayIndex
-                                  ),
-                                })
-                              }
-                              aria-pressed={checked}
-                              title={opt.full}
-                              className={`min-h-[38px] rounded-xl text-xs font-semibold transition-colors ${
-                                checked
-                                  ? 'bg-slate-900 text-white'
-                                  : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'
-                              }`}
-                            >
-                              {opt.short}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={!parish}
-                        onClick={() => {
-                          onAutoScheduleSeason('all');
-                          setShowAutoScheduler(false);
-                        }}
-                        className="min-h-[42px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-                      >
-                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                        <span>
-                          {plannedDays.length > 0
-                            ? 'Przeplanuj całą parafię od nowa'
-                            : 'Rozpisz automatycznie całą parafię'}
-                        </span>
-                      </button>
-
-                      {plannedDays.length > 0 && unscheduledCount > 0 && (
-                        <button
-                          type="button"
-                          disabled={!parish}
-                          onClick={() => {
-                            onAutoScheduleSeason('unscheduled');
-                            setShowAutoScheduler(false);
-                          }}
-                          className="min-h-[42px] px-4 py-2 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors"
-                        >
-                          Dopisuj brakujące ({unscheduledCount})
-                        </button>
-                      )}
-                    </div>
-                  </div>
+                  <SeasonCalendarPlanner
+                    parish={parish}
+                    stops={stops}
+                    config={config}
+                    seasonConfig={seasonConfig}
+                    plannedDays={plannedDays}
+                    unscheduledCount={unscheduledCount}
+                    onChangeSeasonConfig={onChangeSeasonConfig}
+                    onApplySchedule={(mode) => {
+                      onAutoScheduleSeason(mode);
+                      setShowAutoScheduler(false);
+                    }}
+                    onClose={
+                      plannedDays.length > 0
+                        ? () => setShowAutoScheduler(false)
+                        : undefined
+                    }
+                  />
                 )}
+            </div>
+          )}
+
+          {/* Direct Map Preview Banner for Scheduled Days */}
+          {plannedDays.length > 0 && (
+            <div className="no-print bg-slate-900 text-white rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="text-xs space-y-0.5">
+                <div className="font-semibold text-white">
+                  Gotowy podgląd tras dzień po dniu na mapie
+                </div>
+                <div className="text-slate-300 tabular-nums">
+                  {plannedDays.length} dni kolędy ({formatPolishDateChip(plannedDays[0].date)} –{' '}
+                  {formatPolishDateChip(plannedDays[plannedDays.length - 1].date)}) · kliknij
+                  wybrany dzień poniżej lub otwórz interaktywny podgląd całej kolejności.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  onViewDayOnMap(selectedDate ?? plannedDays[0].date)
+                }
+                className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-500 rounded-xl inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <MapIcon className="w-4 h-4" />
+                <span>Otwórz podgląd tras na mapie</span>
+              </button>
             </div>
           )}
 
@@ -800,6 +690,14 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                               <div>
                                 {day.startTime} – {day.estimatedEndTime}
                               </div>
+                              {(day.activeBreaks?.length ?? 0) > 0 && (
+                                <div className="text-[10px] font-sans font-normal text-slate-500 mt-0.5">
+                                  Przerwa:{' '}
+                                  {day.activeBreaks!
+                                    .map((b) => `${b.startTime}–${b.endTime}`)
+                                    .join(', ')}
+                                </div>
+                              )}
                               {onUpdateDayTimeWindow && (
                                 <button
                                   type="button"
@@ -812,6 +710,9 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                         day.plannedEndTime ||
                                           seasonConfig?.dailyEndTime ||
                                           '20:30'
+                                      );
+                                      setEditingDayBreaks(
+                                        day.activeBreaks ? [...day.activeBreaks] : []
                                       );
                                       setEditingHoursDate(day.date);
                                     }
@@ -905,7 +806,7 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                           </tr>
                           {isEditingHours && onUpdateDayTimeWindow && (
                             <tr className="no-print bg-slate-50">
-                              <td colSpan={6} className="px-4 py-2.5">
+                              <td colSpan={6} className="px-4 py-3 space-y-2">
                                 <div className="flex flex-wrap items-center gap-2.5 text-xs">
                                   <span className="font-semibold text-slate-700">
                                     Godziny dla {day.date}:
@@ -934,11 +835,29 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                   </label>
                                   <button
                                     type="button"
+                                    onClick={() =>
+                                      setEditingDayBreaks((prev) => [
+                                        ...prev,
+                                        {
+                                          id: `dbrk_${Date.now().toString(36)}`,
+                                          startTime: '17:30',
+                                          endTime: '18:30',
+                                          label: 'Przerwa',
+                                        },
+                                      ])
+                                    }
+                                    className="min-h-[34px] px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg"
+                                  >
+                                    + Przerwa
+                                  </button>
+                                  <button
+                                    type="button"
                                     onClick={() => {
                                       onUpdateDayTimeWindow(
                                         day.date,
                                         editingHoursStart,
-                                        editingHoursEnd
+                                        editingHoursEnd,
+                                        editingDayBreaks
                                       );
                                       setEditingHoursDate(null);
                                     }}
@@ -954,6 +873,72 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                     Anuluj
                                   </button>
                                 </div>
+                                {editingDayBreaks.length > 0 && (
+                                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                                    {editingDayBreaks.map((bw, bIdx) => (
+                                      <div
+                                        key={bw.id}
+                                        className="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-lg px-2 py-1"
+                                      >
+                                        <input
+                                          type="text"
+                                          value={bw.label ?? ''}
+                                          placeholder="Przerwa"
+                                          onChange={(e) =>
+                                            setEditingDayBreaks((prev) =>
+                                              prev.map((item, i) =>
+                                                i === bIdx
+                                                  ? { ...item, label: e.target.value }
+                                                  : item
+                                              )
+                                            )
+                                          }
+                                          className="w-20 text-xs border-b border-slate-200 focus:outline-none"
+                                        />
+                                        <input
+                                          type="time"
+                                          value={bw.startTime}
+                                          onChange={(e) =>
+                                            setEditingDayBreaks((prev) =>
+                                              prev.map((item, i) =>
+                                                i === bIdx
+                                                  ? { ...item, startTime: e.target.value }
+                                                  : item
+                                              )
+                                            )
+                                          }
+                                          className="text-xs font-mono"
+                                        />
+                                        <span>–</span>
+                                        <input
+                                          type="time"
+                                          value={bw.endTime}
+                                          onChange={(e) =>
+                                            setEditingDayBreaks((prev) =>
+                                              prev.map((item, i) =>
+                                                i === bIdx
+                                                  ? { ...item, endTime: e.target.value }
+                                                  : item
+                                              )
+                                            )
+                                          }
+                                          className="text-xs font-mono"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setEditingDayBreaks((prev) =>
+                                              prev.filter((_, i) => i !== bIdx)
+                                            )
+                                          }
+                                          className="text-red-600 hover:text-red-800 px-1"
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </td>
                             </tr>
                           )}
@@ -993,11 +978,24 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                         </div>
                       </div>
 
-                      <div className="text-xs text-slate-700 leading-relaxed">
-                        <span className="text-slate-500">Ulice: </span>
-                        <span className="font-medium text-slate-900">
-                          {day.streetNames.join(', ')}
-                        </span>
+                      <div className="text-xs text-slate-700 leading-relaxed space-y-0.5">
+                        <div>
+                          <span className="text-slate-500">Ulice: </span>
+                          <span className="font-medium text-slate-900">
+                            {day.streetNames.join(', ')}
+                          </span>
+                        </div>
+                        {(day.activeBreaks?.length ?? 0) > 0 && (
+                          <div className="text-[11px] text-slate-500">
+                            Przerwy:{' '}
+                            {day.activeBreaks!
+                              .map(
+                                (b) =>
+                                  `${b.startTime}–${b.endTime}${b.label ? ` (${b.label})` : ''}`
+                              )
+                              .join(', ')}
+                          </div>
+                        )}
                       </div>
 
                       {isEditingHours && onUpdateDayTimeWindow && (
@@ -1030,25 +1028,94 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                               />
                             </div>
                           </div>
+                          {editingDayBreaks.length > 0 && (
+                            <div className="space-y-1.5">
+                              {editingDayBreaks.map((bw, bIdx) => (
+                                <div
+                                  key={bw.id}
+                                  className="flex items-center justify-between gap-1.5 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs"
+                                >
+                                  <input
+                                    type="time"
+                                    value={bw.startTime}
+                                    onChange={(e) =>
+                                      setEditingDayBreaks((prev) =>
+                                        prev.map((item, i) =>
+                                          i === bIdx
+                                            ? { ...item, startTime: e.target.value }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="font-mono text-xs"
+                                  />
+                                  <span>–</span>
+                                  <input
+                                    type="time"
+                                    value={bw.endTime}
+                                    onChange={(e) =>
+                                      setEditingDayBreaks((prev) =>
+                                        prev.map((item, i) =>
+                                          i === bIdx
+                                            ? { ...item, endTime: e.target.value }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                    className="font-mono text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingDayBreaks((prev) =>
+                                        prev.filter((_, i) => i !== bIdx)
+                                      )
+                                    }
+                                    className="text-red-600 px-1 font-bold"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingDayBreaks((prev) => [
+                                  ...prev,
+                                  {
+                                    id: `dbrk_${Date.now().toString(36)}`,
+                                    startTime: '17:30',
+                                    endTime: '18:30',
+                                    label: 'Przerwa',
+                                  },
+                                ])
+                              }
+                              className="min-h-[36px] px-2.5 py-1 text-xs font-medium bg-white border border-slate-200 rounded-lg"
+                            >
+                              + Przerwa
+                            </button>
                             <button
                               type="button"
                               onClick={() => {
                                 onUpdateDayTimeWindow(
                                   day.date,
                                   editingHoursStart,
-                                  editingHoursEnd
+                                  editingHoursEnd,
+                                  editingDayBreaks
                                 );
                                 setEditingHoursDate(null);
                               }}
                               className="flex-1 min-h-[36px] px-3 py-1 text-xs font-semibold text-white bg-amber-700 rounded-lg"
                             >
-                              Zapisz godziny
+                              Zapisz
                             </button>
                             <button
                               type="button"
                               onClick={() => setEditingHoursDate(null)}
-                              className="min-h-[36px] px-3 py-1 text-xs text-slate-600"
+                              className="min-h-[36px] px-2 py-1 text-xs text-slate-600"
                             >
                               Anuluj
                             </button>
@@ -1079,6 +1146,9 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                                   day.plannedEndTime ||
                                     seasonConfig?.dailyEndTime ||
                                     '20:30'
+                                );
+                                setEditingDayBreaks(
+                                  day.activeBreaks ? [...day.activeBreaks] : []
                                 );
                                 setEditingHoursDate(day.date);
                               }
@@ -1220,6 +1290,20 @@ export const PrintScheduleSheet: React.FC<PrintScheduleSheetProps> = ({
                   {effectiveStartTime}
                   {effectiveEndTime ? `–${effectiveEndTime}` : ''}
                 </strong>
+                {selectedDayBreaks.length > 0 && (
+                  <>
+                    {' '}
+                    · Przerwa:{' '}
+                    <strong className="text-slate-900">
+                      {selectedDayBreaks
+                        .map(
+                          (b) =>
+                            `${b.startTime}–${b.endTime}${b.label ? ` (${b.label})` : ''}`
+                        )
+                        .join(', ')}
+                    </strong>
+                  </>
+                )}
               </div>
               <div className="text-xs text-slate-500">
                 Ulice:{' '}

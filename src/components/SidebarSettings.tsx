@@ -18,6 +18,7 @@ interface SidebarSettingsProps {
   onChangeConfig: (next: PlanConfig) => void;
   onChangeSeasonConfig: (next: SeasonPlanConfig) => void;
   onOpenGuide: () => void;
+  onOpenSchedule?: () => void;
 }
 
 export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
@@ -26,6 +27,7 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
   onChangeConfig,
   onChangeSeasonConfig,
   onOpenGuide,
+  onOpenSchedule,
 }) => {
   const [settingsTab, setSettingsTab] = useState<'route' | 'season'>('route');
   const activeWeekdays = parseWeekdaysMask(seasonConfig.weekdaysMask);
@@ -235,32 +237,39 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
                   id="settings-season-start-date"
                   type="date"
                   value={seasonConfig.startDate}
-                  onChange={(e) =>
-                    onChangeSeasonConfig({
+                  onChange={(e) => {
+                    const nextStart = e.target.value;
+                    if (!nextStart) return;
+                    const next: SeasonPlanConfig = {
                       ...seasonConfig,
-                      startDate: e.target.value,
-                    })
-                  }
+                      startDate: nextStart,
+                    };
+                    if (next.endDate && next.endDate < nextStart) {
+                      delete next.endDate;
+                    }
+                    onChangeSeasonConfig(next);
+                  }}
                   className="w-full min-h-[44px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
                 />
               </div>
               <div>
                 <label
-                  htmlFor="settings-season-end-time"
+                  htmlFor="settings-season-end-date"
                   className="block text-xs font-medium text-slate-700 mb-1"
                 >
-                  Koniec dnia najpóźniej
+                  Koniec okresu (opcjonalnie)
                 </label>
                 <input
-                  id="settings-season-end-time"
-                  type="time"
-                  value={seasonConfig.dailyEndTime}
-                  onChange={(e) =>
-                    onChangeSeasonConfig({
-                      ...seasonConfig,
-                      dailyEndTime: e.target.value,
-                    })
-                  }
+                  id="settings-season-end-date"
+                  type="date"
+                  min={seasonConfig.startDate}
+                  value={seasonConfig.endDate ?? ''}
+                  onChange={(e) => {
+                    const next: SeasonPlanConfig = { ...seasonConfig };
+                    if (e.target.value) next.endDate = e.target.value;
+                    else delete next.endDate;
+                    onChangeSeasonConfig(next);
+                  }}
                   className="w-full min-h-[44px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
                 />
               </div>
@@ -286,10 +295,33 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
               </div>
               <div>
                 <label
+                  htmlFor="settings-saturday-start"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Start (Sobota)
+                </label>
+                <input
+                  id="settings-saturday-start"
+                  type="time"
+                  value={
+                    seasonConfig.saturdayStartTime ||
+                    seasonConfig.weekendStartTime
+                  }
+                  onChange={(e) =>
+                    onChangeSeasonConfig({
+                      ...seasonConfig,
+                      saturdayStartTime: e.target.value,
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                />
+              </div>
+              <div>
+                <label
                   htmlFor="settings-weekend-start"
                   className="block text-xs font-medium text-slate-700 mb-1"
                 >
-                  Start (sobota / niedziela)
+                  Start (Niedziela)
                 </label>
                 <input
                   id="settings-weekend-start"
@@ -299,6 +331,26 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
                     onChangeSeasonConfig({
                       ...seasonConfig,
                       weekendStartTime: e.target.value,
+                    })
+                  }
+                  className="w-full min-h-[44px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="settings-season-end-time"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Koniec dnia najpóźniej
+                </label>
+                <input
+                  id="settings-season-end-time"
+                  type="time"
+                  value={seasonConfig.dailyEndTime}
+                  onChange={(e) =>
+                    onChangeSeasonConfig({
+                      ...seasonConfig,
+                      dailyEndTime: e.target.value,
                     })
                   }
                   className="w-full min-h-[44px] px-3 py-2 text-base sm:text-xs font-mono tabular-nums bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-amber-600"
@@ -339,6 +391,31 @@ export const SidebarSettings: React.FC<SidebarSettingsProps> = ({
                   );
                 })}
               </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-semibold text-amber-950">
+                  Dni wolne i przerwy w ciągu dnia
+                </span>
+                <span className="text-[11px] font-mono tabular-nums text-amber-900">
+                  Wolne: {seasonConfig.excludedDates?.length ?? 0} · Przerwy:{' '}
+                  {seasonConfig.defaultBreaks?.length ?? 0}
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-900/90 leading-snug">
+                Święta, I piątki, przerwy obiadowe/mszalne oraz reguły dzielenia
+                ulic i podgląd całego sezonu ustawisz w kreatorze kalendarza.
+              </p>
+              {onOpenSchedule && (
+                <button
+                  type="button"
+                  onClick={onOpenSchedule}
+                  className="w-full min-h-[42px] px-3.5 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-xl transition-colors"
+                >
+                  Otwórz pełny kalendarz, przerwy i kreator →
+                </button>
+              )}
             </div>
           </section>
 

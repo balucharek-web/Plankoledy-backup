@@ -102,6 +102,7 @@ interface StopMarkerProps {
   routeMeta?: RouteStopMeta;
   isActiveInView: boolean;
   appearance: StopMarkerAppearance;
+  showEndBadge?: boolean;
   color: string;
   isSelected: boolean;
   isLassoSelected?: boolean;
@@ -116,6 +117,7 @@ const StopMarker: React.FC<StopMarkerProps> = ({
   routeMeta,
   isActiveInView,
   appearance,
+  showEndBadge = false,
   color,
   isSelected,
   isLassoSelected = false,
@@ -175,6 +177,29 @@ const StopMarker: React.FC<StopMarkerProps> = ({
               }}
             >
               START
+            </div>
+          )}
+          {!appearance.isStartPoint && showEndBadge && (
+            <div
+              className="pointer-events-none select-none whitespace-nowrap"
+              style={{
+                position: 'absolute',
+                bottom: '100%',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                marginBottom: 3,
+                backgroundColor: '#0F172A',
+                color: '#FFFFFF',
+                fontSize: 9,
+                fontWeight: 800,
+                letterSpacing: '0.04em',
+                padding: '1px 5px',
+                borderRadius: 4,
+                border: '1.5px solid #FFFFFF',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.28)',
+              }}
+            >
+              META
             </div>
           )}
           <div
@@ -337,12 +362,14 @@ const RoutePolylinesLayer: React.FC<{
   routeObjects: RoutePolylineEntry[];
   routes: PriestRouteResult[];
   isExactRoute: boolean;
+  selectedDate: string | null;
   focusedPriestId: number | null;
   showRouteLines: boolean;
 }> = ({
   routeObjects,
   routes,
   isExactRoute,
+  selectedDate,
   focusedPriestId,
   showRouteLines,
 }) => {
@@ -362,10 +389,10 @@ const RoutePolylinesLayer: React.FC<{
     const bounds = new google.maps.LatLngBounds();
     let hasBounds = false;
 
-    const routeSignature = `${isExactRoute ? 'exact' : 'est'}:${routes
+    const routeSignature = `${selectedDate ?? 'all'}:${isExactRoute ? 'exact' : 'est'}:${routes
       .map(
         (r) =>
-          `${r.priestId}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
+          `${r.priestId}:${r.orderedStops[0]?.stop.id ?? ''}:${r.orderedStops[r.orderedStops.length - 1]?.stop.id ?? ''}:${r.orderedStops.length}:${Math.round(r.totalDistanceMeters)}`
       )
       .join(',')}:${focusedPriestId ?? 'all'}`;
 
@@ -375,23 +402,34 @@ const RoutePolylinesLayer: React.FC<{
           focusedPriestId === null || focusedPriestId === entry.priestId;
         const nativePolylines = entry.routeObj.createPolylines();
         nativePolylines.forEach((pl) => {
+          const halo = new google.maps.Polyline({
+            path: pl.getPath(),
+            strokeColor: '#FFFFFF',
+            strokeWeight: isFocused ? 7 : 3.5,
+            strokeOpacity: isFocused ? 0.85 : 0.2,
+            clickable: false,
+            zIndex: isFocused ? 50 + entry.priestId : 15 + entry.priestId,
+            map,
+          });
+          created.push(halo);
+
           // Strip Google's chunky dotted walking bead icons and render clean, slim navigation lines
           pl.setOptions({
             strokeColor: entry.color,
-            strokeWeight: isFocused ? 3.5 : 2,
-            strokeOpacity: isFocused ? 0.78 : 0.2,
+            strokeWeight: isFocused ? 4 : 2,
+            strokeOpacity: isFocused ? 0.92 : 0.22,
             icons: isFocused
               ? [
                   {
                     icon: {
                       path: google.maps.SymbolPath.FORWARD_OPEN_ARROW,
-                      scale: 2,
+                      scale: 2.2,
                       strokeColor: entry.color,
-                      strokeOpacity: 0.9,
-                      strokeWeight: 1.8,
+                      strokeOpacity: 0.95,
+                      strokeWeight: 2,
                     },
-                    offset: '90px',
-                    repeat: '160px',
+                    offset: '80px',
+                    repeat: '150px',
                   },
                 ]
               : [],
@@ -411,31 +449,67 @@ const RoutePolylinesLayer: React.FC<{
       }
     } else if (routes.length > 0) {
       for (const route of routes) {
-        if (route.encodedPathPoints.length < 2) continue;
-        const isFocused =
-          focusedPriestId === null || focusedPriestId === route.priestId;
-        const pl = new google.maps.Polyline({
-          path: route.encodedPathPoints,
-          strokeColor: route.color,
-          strokeOpacity: 0,
-          icons: [
-            {
-              icon: {
-                path: 'M 0,-1 0,1',
-                strokeOpacity: isFocused ? 0.72 : 0.18,
-                scale: isFocused ? 2.6 : 1.8,
+        if (route.encodedPathPoints.length >= 2) {
+          const isFocused =
+            focusedPriestId === null || focusedPriestId === route.priestId;
+          const halo = new google.maps.Polyline({
+            path: route.encodedPathPoints,
+            strokeColor: '#FFFFFF',
+            strokeWeight: isFocused ? 6 : 3,
+            strokeOpacity: isFocused ? 0.85 : 0.2,
+            clickable: false,
+            zIndex: isFocused ? 45 + route.priestId : 15 + route.priestId,
+            map,
+          });
+          created.push(halo);
+
+          const pl = new google.maps.Polyline({
+            path: route.encodedPathPoints,
+            strokeColor: route.color,
+            strokeOpacity: 0,
+            icons: [
+              {
+                icon: {
+                  path: 'M 0,-2 0,2',
+                  strokeOpacity: isFocused ? 0.92 : 0.24,
+                  strokeWeight: isFocused ? 3.2 : 2,
+                  scale: 1,
+                },
+                offset: '0',
+                repeat: '12px',
               },
-              offset: '0',
-              repeat: '11px',
-            },
-          ],
-          zIndex: isFocused ? 65 + route.priestId : 25 + route.priestId,
-          map,
-        });
-        created.push(pl);
-        if (isFocused) {
-          route.encodedPathPoints.forEach((pt) => {
-            bounds.extend(pt);
+              ...(isFocused
+                ? [
+                    {
+                      icon: {
+                        path: google.maps.SymbolPath.FORWARD_OPEN_ARROW,
+                        scale: 2.1,
+                        strokeColor: route.color,
+                        strokeOpacity: 0.95,
+                        strokeWeight: 2,
+                      },
+                      offset: '65px',
+                      repeat: '150px',
+                    },
+                  ]
+                : []),
+            ],
+            zIndex: isFocused ? 65 + route.priestId : 25 + route.priestId,
+            map,
+          });
+          created.push(pl);
+          if (isFocused) {
+            route.encodedPathPoints.forEach((pt) => {
+              bounds.extend(pt);
+              hasBounds = true;
+            });
+          }
+        } else if (
+          route.orderedStops.length > 0 &&
+          (focusedPriestId === null || focusedPriestId === route.priestId)
+        ) {
+          route.orderedStops.forEach((item) => {
+            bounds.extend(item.stop.location);
             hasBounds = true;
           });
         }
@@ -446,14 +520,22 @@ const RoutePolylinesLayer: React.FC<{
 
     if (hasBounds && lastFittedKeyRef.current !== routeSignature) {
       lastFittedKeyRef.current = routeSignature;
-      map.fitBounds(bounds, { top: 64, right: 48, bottom: 90, left: 48 });
+      map.fitBounds(bounds, { top: 64, right: 56, bottom: 140, left: 32 });
     }
 
     return () => {
       polylinesRef.current.forEach((p) => p.setMap(null));
       polylinesRef.current = [];
     };
-  }, [map, routeObjects, routes, isExactRoute, focusedPriestId, showRouteLines]);
+  }, [
+    map,
+    routeObjects,
+    routes,
+    isExactRoute,
+    selectedDate,
+    focusedPriestId,
+    showRouteLines,
+  ]);
 
   return null;
 };
@@ -1257,6 +1339,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           routeObjects={routeObjects}
           routes={routes}
           isExactRoute={isExactRoute}
+          selectedDate={selectedDate}
           focusedPriestId={focusedPriestId}
           showRouteLines={showRouteLines}
         />
@@ -1316,6 +1399,10 @@ export const ParishMap: React.FC<ParishMapProps> = ({
               routeMeta={routeMeta}
               isActiveInView={isActiveInView}
               appearance={appearance}
+              showEndBadge={
+                Boolean(appearance.isEndPoint) &&
+                (focusedPriestId !== null || routes.length === 1)
+              }
               color={palette.color}
               isSelected={isSelected && !suppressStopPopup}
               isLassoSelected={isLassoSelected}
