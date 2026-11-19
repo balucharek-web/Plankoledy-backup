@@ -77,7 +77,7 @@ interface SidebarSetupProps {
   streetPickFeedback: StreetPickFeedback | null;
   isSignedIn: boolean;
   userEmail: string | null;
-  requestedTab?: { tab: SetupTab; seq: number } | null;
+  requestedTab?: { tab: SetupTab; seq: number; streetName?: string } | null;
   csvImportOpen?: boolean;
   onOpenCsvImport?: () => void;
   onCloseCsvImport?: () => void;
@@ -211,6 +211,18 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
   useEffect(() => {
     if (requestedTab && requestedTab.seq > 0 && parish) {
       setSetupTab(requestedTab.tab);
+      if (requestedTab.streetName) {
+        setStreetsTypeFilter('all');
+        setStreetFilter('');
+        setExpandedStreet(requestedTab.streetName);
+        const targetName = requestedTab.streetName;
+        window.setTimeout(() => {
+          const el = document.querySelector<HTMLElement>(
+            `[data-street-row="${CSS.escape(targetName)}"]`
+          );
+          el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 80);
+      }
     }
   }, [requestedTab, parish]);
 
@@ -1232,7 +1244,11 @@ export const SidebarSetup: React.FC<SidebarSetupProps> = ({
                         : `nr ${streetBounds.all.minLabel}–${streetBounds.all.maxLabel}`
                       : '';
                   return (
-                    <li key={streetName} className="bg-white">
+                    <li
+                      key={streetName}
+                      data-street-row={streetName}
+                      className="bg-white"
+                    >
                       <div className="px-3 py-2.5 flex items-center justify-between gap-2 hover:bg-slate-50/70">
                         <button
                           type="button"

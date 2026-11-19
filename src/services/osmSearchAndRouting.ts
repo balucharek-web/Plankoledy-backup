@@ -951,3 +951,90 @@ export async function computeOsmParishRoutes(
 
   return results;
 }
+
+const streetRoadGeometryCache = new Map<string, LatLng[] | null>();
+
+/**
+ * Snaps a street's smoothed centerline onto actual road geometry via OSRM
+ * so clicking a street highlights it cleanly along the road like Google Maps.
+ */
+export async function fetchStreetRoadGeometry(
+  centerlinePoints: LatLng[]
+): Promise<LatLng[] | null> {
+  if (centerlinePoints.length < 2) return null;
+
+  const first = centerlinePoints[0];
+  const last = centerlinePoints[centerlinePoints.length - 1];
+  const cacheKey = `${centerlinePoints.length}:${first.lat.toFixed(5)},${first.lng.toFixed(5)}:${last.lat.toFixed(5)},${last.lng.toFixed(5)}`;
+  if (streetRoadGeometryCache.has(cacheKey)) {
+    return streetRoadGeometryCache.get(cacheKey) ?? null;
+  }
+
+  // Pick up to 7 evenly spaced anchor waypoints along the centerline
+  const maxAnchors = 7;
+  const anchors: LatLng[] = [];
+  if (centerlinePoints.length <= maxAnchors) {
+    anchors.push(...centerlinePoints);
+  } else {
+    for (let i = 0; i < maxAnchors; i++) {
+      const idx = Math.round(
+        (i * (centerlinePoints.length - 1)) / (maxAnchors - 1)
+      );
+      anchors.push(centerlinePoints[idx]);
+    }
+  }
+
+  let directLenMeters = 0;
+  for (let i = 0; i < anchors.length - 1; i++) {
+    directLenMeters += haversineMeters(anchors[i], anchors[i + 1]);
+  }
+  if (directLenMeters < 20) {
+    streetRoadGeometryCache.set(cacheKey, null);
+    return null;
+  }
+
+  const coordStr = anchors
+    .map((p) => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`)
+    .join(';');
+  const urls = [
+    `https://routing.openstreetmap.de/routed-foot/route/v1/foot/${coordStr}?overview=full&geometries=geojson&steps=false`,
+    `https://router.project-osrm.org/route/v1/foot/${coordStr}?overview=full&geometries=geojson&steps=false`,
+  ];
+
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 4500);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) continue;
+      const data = (await res.json()) as OsrmRouteResponse;
+      const route = data.routes?.[0];
+      if (!route || data.code !== 'Ok' || !route.geometry?.coordinates?.length) {
+        continue;
+      }
+
+      // Guard against crazy detours (e.g. disconnected private road)
+      const routeDist = route.distance ?? 0;
+      if (routeDist > directLenMeters * 2.25 + 220) {
+        continue;
+      }
+
+      const path: LatLng[] = route.geometry.coordinates.map(([lng, lat]) => ({
+        lat,
+        lng,
+      }));
+      if (path.length >= 2) {
+        streetRoadGeometryCache.set(cacheKey, path);
+        return path;
+      }
+    } catch {
+      // Try next mirror
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  streetRoadGeometryCache.set(cacheKey, null);
+  return null;
+}
+

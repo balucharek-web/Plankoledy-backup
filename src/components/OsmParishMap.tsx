@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Church,
   Crosshair,
+  Home,
   Loader2,
   LocateFixed,
   MapPinPlus,
@@ -42,6 +43,7 @@ import {
   computeStopMarkerAppearance,
   expandBoundaryPolygonMeters,
   extractStreetName,
+  findNearestStreetAtPoint,
   formatPolygonArea,
   isPointInsideBoundary,
   simplifyPolygonRDP,
@@ -58,7 +60,12 @@ interface OsmParishMapProps {
   canEditBoundary?: boolean;
   markerLabelMode?: MarkerLabelMode;
   showRouteLines?: boolean;
+  showHousesOnMap?: boolean;
+  onToggleShowHouses?: () => void;
   focusedStreet?: string | null;
+  inspectedStreet?: string | null;
+  inspectedStreetRoadPath?: LatLng[] | null;
+  activeDayStreetNames?: string[];
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
   lassoSelectedIds?: string[];
@@ -75,7 +82,7 @@ interface OsmParishMapProps {
   onDeleteStop: (stopId: string) => void;
   onOpenBlockUnits?: (stopId: string) => void;
   onLassoSelectStops?: (stopIds: string[]) => void;
-  onSelectStreetOverlay?: (streetName: string) => void;
+  onSelectStreetOverlay?: (streetName: string | null) => void;
   recenterSignal?: number;
   suppressStopPopup?: boolean;
 }
@@ -101,7 +108,12 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   canEditBoundary = true,
   markerLabelMode = 'auto',
   showRouteLines = true,
+  showHousesOnMap = false,
+  onToggleShowHouses,
   focusedStreet = null,
+  inspectedStreet = null,
+  inspectedStreetRoadPath = null,
+  activeDayStreetNames = [],
   interactionMode,
   highlightedStopId,
   lassoSelectedIds = [],
@@ -134,6 +146,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
   const gpsLayerRef = useRef<L.LayerGroup | null>(null);
   const markersByStopIdRef = useRef<Record<string, L.Marker>>({});
   const lastParishKeyRef = useRef<string>('');
+  const lastBoundaryFitKeyRef = useRef<string>('');
   const lastFittedKeyRef = useRef<string>('');
   const hasCenteredGpsRef = useRef<boolean>(false);
 
@@ -218,6 +231,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     };
   }
   const streetOverlayPaths = streetOverlayCacheRef.current.paths;
+  const streetOverlayPathsRef = useRef(streetOverlayPaths);
+  streetOverlayPathsRef.current = streetOverlayPaths;
+  const inspectedStreetRef = useRef(inspectedStreet);
+  inspectedStreetRef.current = inspectedStreet;
 
   const routeMetaByStopId = useMemo(
     () => buildRouteStopLookup(routes),
@@ -289,8 +306,21 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         setDraftPoints(next);
       } else if (mode === 'edit_boundary') {
         setSelectedVertexIdx(null);
-      } else if (highlightedStopIdRef.current) {
-        onSelectStopRef.current(null);
+      } else if (mode === 'pan') {
+        if (highlightedStopIdRef.current) {
+          onSelectStopRef.current(null);
+        }
+        const hitStreet = findNearestStreetAtPoint(
+          coords,
+          streetOverlayPathsRef.current,
+          stopsRef.current,
+          65
+        );
+        if (hitStreet) {
+          onSelectStreetOverlayRef.current?.(hitStreet);
+        } else if (inspectedStreetRef.current) {
+          onSelectStreetOverlayRef.current?.(null);
+        }
       }
     });
 
@@ -892,45 +922,164 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [interactionMode, selectedVertexIdx]);
 
-  // Painted, clickable street highlights ("pomalowane ulice") when not displaying full route polylines
+  // Clean interactive street layer: invisible wide click targets for every street,
+  // subtle highlight for the selected day's streets, and vivid Google-Maps-style
+  // blue route highlight when the user clicks a street.
   useEffect(() => {
     const layer = streetOverlaysLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
 
     if (
-      routes.length > 0 ||
       interactionMode === 'draw_boundary' ||
       interactionMode === 'edit_boundary' ||
+      interactionMode === 'lasso_select' ||
       streetOverlayPaths.length === 0
     ) {
       return;
     }
 
-    streetOverlayPaths.forEach((overlay) => {
-      const isFocused = focusedStreet === overlay.streetName;
-      const opacity = focusedStreet
-        ? isFocused
-          ? 0.65
-          : 0.14
-        : 0.34;
-      const poly = L.polyline(
-        overlay.points.map((p) => [p.lat, p.lng] as [number, number]),
-        {
-          color: overlay.color,
-          weight: isFocused ? 8 : 5,
-          opacity,
+    const activeDaySet = new Set(activeDayStreetNames);
+    const blueHighlightedStreet = inspectedStreet || focusedStreet;
+
+    // 1. Wide invisible interactive hit-targets for every saved street in pan mode
+    if (interactionMode === 'pan') {
+      streetOverlayPaths.forEach((overlay) => {
+        const hitPoly = L.polyline(
+          overlay.points.map((p) => [p.lat, p.lng] as [number, number]),
+          {
+            color: '#4285F4',
+            weight: 20,
+            opacity: 0.001,
+            lineCap: 'round',
+            lineJoin: 'round',
+            interactive: true,
+          }
+        ).addTo(layer);
+
+        hitPoly.on('click', (ev: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(ev);
+          onSelectStreetOverlayRef.current?.(overlay.streetName);
+        });
+      });
+    }
+
+    // 2. Highlight scheduled day's streets softly when route lines aren't already drawn
+    if (activeDaySet.size > 0 && (!showRouteLines || routes.length === 0)) {
+      streetOverlayPaths.forEach((overlay) => {
+        if (!activeDaySet.has(overlay.streetName)) return;
+        if (overlay.streetName === blueHighlightedStreet) return;
+        const pts = overlay.points.map(
+          (p) => [p.lat, p.lng] as [number, number]
+        );
+        L.polyline(pts, {
+          color: '#B45309',
+          weight: 9,
+          opacity: 0.45,
           lineCap: 'round',
           lineJoin: 'round',
-        }
-      ).addTo(layer);
-
-      poly.on('click', (ev: L.LeafletMouseEvent) => {
-        L.DomEvent.stopPropagation(ev);
-        onSelectStreetOverlayRef.current?.(overlay.streetName);
+          interactive: false,
+        }).addTo(layer);
+        L.polyline(pts, {
+          color: '#F59E0B',
+          weight: 5,
+          opacity: 0.78,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
       });
-    });
-  }, [streetOverlayPaths, focusedStreet, routes.length, interactionMode]);
+    }
+
+    // 3. Google-Maps-style blue highlight for the clicked/selected street
+    if (blueHighlightedStreet) {
+      const overlay = streetOverlayPaths.find(
+        (p) => p.streetName === blueHighlightedStreet
+      );
+      const rawHighlightPoints =
+        inspectedStreet === blueHighlightedStreet &&
+        inspectedStreetRoadPath &&
+        inspectedStreetRoadPath.length >= 2
+          ? inspectedStreetRoadPath
+          : overlay?.points ?? [];
+
+      if (rawHighlightPoints.length >= 2) {
+        const latLngs = rawHighlightPoints.map(
+          (p) => [p.lat, p.lng] as [number, number]
+        );
+        // Subtle outer glow
+        L.polyline(latLngs, {
+          color: '#93C5FD',
+          weight: 16,
+          opacity: 0.35,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
+        // Google Maps dark-blue route casing
+        L.polyline(latLngs, {
+          color: '#1967D2',
+          weight: 11,
+          opacity: 0.96,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
+        // Google Maps vivid-blue inner route fill
+        L.polyline(latLngs, {
+          color: '#4285F4',
+          weight: 6.5,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(layer);
+
+        // Start & end route cap dots (Google Maps style)
+        const startPt = latLngs[0];
+        const endPt = latLngs[latLngs.length - 1];
+        [startPt, endPt].forEach((pt) => {
+          L.circleMarker(pt, {
+            radius: 5.5,
+            color: '#1967D2',
+            weight: 3,
+            fillColor: '#FFFFFF',
+            fillOpacity: 1,
+            interactive: false,
+          }).addTo(layer);
+        });
+      }
+    }
+  }, [
+    streetOverlayPaths,
+    focusedStreet,
+    inspectedStreet,
+    inspectedStreetRoadPath,
+    activeDayStreetNames,
+    showRouteLines,
+    routes.length,
+    interactionMode,
+  ]);
+
+  // Smoothly pan to an inspected street only if it is currently outside the viewport (e.g. triggered from sidebar)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !inspectedStreet) return;
+    const overlay = streetOverlayPathsRef.current.find(
+      (p) => p.streetName === inspectedStreet
+    );
+    if (!overlay || overlay.points.length === 0) return;
+    const streetBounds = L.latLngBounds(
+      overlay.points.map((p) => [p.lat, p.lng] as [number, number])
+    );
+    if (streetBounds.isValid() && !map.getBounds().intersects(streetBounds)) {
+      map.fitBounds(streetBounds, {
+        paddingTopLeft: [48, 56],
+        paddingBottomRight: [48, 220],
+        maxZoom: 17,
+      });
+    }
+  }, [inspectedStreet]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -981,9 +1130,25 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       weight: isActivelyEditing ? 2.8 : canEditBoundary ? 2.2 : 1.5,
       opacity: isActivelyEditing ? 0.95 : canEditBoundary ? 0.85 : 0.42,
       fillColor: '#F59E0B',
-      fillOpacity: isActivelyEditing ? 0.16 : canEditBoundary ? 0.1 : 0.03,
+      fillOpacity: isActivelyEditing ? 0.16 : canEditBoundary ? 0.08 : 0.03,
       interactive: false,
     }).addTo(layer);
+
+    // Frame the full parish boundary neatly on initial load when no route is active
+    const map = mapRef.current;
+    const boundarySig = `${boundary.length}:${boundary[0].lat.toFixed(4)},${boundary[0].lng.toFixed(4)}`;
+    if (
+      map &&
+      !isActivelyEditing &&
+      routes.length === 0 &&
+      lastBoundaryFitKeyRef.current !== boundarySig
+    ) {
+      lastBoundaryFitKeyRef.current = boundarySig;
+      const b = L.latLngBounds(latLngs);
+      if (b.isValid()) {
+        map.fitBounds(b, { padding: [38, 64], maxZoom: 16 });
+      }
+    }
 
     if (!isActivelyEditing) return;
 
@@ -1186,22 +1351,42 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     markersByStopIdRef.current = {};
     const isBoundaryEditing =
       interactionMode === 'draw_boundary' || interactionMode === 'edit_boundary';
+    const renderAllHouses =
+      Boolean(showHousesOnMap) ||
+      interactionMode === 'lasso_select' ||
+      interactionMode === 'add_stop' ||
+      Boolean(suppressStopPopup);
 
     stops.forEach((stop) => {
+      const routeMeta = routeMetaByStopId[stop.id];
+      const isSelected = highlightedStopId === stop.id;
+
+      // When houses are hidden, keep the map clean: show only an explicitly located stop
+      // or START / META pins of an active day route.
+      if (!renderAllHouses) {
+        const isRouteEndpoint =
+          routes.length > 0 &&
+          showRouteLines &&
+          Boolean(routeMeta?.isFirstInRoute || routeMeta?.isLastInRoute) &&
+          (focusedPriestId === null || stop.priestId === focusedPriestId);
+        if (!isSelected && !isRouteEndpoint) {
+          return;
+        }
+      }
+
       const palette =
         PRIEST_PALETTE.find((p) => p.id === stop.priestId) ?? PRIEST_PALETTE[0];
-      const routeMeta = routeMetaByStopId[stop.id];
       const orderNum = routeMeta?.orderNumber;
-      const isSelected = highlightedStopId === stop.id;
       const isLassoSelected = lassoSelectedSet.has(stop.id);
       const isActiveInView = selectedDate
         ? (stop.visitDate ?? '').trim() === selectedDate
         : stop.included !== false;
       const isDimmedByPriest =
         focusedPriestId !== null && stop.priestId !== focusedPriestId;
+      const activeStreetFilter = focusedStreet || inspectedStreet;
       const isDimmedByStreet =
-        Boolean(focusedStreet) &&
-        extractStreetName(stop) !== focusedStreet;
+        Boolean(activeStreetFilter) &&
+        extractStreetName(stop) !== activeStreetFilter;
       const isBlock = Boolean(
         stop.isMultiUnit || (stop.units && stop.units.length > 0)
       );
@@ -1214,7 +1399,7 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         isActiveInView,
         isDimmedByPriest,
         isDimmedByStreet,
-        hasFocusedStreet: Boolean(focusedStreet),
+        hasFocusedStreet: Boolean(activeStreetFilter),
         isSelected: isSelected || isLassoSelected,
         isBlock,
         isBoundaryEditing,
@@ -1368,7 +1553,10 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
       popupEl.appendChild(actionsRow);
 
       marker.bindPopup(popupEl);
-      marker.on('click', () => onSelectStopRef.current(stop.id));
+      marker.on('click', (ev: L.LeafletMouseEvent) => {
+        L.DomEvent.stopPropagation(ev);
+        onSelectStopRef.current(stop.id);
+      });
 
       markersByStopIdRef.current[stop.id] = marker;
     });
@@ -1380,11 +1568,15 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
     selectedDate,
     focusedPriestId,
     focusedStreet,
+    inspectedStreet,
     markerLabelMode,
     mapZoom,
     activeVisibleCount,
     interactionMode,
     lassoSelectedSet,
+    showHousesOnMap,
+    showRouteLines,
+    suppressStopPopup,
   ]);
 
   useEffect(() => {
@@ -1610,15 +1802,37 @@ export const OsmParishMap: React.FC<OsmParishMapProps> = ({
         </div>
 
         {parish && (
-          <button
-            type="button"
-            onClick={() => recenterToParishOrRouteRef.current()}
-            title="Wycentruj mapę na parafii lub trasie"
-            className="min-h-[34px] px-2.5 py-1 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5 transition-colors"
-          >
-            <Church className="w-3.5 h-3.5 text-amber-700" />
-            <span className="hidden sm:inline">Wycentruj</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {stops.length > 0 && onToggleShowHouses && (
+              <button
+                type="button"
+                onClick={onToggleShowHouses}
+                aria-pressed={showHousesOnMap}
+                title={
+                  showHousesOnMap
+                    ? 'Ukryj punkty domów na mapie'
+                    : 'Pokaż punkty domów na mapie'
+                }
+                className={`min-h-[36px] px-3 py-1.5 rounded-xl shadow-md border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                  showHousesOnMap
+                    ? 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800'
+                    : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800 hover:bg-slate-50'
+                }`}
+              >
+                <Home className="w-3.5 h-3.5 shrink-0" />
+                <span>{showHousesOnMap ? 'Domy: wł.' : 'Domy'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => recenterToParishOrRouteRef.current()}
+              title="Wycentruj mapę na parafii lub trasie"
+              className="min-h-[36px] px-2.5 py-1.5 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5 transition-colors"
+            >
+              <Church className="w-3.5 h-3.5 text-amber-700" />
+              <span className="hidden sm:inline">Wycentruj</span>
+            </button>
+          </div>
         )}
 
         {gps.error && (

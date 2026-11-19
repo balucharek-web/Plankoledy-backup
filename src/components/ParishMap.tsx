@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   Church,
   Crosshair,
+  Home,
   Loader2,
   LocateFixed,
   MapPinPlus,
@@ -52,6 +53,7 @@ import {
   computeStopMarkerAppearance,
   expandBoundaryPolygonMeters,
   extractStreetName,
+  findNearestStreetAtPoint,
   formatPolygonArea,
 } from '../utils/spatial';
 
@@ -73,7 +75,12 @@ interface ParishMapProps {
   canEditBoundary?: boolean;
   markerLabelMode?: MarkerLabelMode;
   showRouteLines?: boolean;
+  showHousesOnMap?: boolean;
+  onToggleShowHouses?: () => void;
   focusedStreet?: string | null;
+  inspectedStreet?: string | null;
+  inspectedStreetRoadPath?: LatLng[] | null;
+  activeDayStreetNames?: string[];
   interactionMode: MapInteractionMode;
   highlightedStopId: string | null;
   lassoSelectedIds?: string[];
@@ -90,7 +97,7 @@ interface ParishMapProps {
   onDeleteStop: (stopId: string) => void;
   onOpenBlockUnits?: (stopId: string) => void;
   onLassoSelectStops?: (stopIds: string[]) => void;
-  onSelectStreetOverlay?: (streetName: string) => void;
+  onSelectStreetOverlay?: (streetName: string | null) => void;
   recenterSignal?: number;
   suppressStopPopup?: boolean;
 }
@@ -543,18 +550,27 @@ const RoutePolylinesLayer: React.FC<{
 const StreetOverlaysLayer: React.FC<{
   stops: VisitStop[];
   routesCount: number;
+  showRouteLines: boolean;
   interactionMode: MapInteractionMode;
   focusedStreet: string | null;
-  onSelectStreetOverlay?: (streetName: string) => void;
+  inspectedStreet: string | null;
+  inspectedStreetRoadPath: LatLng[] | null;
+  activeDayStreetNames: string[];
+  onSelectStreetOverlay?: (streetName: string | null) => void;
 }> = ({
   stops,
   routesCount,
+  showRouteLines,
   interactionMode,
   focusedStreet,
+  inspectedStreet,
+  inspectedStreetRoadPath,
+  activeDayStreetNames,
   onSelectStreetOverlay,
 }) => {
   const map = useMap();
   const polylinesRef = useRef<google.maps.Polyline[]>([]);
+  const capsRef = useRef<google.maps.Circle[]>([]);
   const onSelectRef = useRef(onSelectStreetOverlay);
   onSelectRef.current = onSelectStreetOverlay;
 
@@ -585,41 +601,152 @@ const StreetOverlaysLayer: React.FC<{
 
     polylinesRef.current.forEach((p) => p.setMap(null));
     polylinesRef.current = [];
+    capsRef.current.forEach((c) => c.setMap(null));
+    capsRef.current = [];
 
     if (
-      routesCount > 0 ||
       interactionMode === 'draw_boundary' ||
       interactionMode === 'edit_boundary' ||
+      interactionMode === 'lasso_select' ||
       paths.length === 0
     ) {
       return;
     }
 
     const created: google.maps.Polyline[] = [];
-    paths.forEach((overlay) => {
-      const isFocused = focusedStreet === overlay.streetName;
-      const pl = new google.maps.Polyline({
-        path: overlay.points,
-        strokeColor: overlay.color,
-        strokeWeight: isFocused ? 8 : 5,
-        strokeOpacity: focusedStreet ? (isFocused ? 0.65 : 0.14) : 0.34,
-        clickable: true,
-        zIndex: isFocused ? 40 : 20,
-        map,
+    const createdCaps: google.maps.Circle[] = [];
+    const activeDaySet = new Set(activeDayStreetNames);
+    const blueHighlightedStreet = inspectedStreet || focusedStreet;
+
+    // 1. Wide invisible interactive hit targets for every saved street in pan mode
+    if (interactionMode === 'pan') {
+      paths.forEach((overlay) => {
+        const hitPl = new google.maps.Polyline({
+          path: overlay.points,
+          strokeColor: '#4285F4',
+          strokeWeight: 20,
+          strokeOpacity: 0.001,
+          clickable: true,
+          zIndex: 25,
+          map,
+        });
+        hitPl.addListener('click', () => {
+          onSelectRef.current?.(overlay.streetName);
+        });
+        created.push(hitPl);
       });
-      pl.addListener('click', () => {
-        onSelectRef.current?.(overlay.streetName);
+    }
+
+    // 2. Highlight scheduled day's streets softly when route lines aren't already drawn
+    if (activeDaySet.size > 0 && (!showRouteLines || routesCount === 0)) {
+      paths.forEach((overlay) => {
+        if (!activeDaySet.has(overlay.streetName)) return;
+        if (overlay.streetName === blueHighlightedStreet) return;
+        created.push(
+          new google.maps.Polyline({
+            path: overlay.points,
+            strokeColor: '#B45309',
+            strokeWeight: 9,
+            strokeOpacity: 0.45,
+            clickable: false,
+            zIndex: 35,
+            map,
+          }),
+          new google.maps.Polyline({
+            path: overlay.points,
+            strokeColor: '#F59E0B',
+            strokeWeight: 5,
+            strokeOpacity: 0.78,
+            clickable: false,
+            zIndex: 36,
+            map,
+          })
+        );
       });
-      created.push(pl);
-    });
+    }
+
+    // 3. Google-Maps-style blue route highlight for the clicked street
+    if (blueHighlightedStreet) {
+      const overlay = paths.find(
+        (p) => p.streetName === blueHighlightedStreet
+      );
+      const rawPoints =
+        inspectedStreet === blueHighlightedStreet &&
+        inspectedStreetRoadPath &&
+        inspectedStreetRoadPath.length >= 2
+          ? inspectedStreetRoadPath
+          : overlay?.points ?? [];
+
+      if (rawPoints.length >= 2) {
+        created.push(
+          new google.maps.Polyline({
+            path: rawPoints,
+            strokeColor: '#93C5FD',
+            strokeWeight: 16,
+            strokeOpacity: 0.35,
+            clickable: false,
+            zIndex: 78,
+            map,
+          }),
+          new google.maps.Polyline({
+            path: rawPoints,
+            strokeColor: '#1967D2',
+            strokeWeight: 11,
+            strokeOpacity: 0.96,
+            clickable: false,
+            zIndex: 79,
+            map,
+          }),
+          new google.maps.Polyline({
+            path: rawPoints,
+            strokeColor: '#4285F4',
+            strokeWeight: 6.5,
+            strokeOpacity: 1,
+            clickable: false,
+            zIndex: 80,
+            map,
+          })
+        );
+
+        [rawPoints[0], rawPoints[rawPoints.length - 1]].forEach((pt) => {
+          createdCaps.push(
+            new google.maps.Circle({
+              center: pt,
+              radius: 5,
+              strokeColor: '#1967D2',
+              strokeWeight: 3,
+              strokeOpacity: 1,
+              fillColor: '#FFFFFF',
+              fillOpacity: 1,
+              clickable: false,
+              zIndex: 82,
+              map,
+            })
+          );
+        });
+      }
+    }
 
     polylinesRef.current = created;
+    capsRef.current = createdCaps;
 
     return () => {
       polylinesRef.current.forEach((p) => p.setMap(null));
       polylinesRef.current = [];
+      capsRef.current.forEach((c) => c.setMap(null));
+      capsRef.current = [];
     };
-  }, [map, paths, routesCount, interactionMode, focusedStreet]);
+  }, [
+    map,
+    paths,
+    routesCount,
+    showRouteLines,
+    interactionMode,
+    focusedStreet,
+    inspectedStreet,
+    inspectedStreetRoadPath,
+    activeDayStreetNames,
+  ]);
 
   return null;
 };
@@ -1026,6 +1153,8 @@ const UserGpsMarkerLayer: React.FC<{
   focusedPriestId: number | null;
   recenterSignal: number;
   highlightedStopId: string | null;
+  showHousesOnMap: boolean;
+  onToggleShowHouses?: () => void;
 }> = ({
   parish,
   boundary,
@@ -1035,11 +1164,14 @@ const UserGpsMarkerLayer: React.FC<{
   focusedPriestId,
   recenterSignal,
   highlightedStopId,
+  showHousesOnMap,
+  onToggleShowHouses,
 }) => {
   const map = useMap();
   const gps = useUserGpsLocation();
   const circleRef = useRef<google.maps.Circle | null>(null);
   const hasCenteredRef = useRef<boolean>(false);
+  const lastBoundaryFitKeyRef = useRef<string>('');
 
   const recenterRef = useRef<() => void>(() => {});
   recenterRef.current = () => {
@@ -1080,6 +1212,17 @@ const UserGpsMarkerLayer: React.FC<{
       recenterRef.current();
     }
   }, [recenterSignal]);
+
+  // Fit parish boundary neatly on initial load when no route is active
+  useEffect(() => {
+    if (!map || boundary.length < 3 || routes.length > 0) return;
+    const sig = `${boundary.length}:${boundary[0].lat.toFixed(4)},${boundary[0].lng.toFixed(4)}`;
+    if (lastBoundaryFitKeyRef.current === sig) return;
+    lastBoundaryFitKeyRef.current = sig;
+    const b = new google.maps.LatLngBounds();
+    boundary.forEach((pt) => b.extend(pt));
+    map.fitBounds(b, { top: 48, right: 48, bottom: 72, left: 48 });
+  }, [map, boundary, routes.length]);
 
   const stopsLookupRef = useRef(stops);
   stopsLookupRef.current = stops;
@@ -1188,15 +1331,37 @@ const UserGpsMarkerLayer: React.FC<{
             </button>
           </div>
           {parish && (
-            <button
-              type="button"
-              onClick={() => recenterRef.current()}
-              title="Wycentruj mapę na parafii lub trasie"
-              className="min-h-[34px] px-2.5 py-1 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-            >
-              <Church className="w-3.5 h-3.5 text-amber-700" />
-              <span className="hidden sm:inline">Wycentruj</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              {stops.length > 0 && onToggleShowHouses && (
+                <button
+                  type="button"
+                  onClick={onToggleShowHouses}
+                  aria-pressed={showHousesOnMap}
+                  title={
+                    showHousesOnMap
+                      ? 'Ukryj punkty domów na mapie'
+                      : 'Pokaż punkty domów na mapie'
+                  }
+                  className={`min-h-[36px] px-3 py-1.5 rounded-xl shadow-md border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                    showHousesOnMap
+                      ? 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800'
+                      : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800 hover:bg-slate-50'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5 shrink-0" />
+                  <span>{showHousesOnMap ? 'Domy: wł.' : 'Domy'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => recenterRef.current()}
+                title="Wycentruj mapę na parafii lub trasie"
+                className="min-h-[36px] px-2.5 py-1.5 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+              >
+                <Church className="w-3.5 h-3.5 text-amber-700" />
+                <span className="hidden sm:inline">Wycentruj</span>
+              </button>
+            </div>
           )}
           {gps.error && (
             <div className="max-w-[230px] px-2.5 py-1.5 bg-red-50/95 border border-red-200 rounded-lg shadow text-[11px] font-medium text-red-800">
@@ -1221,7 +1386,12 @@ export const ParishMap: React.FC<ParishMapProps> = ({
   canEditBoundary = true,
   markerLabelMode = 'auto',
   showRouteLines = true,
+  showHousesOnMap = false,
+  onToggleShowHouses,
   focusedStreet = null,
+  inspectedStreet = null,
+  inspectedStreetRoadPath = null,
+  activeDayStreetNames = [],
   interactionMode,
   highlightedStopId,
   lassoSelectedIds = [],
@@ -1282,6 +1452,17 @@ export const ParishMap: React.FC<ParishMapProps> = ({
     return count;
   }, [stops, selectedDate, focusedPriestId, focusedStreet]);
 
+  const streetOverlayPaths = useMemo(
+    () => buildStreetOverlayPaths(stops),
+    [stops]
+  );
+
+  const renderAllHouses =
+    Boolean(showHousesOnMap) ||
+    interactionMode === 'lasso_select' ||
+    interactionMode === 'add_stop' ||
+    Boolean(suppressStopPopup);
+
   return (
     <div className="relative w-full h-full min-h-[340px] bg-slate-100">
       <GoogleMap
@@ -1300,9 +1481,26 @@ export const ParishMap: React.FC<ParishMapProps> = ({
         fullscreenControl={true}
         internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
         className="w-full h-full"
-        onClick={() => {
-          if (interactionMode === 'pan' && highlightedStopId) {
+        onClick={(ev) => {
+          if (interactionMode !== 'pan') return;
+          if (highlightedStopId) {
             onSelectStop(null);
+          }
+          const ll = ev.detail?.latLng;
+          if (ll) {
+            const hitStreet = findNearestStreetAtPoint(
+              { lat: ll.lat, lng: ll.lng },
+              streetOverlayPaths,
+              stops,
+              65
+            );
+            if (hitStreet) {
+              onSelectStreetOverlay?.(hitStreet);
+              return;
+            }
+          }
+          if (inspectedStreet) {
+            onSelectStreetOverlay?.(null);
           }
         }}
       >
@@ -1330,8 +1528,12 @@ export const ParishMap: React.FC<ParishMapProps> = ({
         <StreetOverlaysLayer
           stops={stops}
           routesCount={routes.length}
+          showRouteLines={showRouteLines}
           interactionMode={interactionMode}
           focusedStreet={focusedStreet}
+          inspectedStreet={inspectedStreet}
+          inspectedStreetRoadPath={inspectedStreetRoadPath}
+          activeDayStreetNames={activeDayStreetNames}
           onSelectStreetOverlay={onSelectStreetOverlay}
         />
 
@@ -1353,11 +1555,25 @@ export const ParishMap: React.FC<ParishMapProps> = ({
           focusedPriestId={focusedPriestId}
           recenterSignal={recenterSignal}
           highlightedStopId={highlightedStopId}
+          showHousesOnMap={showHousesOnMap}
+          onToggleShowHouses={onToggleShowHouses}
         />
 
         {parish && <ParishChurchMarker parish={parish} />}
 
         {stops.map((stop) => {
+          const routeMeta = routeMetaByStopId[stop.id];
+          const isSelected = highlightedStopId === stop.id;
+          if (!renderAllHouses) {
+            const isRouteEndpoint =
+              routes.length > 0 &&
+              showRouteLines &&
+              Boolean(routeMeta?.isFirstInRoute || routeMeta?.isLastInRoute) &&
+              (focusedPriestId === null || stop.priestId === focusedPriestId);
+            if (!isSelected && !isRouteEndpoint) {
+              return null;
+            }
+          }
           const palette =
             PRIEST_PALETTE.find((p) => p.id === stop.priestId) ??
             PRIEST_PALETTE[0];
@@ -1366,15 +1582,14 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             : stop.included !== false;
           const isDimmedByPriest =
             focusedPriestId !== null && stop.priestId !== focusedPriestId;
+          const activeStreetFilter = focusedStreet || inspectedStreet;
           const isDimmedByStreet =
-            Boolean(focusedStreet) &&
-            extractStreetName(stop) !== focusedStreet;
+            Boolean(activeStreetFilter) &&
+            extractStreetName(stop) !== activeStreetFilter;
           const isBlock = Boolean(
             stop.isMultiUnit || (stop.units && stop.units.length > 0)
           );
-          const isSelected = highlightedStopId === stop.id;
           const isLassoSelected = lassoSelectedSet.has(stop.id);
-          const routeMeta = routeMetaByStopId[stop.id];
 
           const appearance = computeStopMarkerAppearance({
             zoom: mapZoom,
@@ -1383,7 +1598,7 @@ export const ParishMap: React.FC<ParishMapProps> = ({
             isActiveInView,
             isDimmedByPriest,
             isDimmedByStreet,
-            hasFocusedStreet: Boolean(focusedStreet),
+            hasFocusedStreet: Boolean(activeStreetFilter),
             isSelected: isSelected || isLassoSelected,
             isBlock,
             isBoundaryEditing:

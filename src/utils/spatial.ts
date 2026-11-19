@@ -1128,9 +1128,15 @@ export interface StreetOverlayPath {
   points: LatLng[];
 }
 
+function sqDistDeg(a: LatLng, b: LatLng): number {
+  const dLat = a.lat - b.lat;
+  const dLng = a.lng - b.lng;
+  return dLat * dLat + dLng * dLng;
+}
+
 /**
- * Computes light spatial polylines connecting houses along each saved street
- * so streets are visually "painted" and clickable directly on the map.
+ * Computes smoothed spatial centerline polylines for every saved street in the parish
+ * so streets can be clicked directly on the map and highlighted cleanly like a route.
  */
 export function buildStreetOverlayPaths(
   stops: VisitStop[]
@@ -1153,48 +1159,297 @@ export function buildStreetOverlayPaths(
     const list = byStreet.get(streetName) ?? [];
     const color = STREET_OVERLAY_PALETTE[idx % STREET_OVERLAY_PALETTE.length];
     idx += 1;
-    if (list.length < 2) continue;
+    if (list.length === 0) continue;
 
-    // Order points spatially using greedy nearest neighbor starting from extreme endpoint
-    const remaining = [...list];
-    let startIdx = 0;
-    for (let i = 1; i < remaining.length; i++) {
-      if (
-        remaining[i].location.lat + remaining[i].location.lng <
-        remaining[startIdx].location.lat + remaining[startIdx].location.lng
-      ) {
+    if (list.length === 1) {
+      const p = list[0].location;
+      const deltaLng = 0.00018;
+      paths.push({
+        streetName,
+        color,
+        count: 1,
+        points: [
+          { lat: p.lat, lng: p.lng - deltaLng },
+          { lat: p.lat, lng: p.lng + deltaLng },
+        ],
+      });
+      continue;
+    }
+
+    // 2-pass farthest-point sweep to find a genuine street endpoint
+    let farA = 0;
+    let maxD = -1;
+    for (let i = 1; i < list.length; i++) {
+      const d = sqDistDeg(list[0].location, list[i].location);
+      if (d > maxD) {
+        maxD = d;
+        farA = i;
+      }
+    }
+    let startIdx = farA;
+    maxD = -1;
+    for (let i = 0; i < list.length; i++) {
+      const d = sqDistDeg(list[farA].location, list[i].location);
+      if (d > maxD) {
+        maxD = d;
         startIdx = i;
       }
     }
-    const ordered: LatLng[] = [];
+
+    // Order points spatially using greedy nearest neighbor from the true street endpoint
+    const remaining = [...list];
+    const rawOrdered: LatLng[] = [];
     let current = remaining.splice(startIdx, 1)[0];
-    ordered.push(current.location);
+    rawOrdered.push(current.location);
 
     while (remaining.length > 0) {
       let bestI = 0;
       let bestDist = Number.POSITIVE_INFINITY;
       for (let i = 0; i < remaining.length; i++) {
-        const dLat = remaining[i].location.lat - current.location.lat;
-        const dLng = remaining[i].location.lng - current.location.lng;
-        const d = dLat * dLat + dLng * dLng;
+        const d = sqDistDeg(remaining[i].location, current.location);
         if (d < bestDist) {
           bestDist = d;
           bestI = i;
         }
       }
       current = remaining.splice(bestI, 1)[0];
-      ordered.push(current.location);
+      rawOrdered.push(current.location);
+    }
+
+    // Centerline smoothing (reduces left/right house zig-zag so street ribbon tracks the road middle)
+    let smoothed = rawOrdered;
+    if (rawOrdered.length >= 4) {
+      const avgLat =
+        rawOrdered.reduce((s, p) => s + p.lat, 0) / rawOrdered.length;
+      const cosLat = Math.max(0.2, Math.cos((avgLat * Math.PI) / 180));
+      const approxMeters = (a: LatLng, b: LatLng) =>
+        Math.hypot(
+          (a.lat - b.lat) * 111320,
+          (a.lng - b.lng) * 111320 * cosLat
+        );
+
+      const pass = (pts: LatLng[]): LatLng[] =>
+        pts.map((pt, i) => {
+          if (i === 0 || i === pts.length - 1) return pt;
+          const prev = pts[i - 1];
+          const next = pts[i + 1];
+          if (approxMeters(prev, pt) > 130 || approxMeters(pt, next) > 130) {
+            return pt;
+          }
+          return {
+            lat: prev.lat * 0.28 + pt.lat * 0.44 + next.lat * 0.28,
+            lng: prev.lng * 0.28 + pt.lng * 0.44 + next.lng * 0.28,
+          };
+        });
+
+      smoothed = pass(pass(rawOrdered));
     }
 
     paths.push({
       streetName,
       color,
       count: list.length,
-      points: ordered,
+      points: smoothed,
     });
   }
 
   return paths;
 }
+
+function pointToSegmentMeters(
+  p: LatLng,
+  a: LatLng,
+  b: LatLng,
+  cosLat: number
+): number {
+  const mLat = 111320;
+  const mLng = 111320 * cosLat;
+  const px = p.lng * mLng;
+  const py = p.lat * mLat;
+  const ax = a.lng * mLng;
+  const ay = a.lat * mLat;
+  const bx = b.lng * mLng;
+  const by = b.lat * mLat;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-6) {
+    return Math.hypot(px - ax, py - ay);
+  }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  const projX = ax + t * dx;
+  const projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+/**
+ * Finds the nearest saved parish street within `maxDistanceMeters` of a map click.
+ * Checks both smoothed street centerline segments and individual house coordinates.
+ */
+export function findNearestStreetAtPoint(
+  clickPoint: LatLng,
+  streetPaths: StreetOverlayPath[],
+  stops: VisitStop[],
+  maxDistanceMeters = 65
+): string | null {
+  const cosLat = Math.max(0.2, Math.cos((clickPoint.lat * Math.PI) / 180));
+  let bestStreet: string | null = null;
+  let bestDist = maxDistanceMeters;
+
+  for (const overlay of streetPaths) {
+    const pts = overlay.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const d = pointToSegmentMeters(clickPoint, pts[i], pts[i + 1], cosLat);
+      if (d < bestDist) {
+        bestDist = d;
+        bestStreet = overlay.streetName;
+      }
+    }
+  }
+
+  // Also check individual stops directly (helps on wide streets or cul-de-sacs)
+  const mLat = 111320;
+  const mLng = 111320 * cosLat;
+  for (const stop of stops) {
+    const d = Math.hypot(
+      (stop.location.lat - clickPoint.lat) * mLat,
+      (stop.location.lng - clickPoint.lng) * mLng
+    );
+    if (d < bestDist) {
+      bestDist = d;
+      bestStreet = extractStreetName(stop);
+    }
+  }
+
+  return bestStreet;
+}
+
+/**
+ * Extracts exact resident count saved from FARA / CSV kartoteka or manual notes
+ * (e.g. "Kartoteka: 4 mieszkańców", "1 mieszkaniec", "3 osoby", "5 osób", "2 os.").
+ */
+export function extractStopResidentsCount(stop: VisitStop): number | null {
+  const parseResidentsText = (text?: string): number | null => {
+    if (!text) return null;
+    const match = text.match(
+      /(\d+)\s*(?:mieszkaniec|mieszkańc(?:ów|ow|y)|os[óo]b|osoby|osoba|os\.)/i
+    );
+    if (!match) return null;
+    const parsed = Number.parseInt(match[1], 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+
+  const fromStopNotes = parseResidentsText(stop.notes);
+  if (fromStopNotes !== null) return fromStopNotes;
+
+  if (stop.units && stop.units.length > 0) {
+    let unitSum = 0;
+    let foundAny = false;
+    for (const u of stop.units) {
+      const n = parseResidentsText(u.notes);
+      if (n !== null) {
+        unitSum += n;
+        foundAny = true;
+      }
+    }
+    if (foundAny) return unitSum;
+  }
+
+  return null;
+}
+
+export interface StreetStatsSummary {
+  streetName: string;
+  stops: VisitStop[];
+  totalBuildings: number;
+  singleHousesCount: number;
+  blocksCount: number;
+  totalUnitsInBlocks: number;
+  totalHouseholds: number;
+  residentsKnownTotal: number;
+  residentsKnownBuildings: number;
+  scheduledDates: string[];
+  unscheduledCount: number;
+  declinedCount: number;
+  estimatedVisitMinutes: number;
+  numberRangeLabel: string;
+  missingGaps: number[];
+}
+
+export function summarizeStreetStats(
+  streetName: string,
+  allStops: VisitStop[]
+): StreetStatsSummary {
+  const streetStops = allStops
+    .filter((s) => extractStreetName(s) === streetName)
+    .sort(compareStopsByHouseNumber);
+
+  let blocksCount = 0;
+  let totalUnitsInBlocks = 0;
+  let residentsKnownTotal = 0;
+  let residentsKnownBuildings = 0;
+  let unscheduledCount = 0;
+  let declinedCount = 0;
+  let estimatedVisitMinutes = 0;
+  const dateSet = new Set<string>();
+
+  for (const s of streetStops) {
+    const isBlock = isBlockStop(s);
+    if (isBlock) {
+      blocksCount += 1;
+      totalUnitsInBlocks += Math.max(1, getStopUnitCount(s));
+    }
+
+    const res = extractStopResidentsCount(s);
+    if (res !== null) {
+      residentsKnownTotal += res;
+      residentsKnownBuildings += 1;
+    }
+
+    const isDeclined = Boolean(s.permanentDecline || s.included === false);
+    if (isDeclined) {
+      declinedCount += 1;
+    } else {
+      estimatedVisitMinutes += s.durationMinutes || 15;
+    }
+
+    const date = (s.visitDate ?? '').trim();
+    if (date) {
+      dateSet.add(date);
+    } else if (!isDeclined) {
+      unscheduledCount += 1;
+    }
+  }
+
+  const singleHousesCount = streetStops.length - blocksCount;
+  const totalHouseholds = singleHousesCount + totalUnitsInBlocks;
+  const bounds = computeStreetNumberBounds(streetStops);
+  const numberRangeLabel =
+    bounds.all.minLabel && bounds.all.maxLabel
+      ? bounds.all.minLabel === bounds.all.maxLabel
+        ? `nr ${bounds.all.minLabel}`
+        : `nr ${bounds.all.minLabel}–${bounds.all.maxLabel}`
+      : '';
+
+  return {
+    streetName,
+    stops: streetStops,
+    totalBuildings: streetStops.length,
+    singleHousesCount,
+    blocksCount,
+    totalUnitsInBlocks,
+    totalHouseholds,
+    residentsKnownTotal,
+    residentsKnownBuildings,
+    scheduledDates: Array.from(dateSet).sort(),
+    unscheduledCount,
+    declinedCount,
+    estimatedVisitMinutes,
+    numberRangeLabel,
+    missingGaps: findMissingHouseNumberGaps(streetStops),
+  };
+}
+
 
 

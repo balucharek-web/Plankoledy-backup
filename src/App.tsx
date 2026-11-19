@@ -50,6 +50,7 @@ import {
   CustomDayPlanPayload,
   SidebarStops,
 } from './components/SidebarStops';
+import { StreetMapModal } from './components/StreetMapModal';
 import { MapEngineProvider } from './contexts/MapEngineContext';
 
 const ArchitectureGuideModal = lazy(() =>
@@ -84,6 +85,7 @@ import {
 } from './firebase';
 import { useOsmRouteOptimizer } from './hooks/useOsmRouteOptimizer';
 import { useParishRouteOptimizer } from './hooks/useParishRouteOptimizer';
+import { fetchStreetRoadGeometry } from './services/osmSearchAndRouting';
 import {
   fetchStreetHousesAtLocation,
   reverseGeocodeHouseAddress,
@@ -130,6 +132,7 @@ import {
   buildSeasonDaySummaries,
   collectReturnVisitCandidates,
   computeManualOrderForStops,
+  formatIsoDateLocal,
   formatPolishDateChip,
   formatPolishDateFull,
   getDayActiveBreaks,
@@ -137,6 +140,7 @@ import {
   getDayStartTime,
 } from './utils/seasonScheduler';
 import {
+  buildStreetOverlayPaths,
   computePolygonAreaSqMeters,
   createBufferedHullBoundary,
   createPresetBoundaryPolygon,
@@ -146,6 +150,7 @@ import {
   isPointInsideBoundary,
   partitionStopsBySector,
   scaleBoundaryFromCenter,
+  summarizeStreetStats,
 } from './utils/spatial';
 
 type MobilePane = 'panel' | 'map';
@@ -223,7 +228,13 @@ function ParishPlannerWorkspace({
   const [markerLabelMode, setMarkerLabelMode] =
     useState<MarkerLabelMode>('auto');
   const [showRouteLines, setShowRouteLines] = useState<boolean>(true);
+  const [showHousesOnMap, setShowHousesOnMap] = useState<boolean>(false);
   const [focusedStreet, setFocusedStreet] = useState<string | null>(null);
+  const [inspectedStreet, setInspectedStreet] = useState<string | null>(null);
+  const [inspectedStreetRoadPath, setInspectedStreetRoadPath] = useState<
+    LatLng[] | null
+  >(null);
+  const hasAutoSelectedTodayRef = useRef<string | null>(null);
   const [exactRoutesCache, setExactRoutesCache] = useState<
     Record<
       string,
@@ -239,6 +250,7 @@ function ParishPlannerWorkspace({
   const [setupTabRequest, setSetupTabRequest] = useState<{
     tab: SetupTab;
     seq: number;
+    streetName?: string;
   } | null>(null);
   const [plannerLoadState, setPlannerLoadState] = useState<{
     date: string | null;
@@ -1917,8 +1929,10 @@ function ParishPlannerWorkspace({
     [showStreetFeedback]
   );
 
-  const handleSelectStreetOverlay = useCallback((streetName: string) => {
-    setFocusedStreet((prev) => (prev === streetName ? null : streetName));
+  const handleSelectStreetOverlay = useCallback((streetName: string | null) => {
+    setInspectedStreet((prev) =>
+      streetName === null ? null : prev === streetName ? null : streetName
+    );
   }, []);
 
   const handleLassoSelectStops = useCallback(
@@ -1977,6 +1991,18 @@ function ParishPlannerWorkspace({
   const plannedDays = seasonSummary.days;
   const unscheduledStops = seasonSummary.unscheduledStops;
 
+  // Auto-select today's kolęda date ONCE on initial parish load if today is scheduled
+  useEffect(() => {
+    const parishKey = activeParishId ?? parish?.name ?? null;
+    if (!parishKey || plannedDays.length === 0) return;
+    if (hasAutoSelectedTodayRef.current === parishKey) return;
+    hasAutoSelectedTodayRef.current = parishKey;
+    const todayIso = formatIsoDateLocal(new Date());
+    if (!selectedDate && plannedDays.some((d) => d.date === todayIso)) {
+      setSelectedDate(todayIso);
+    }
+  }, [activeParishId, parish?.name, plannedDays, selectedDate]);
+
   // Keep selectedDate valid if dates were cleared/changed
   useEffect(() => {
     if (
@@ -1991,6 +2017,53 @@ function ParishPlannerWorkspace({
     () => plannedDays.find((d) => d.date === selectedDate) ?? null,
     [plannedDays, selectedDate]
   );
+
+  const activeDayStreetNames = useMemo(
+    () => selectedDaySummary?.streetNames ?? [],
+    [selectedDaySummary]
+  );
+
+  const inspectedStreetSummary = useMemo(() => {
+    if (!inspectedStreet) return null;
+    const summary = summarizeStreetStats(inspectedStreet, stops);
+    return summary.totalBuildings > 0 ? summary : null;
+  }, [inspectedStreet, stops]);
+
+  // Snap the clicked street's Google-Maps-blue highlight onto actual OSRM road geometry in the background
+  useEffect(() => {
+    setInspectedStreetRoadPath(null);
+    if (!inspectedStreet) return;
+
+    const streetStops = stops.filter(
+      (s) => extractStreetName(s) === inspectedStreet
+    );
+    if (streetStops.length < 2) return;
+
+    const overlay = buildStreetOverlayPaths(streetStops)[0];
+    if (!overlay || overlay.points.length < 2) return;
+
+    let cancelled = false;
+    void fetchStreetRoadGeometry(overlay.points).then((roadPath) => {
+      if (!cancelled && roadPath && roadPath.length >= 2) {
+        setInspectedStreetRoadPath(roadPath);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inspectedStreet, stops]);
+
+  // Clear clicked street modal when switching interaction mode or parish
+  useEffect(() => {
+    if (interactionMode !== 'pan') {
+      setInspectedStreet(null);
+    }
+  }, [interactionMode]);
+
+  useEffect(() => {
+    setInspectedStreet(null);
+  }, [activeParishId]);
 
   const activeRouteCacheKey = selectedDate ?? 'current';
   const cachedExact = exactRoutesCache[activeRouteCacheKey];
@@ -2536,10 +2609,38 @@ function ParishPlannerWorkspace({
       setSelectedDate(date);
       setFocusedPriestId(null);
       setFocusedStreet(null);
+      setInspectedStreet(null);
       setShowRouteLines(true);
       setInteractionMode('pan');
       navigateToSection('routes');
       setMobilePane('map');
+    },
+    [navigateToSection]
+  );
+
+  const handleOpenStreetDetails = useCallback(
+    (streetName: string) => {
+      setInspectedStreet(null);
+      setFocusedStreet(null);
+      navigateToSection('parish');
+      setSetupTabRequest((prev) => ({
+        tab: 'streets',
+        seq: (prev?.seq ?? 0) + 1,
+        streetName,
+      }));
+      setMobilePane('panel');
+    },
+    [navigateToSection]
+  );
+
+  const handlePlanInspectedStreet = useCallback(
+    (streetName: string) => {
+      setInspectedStreet(null);
+      setPlannerDraftStreets([streetName]);
+      setSelectedDate(null);
+      setPlannerLoadState((prev) => ({ date: null, seq: prev.seq + 1 }));
+      navigateToSection('stops');
+      setMobilePane('panel');
     },
     [navigateToSection]
   );
@@ -2553,6 +2654,7 @@ function ParishPlannerWorkspace({
     csvImportOpen ||
     Boolean(editingBlockStopId) ||
     mobileMenuOpen ||
+    Boolean(inspectedStreet) ||
     validLassoSelectedIds.length > 0 ||
     interactionMode !== 'pan' ||
     fieldModeOnMap ||
@@ -2588,6 +2690,10 @@ function ParishPlannerWorkspace({
     }
     if (mobileMenuOpen) {
       setMobileMenuOpen(false);
+      return;
+    }
+    if (inspectedStreet) {
+      setInspectedStreet(null);
       return;
     }
     if (validLassoSelectedIds.length > 0) {
@@ -3071,7 +3177,8 @@ function ParishPlannerWorkspace({
                       setMobilePane('map');
                     }}
                     onFocusStreetOnMap={(streetName) => {
-                      setFocusedStreet(streetName);
+                      setFocusedStreet(null);
+                      setInspectedStreet(streetName);
                       setInteractionMode('pan');
                       setMobilePane('map');
                     }}
@@ -3329,7 +3436,12 @@ function ParishPlannerWorkspace({
                   canEditBoundary={Boolean(parish)}
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
+                  showHousesOnMap={showHousesOnMap}
+                  onToggleShowHouses={() => setShowHousesOnMap((v) => !v)}
                   focusedStreet={focusedStreet}
+                  inspectedStreet={inspectedStreet}
+                  inspectedStreetRoadPath={inspectedStreetRoadPath}
+                  activeDayStreetNames={activeDayStreetNames}
                   lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
@@ -3376,7 +3488,12 @@ function ParishPlannerWorkspace({
                   canEditBoundary={Boolean(parish)}
                   markerLabelMode={markerLabelMode}
                   showRouteLines={showRouteLines}
+                  showHousesOnMap={showHousesOnMap}
+                  onToggleShowHouses={() => setShowHousesOnMap((v) => !v)}
                   focusedStreet={focusedStreet}
+                  inspectedStreet={inspectedStreet}
+                  inspectedStreetRoadPath={inspectedStreetRoadPath}
+                  activeDayStreetNames={activeDayStreetNames}
                   lassoSelectedIds={validLassoSelectedIds}
                   interactionMode={interactionMode}
                   highlightedStopId={highlightedStopId}
@@ -3585,6 +3702,22 @@ function ParishPlannerWorkspace({
                   </div>
                 )}
 
+              {/* Street Summary Modal when a street is clicked on the map */}
+              {interactionMode === 'pan' &&
+                !fieldModeOnMap &&
+                validLassoSelectedIds.length === 0 &&
+                inspectedStreetSummary && (
+                  <StreetMapModal
+                    summary={inspectedStreetSummary}
+                    showHousesOnMap={showHousesOnMap}
+                    onToggleShowHouses={() => setShowHousesOnMap((v) => !v)}
+                    onOpenStreetDetails={handleOpenStreetDetails}
+                    onViewScheduledDay={handleViewDayOnMap}
+                    onPlanStreet={handlePlanInspectedStreet}
+                    onClose={() => setInspectedStreet(null)}
+                  />
+                )}
+
               {/* Field Mode Overlay DIRECTLY on Map OR Compact Readability HUD */}
               {interactionMode === 'pan' &&
                 fieldModeOnMap &&
@@ -3615,6 +3748,7 @@ function ParishPlannerWorkspace({
                 </Suspense>
               ) : (
                 interactionMode === 'pan' &&
+                !inspectedStreetSummary &&
                 (plannedDays.length > 0 ||
                   displayedRoutes.length > 0 ||
                   activeStopsCount > 0) && (
@@ -3631,11 +3765,13 @@ function ParishPlannerWorkspace({
                     activeStopsCount={activeStopsCount}
                     markerLabelMode={markerLabelMode}
                     showRouteLines={showRouteLines}
+                    showHousesOnMap={showHousesOnMap}
                     onSelectDate={setSelectedDate}
                     onFocusPriest={setFocusedPriestId}
                     onFocusStreet={setFocusedStreet}
                     onChangeMarkerLabelMode={setMarkerLabelMode}
                     onToggleRouteLines={() => setShowRouteLines((v) => !v)}
+                    onToggleShowHouses={() => setShowHousesOnMap((v) => !v)}
                     onComputeExactDayRoute={() =>
                       void handleComputeRoutesForDate(selectedDate, {
                         preserveMobilePane: true,

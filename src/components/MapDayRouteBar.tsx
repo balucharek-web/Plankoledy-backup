@@ -7,6 +7,7 @@ import {
   ClipboardCheck,
   Eye,
   EyeOff,
+  Home,
   ListOrdered,
   Navigation,
 } from 'lucide-react';
@@ -34,11 +35,13 @@ interface MapDayRouteBarProps {
   activeStopsCount: number;
   markerLabelMode: MarkerLabelMode;
   showRouteLines: boolean;
+  showHousesOnMap: boolean;
   onSelectDate: (date: string | null) => void;
   onFocusPriest: (priestId: number | null) => void;
   onFocusStreet: (streetName: string | null) => void;
   onChangeMarkerLabelMode: (mode: MarkerLabelMode) => void;
   onToggleRouteLines: () => void;
+  onToggleShowHouses: () => void;
   onComputeExactDayRoute: () => void;
   onOpenRouteList: () => void;
   onOpenFieldMode: () => void;
@@ -57,11 +60,13 @@ export const MapDayRouteBar: React.FC<MapDayRouteBarProps> = ({
   activeStopsCount,
   markerLabelMode,
   showRouteLines,
+  showHousesOnMap,
   onSelectDate,
   onFocusPriest,
   onFocusStreet,
   onChangeMarkerLabelMode,
   onToggleRouteLines,
+  onToggleShowHouses,
   onComputeExactDayRoute,
   onOpenRouteList,
   onOpenFieldMode,
@@ -152,7 +157,7 @@ export const MapDayRouteBar: React.FC<MapDayRouteBarProps> = ({
                       {d.estimatedEndTime}) · {d.stops.length} pkt
                     </option>
                   ))}
-                  <option value="">Wszystkie dni naraz ({activeStopsCount})</option>
+                  <option value="">Teren parafii (cały obszar)</option>
                 </select>
               </div>
 
@@ -167,7 +172,7 @@ export const MapDayRouteBar: React.FC<MapDayRouteBarProps> = ({
             </div>
           ) : (
             <div className="px-2 text-xs font-semibold text-slate-800 truncate">
-              Podgląd punktów ({activeStopsCount})
+              Teren parafii · kliknij ulicę na mapie
             </div>
           )}
 
@@ -334,6 +339,22 @@ export const MapDayRouteBar: React.FC<MapDayRouteBarProps> = ({
               )}
 
               {activeStopsCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onToggleShowHouses}
+                  aria-pressed={showHousesOnMap}
+                  className={`min-h-[36px] px-2.5 py-1 text-xs font-semibold rounded-lg inline-flex items-center gap-1.5 transition-colors whitespace-nowrap border ${
+                    showHousesOnMap
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span>{showHousesOnMap ? 'Domy: widoczne' : 'Pokaż domy'}</span>
+                </button>
+              )}
+
+              {activeStopsCount > 0 && showHousesOnMap && (
                 <div
                   role="group"
                   aria-label="Sposób wyświetlania punktów na mapie"
