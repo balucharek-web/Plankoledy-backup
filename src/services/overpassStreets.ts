@@ -1,5 +1,8 @@
 import { LatLng } from '../types/parish';
-import { isPointInsideBoundary } from '../utils/spatial';
+import {
+  computePolygonAreaSqMeters,
+  isPointInsideBoundary,
+} from '../utils/spatial';
 
 export interface OsmHousePoint {
   id: string;
@@ -383,35 +386,64 @@ async function queryGugikReversePoint(
   }
 }
 
-async function queryGugikReversePolygon(
+async function queryGugikReversePolygonStatus(
   boundary: LatLng[],
   limit = 1000,
-  timeoutMs = 6000
-): Promise<
-  Array<{ item: GugikAddressItem; location: LatLng; distanceMeters: number }>
-> {
-  if (boundary.length < 3) return [];
+  timeoutMs = 8500
+): Promise<{
+  ok: boolean;
+  records: Array<{
+    item: GugikAddressItem;
+    location: LatLng;
+    distanceMeters: number;
+  }>;
+}> {
+  if (boundary.length < 3) return { ok: true, records: [] };
   const ring = [...boundary, boundary[0]];
   const coordsText = ring
     .map((pt) => `${pt.lng.toFixed(6)} ${pt.lat.toFixed(6)}`)
     .join(',');
   const wkt = `POLYGON((${coordsText}))`;
+  const url = `${GUGIK_UUG_ENDPOINT}?request=GetAddressReverse&location=${encodeURIComponent(
+    wkt
+  )}&srid=4326&limit=${limit}`;
 
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const url = `${GUGIK_UUG_ENDPOINT}?request=GetAddressReverse&location=${encodeURIComponent(
-      wkt
-    )}&srid=4326&limit=${limit}`;
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return [];
-    const data = (await res.json()) as GugikReverseResponse;
-    return parseGugikResults(data);
-  } catch {
-    return [];
-  } finally {
-    window.clearTimeout(timer);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) {
+        if (attempt === 0) {
+          await new Promise((r) => window.setTimeout(r, 300));
+          continue;
+        }
+        return { ok: false, records: [] };
+      }
+      const data = (await res.json()) as GugikReverseResponse;
+      return { ok: true, records: parseGugikResults(data) };
+    } catch {
+      if (attempt === 0) {
+        await new Promise((r) => window.setTimeout(r, 300));
+        continue;
+      }
+      return { ok: false, records: [] };
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
+  return { ok: false, records: [] };
+}
+
+async function queryGugikReversePolygon(
+  boundary: LatLng[],
+  limit = 1000,
+  timeoutMs = 8500
+): Promise<
+  Array<{ item: GugikAddressItem; location: LatLng; distanceMeters: number }>
+> {
+  const res = await queryGugikReversePolygonStatus(boundary, limit, timeoutMs);
+  return res.records;
 }
 
 async function queryNominatimReverse(
@@ -500,6 +532,7 @@ async function runOverpassQuery(
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          Accept: 'application/json, text/plain, */*',
         },
         body: `data=${encodeURIComponent(query)}`,
         signal: controller.signal,
@@ -555,6 +588,35 @@ type GugikRecord = {
   distanceMeters: number;
 };
 
+function segmentsIntersect2D(
+  a: LatLng,
+  b: LatLng,
+  c: LatLng,
+  d: LatLng
+): boolean {
+  const orient = (p: LatLng, q: LatLng, r: LatLng) =>
+    (q.lng - p.lng) * (r.lat - p.lat) - (q.lat - p.lat) * (r.lng - p.lng);
+  const onSegment = (p: LatLng, q: LatLng, r: LatLng) =>
+    q.lng >= Math.min(p.lng, r.lng) - 1e-10 &&
+    q.lng <= Math.max(p.lng, r.lng) + 1e-10 &&
+    q.lat >= Math.min(p.lat, r.lat) - 1e-10 &&
+    q.lat <= Math.max(p.lat, r.lat) + 1e-10;
+
+  const o1 = orient(a, b, c);
+  const o2 = orient(a, b, d);
+  const o3 = orient(c, d, a);
+  const o4 = orient(c, d, b);
+
+  if ((o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0)) {
+    return true;
+  }
+  if (Math.abs(o1) < 1e-12 && onSegment(a, c, b)) return true;
+  if (Math.abs(o2) < 1e-12 && onSegment(a, d, b)) return true;
+  if (Math.abs(o3) < 1e-12 && onSegment(c, a, d)) return true;
+  if (Math.abs(o4) < 1e-12 && onSegment(c, b, d)) return true;
+  return false;
+}
+
 function rectIntersectsBoundary(
   rect: { south: number; west: number; north: number; east: number },
   boundary: LatLng[]
@@ -572,79 +634,104 @@ function rectIntersectsBoundary(
     }
   }
   // 2. Any rect corner or center inside boundary
-  const probes: LatLng[] = [
-    { lat: rect.south, lng: rect.west },
-    { lat: rect.south, lng: rect.east },
-    { lat: rect.north, lng: rect.west },
-    { lat: rect.north, lng: rect.east },
-    { lat: (rect.south + rect.north) / 2, lng: (rect.west + rect.east) / 2 },
-  ];
-  for (const pr of probes) {
+  const c0: LatLng = { lat: rect.south, lng: rect.west };
+  const c1: LatLng = { lat: rect.south, lng: rect.east };
+  const c2: LatLng = { lat: rect.north, lng: rect.east };
+  const c3: LatLng = { lat: rect.north, lng: rect.west };
+  const center: LatLng = {
+    lat: (rect.south + rect.north) / 2,
+    lng: (rect.west + rect.east) / 2,
+  };
+  for (const pr of [c0, c1, c2, c3, center]) {
     if (isPointInsideBoundary(pr, boundary)) return true;
   }
-  // 3. Fallback bounding-box overlap check against polygon bbox
-  let minLat = 90;
-  let maxLat = -90;
-  let minLng = 180;
-  let maxLng = -180;
-  for (const p of boundary) {
-    if (p.lat < minLat) minLat = p.lat;
-    if (p.lat > maxLat) maxLat = p.lat;
-    if (p.lng < minLng) minLng = p.lng;
-    if (p.lng > maxLng) maxLng = p.lng;
+  // 3. Exact edge-edge intersection between boundary polygon and rect edges
+  const rectEdges: Array<[LatLng, LatLng]> = [
+    [c0, c1],
+    [c1, c2],
+    [c2, c3],
+    [c3, c0],
+  ];
+  for (let i = 0; i < boundary.length; i++) {
+    const p1 = boundary[i];
+    const p2 = boundary[(i + 1) % boundary.length];
+    for (const [r1, r2] of rectEdges) {
+      if (segmentsIntersect2D(p1, p2, r1, r2)) return true;
+    }
   }
-  return !(
-    rect.east < minLng ||
-    rect.west > maxLng ||
-    rect.north < minLat ||
-    rect.south > maxLat
-  );
+  return false;
+}
+
+function rectIntersectsCircle(
+  rect: { south: number; west: number; north: number; east: number },
+  center: LatLng,
+  radiusMeters: number
+): boolean {
+  const closestLat = Math.max(rect.south, Math.min(center.lat, rect.north));
+  const closestLng = Math.max(rect.west, Math.min(center.lng, rect.east));
+  return haversineMeters(center, { lat: closestLat, lng: closestLng }) <= radiusMeters + 45;
 }
 
 /**
- * Fetches ALL GUGiK PRG addresses in the area without 1000-record truncation.
- * If a polygon/radius query hits GUGiK's ~1000 limit (>= 850) or fails on a large polygon,
- * recursively subdivides the bounding box into smaller rectangular tiles queried in parallel.
+ * Fetches ALL GUGiK PRG addresses in the area without 1.00 km² polygon rejection
+ * or 1000-record truncation.
+ *
+ * Important GUGiK UUG quirk: GetAddressReverse with POLYGON silently returns 0
+ * whenever polygon area exceeds 1.00 km² (1,000,000 m²). Therefore, any area
+ * larger than 0.78 km² is automatically tiled into metric rectangles strictly
+ * under ~0.50–0.84 km² each, with retry + POINT fallback and recursive split
+ * when a dense tile returns >= 800 points.
  */
 async function fetchGugikAddressesInArea(params: {
   boundary: LatLng[];
   center: LatLng;
   radiusMeters: number;
+  onProgress?: (completed: number, total: number) => void;
 }): Promise<GugikRecord[]> {
-  const { boundary, center, radiusMeters } = params;
+  const { boundary, center, radiusMeters, onProgress } = params;
   const hasBoundary = boundary.length >= 3;
 
   const bbox = computeBoundingBox(boundary, center, radiusMeters);
-  const initialRecords = hasBoundary
-    ? await queryGugikReversePolygon(boundary, 1000, 6500)
-    : await queryGugikReversePoint(
-        center,
-        Math.min(Math.max(radiusMeters, 250), 1500),
-        1000,
-        6500
-      );
-
-  // If well under GUGiK's 1000 limit and non-empty, we already have 100% of PRG addresses
-  if (initialRecords.length > 0 && initialRecords.length < 850) {
-    return initialRecords;
-  }
-
-  // Otherwise subdivide into tiles so no street/house beyond #1000 gets truncated
   const deduped = new Map<string, GugikRecord>();
   const addRecords = (recs: GugikRecord[]) => {
     for (const r of recs) {
-      const idKey = r.item.id != null ? `id_${r.item.id}` : '';
-      const addrKey = `${(r.item.street ?? r.item.city ?? '').trim().toLowerCase()}|${(r.item.number ?? '').trim().toLowerCase()}|${r.location.lat.toFixed(5)},${r.location.lng.toFixed(5)}`;
-      const key = idKey || addrKey;
-      if (!deduped.has(key)) deduped.set(key, r);
+      // Note: GUGiK UUG `item.id` is only a 1..N row index within each single HTTP response,
+      // NEVER a globally unique address identifier. Deduplicate strictly by address + coords.
+      const addrKey = `${(r.item.street ?? '').trim().toLowerCase()}|${(r.item.city ?? '').trim().toLowerCase()}|${(r.item.number ?? '').trim().toLowerCase()}|${r.location.lat.toFixed(5)},${r.location.lng.toFixed(5)}`;
+      if (!deduped.has(addrKey)) deduped.set(addrKey, r);
     }
   };
-  addRecords(initialRecords);
 
-  const latSpan = bbox.north - bbox.south;
-  const lngSpan = bbox.east - bbox.west;
-  const initialGrid =
-    latSpan > 0.018 || lngSpan > 0.025 ? 3 : 2;
+  // 1. Fast single-request path ONLY when safely inside GUGiK's hard 1.00 km² limit
+  if (hasBoundary) {
+    const boundaryAreaSqM = computePolygonAreaSqMeters(boundary);
+    if (boundaryAreaSqM > 0 && boundaryAreaSqM <= 780_000) {
+      const initial = await queryGugikReversePolygonStatus(boundary, 1000, 7500);
+      if (initial.ok && initial.records.length > 0 && initial.records.length < 800) {
+        return initial.records;
+      }
+      addRecords(initial.records);
+    }
+  } else if (radiusMeters <= 600) {
+    const initial = await queryGugikReversePoint(
+      center,
+      Math.max(250, radiusMeters),
+      1000,
+      7000
+    );
+    if (initial.length > 0 && initial.length < 800) {
+      return initial;
+    }
+    addRecords(initial);
+  }
+
+  // 2. Metric-safe rectangular tiling: every cell is guaranteed strictly < 0.85 km²
+  //    (GUGiK silently returns 0 for any POLYGON > 1.00 km²!)
+  const avgLat = (bbox.south + bbox.north) / 2;
+  const metersPerLat = 111320;
+  const metersPerLng = 111320 * Math.max(0.2, Math.cos((avgLat * Math.PI) / 180));
+  const widthMeters = Math.max(50, (bbox.east - bbox.west) * metersPerLng);
+  const heightMeters = Math.max(50, (bbox.north - bbox.south) * metersPerLat);
 
   interface Cell {
     south: number;
@@ -654,22 +741,47 @@ async function fetchGugikAddressesInArea(params: {
     depth: number;
   }
 
-  const queue: Cell[] = [];
-  for (let r = 0; r < initialGrid; r++) {
-    for (let c = 0; c < initialGrid; c++) {
-      const south = bbox.south + (r * latSpan) / initialGrid;
-      const north = bbox.south + ((r + 1) * latSpan) / initialGrid;
-      const west = bbox.west + (c * lngSpan) / initialGrid;
-      const east = bbox.west + ((c + 1) * lngSpan) / initialGrid;
-      const cell: Cell = { south, west, north, east, depth: 1 };
-      if (!hasBoundary || rectIntersectsBoundary(cell, boundary)) {
-        queue.push(cell);
+  const MAX_REQUESTS = 140;
+  const buildIntersectingGrid = (maxCellSideMeters: number): Cell[] => {
+    const rows = Math.max(1, Math.ceil(heightMeters / maxCellSideMeters));
+    const cols = Math.max(1, Math.ceil(widthMeters / maxCellSideMeters));
+    const latStep = (bbox.north - bbox.south) / rows;
+    const lngStep = (bbox.east - bbox.west) / cols;
+    const out: Cell[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const cell: Cell = {
+          south: bbox.south + r * latStep,
+          north: bbox.south + (r + 1) * latStep,
+          west: bbox.west + c * lngStep,
+          east: bbox.west + (c + 1) * lngStep,
+          depth: 1,
+        };
+        const relevant = hasBoundary
+          ? rectIntersectsBoundary(cell, boundary)
+          : rectIntersectsCircle(cell, center, radiusMeters);
+        if (relevant) {
+          out.push(cell);
+        }
       }
     }
+    return out;
+  };
+
+  // Start with ~700m x 700m (~0.49 km²) tiles; for huge rural parishes relax up to 900m (~0.81 km², still < 1.00 km²)
+  let queue = buildIntersectingGrid(700);
+  if (queue.length > 72) {
+    queue = buildIntersectingGrid(820);
+  }
+  if (queue.length > 105) {
+    queue = buildIntersectingGrid(910);
   }
 
-  const MAX_REQUESTS = 28;
   let requestsSent = 0;
+  let completedTiles = 0;
+  let totalPlannedTiles = queue.length;
+  onProgress?.(0, totalPlannedTiles);
+
   const CONCURRENCY = 4;
 
   while (queue.length > 0 && requestsSent < MAX_REQUESTS) {
@@ -687,19 +799,40 @@ async function fetchGugikAddressesInArea(params: {
           { lat: cell.north, lng: cell.east },
           { lat: cell.north, lng: cell.west },
         ];
-        const recs = await queryGugikReversePolygon(ring, 1000, 6000);
-        return { cell, recs };
+        const status = await queryGugikReversePolygonStatus(ring, 1000, 8500);
+        if (status.ok) {
+          return { cell, recs: status.records };
+        }
+        // Fallback if POLYGON request failed: query by POINT + covering radius
+        const cellCenter: LatLng = {
+          lat: (cell.south + cell.north) / 2,
+          lng: (cell.west + cell.east) / 2,
+        };
+        const halfDiag = Math.ceil(
+          haversineMeters(
+            { lat: cell.south, lng: cell.west },
+            { lat: cell.north, lng: cell.east }
+          ) / 2
+        );
+        const fallbackRecs = await queryGugikReversePoint(
+          cellCenter,
+          Math.min(Math.max(halfDiag + 30, 150), 900),
+          1000,
+          8500
+        );
+        return { cell, recs: fallbackRecs };
       })
     );
 
     for (const { cell, recs } of results) {
+      completedTiles += 1;
       addRecords(recs);
       const cellLatSpan = cell.north - cell.south;
       const cellLngSpan = cell.east - cell.west;
       if (
-        recs.length >= 850 &&
+        recs.length >= 800 &&
         cell.depth < 3 &&
-        (cellLatSpan > 0.0014 || cellLngSpan > 0.0018)
+        (cellLatSpan > 0.0012 || cellLngSpan > 0.0016)
       ) {
         const midLat = (cell.south + cell.north) / 2;
         const midLng = (cell.west + cell.east) / 2;
@@ -710,12 +843,18 @@ async function fetchGugikAddressesInArea(params: {
           { south: midLat, west: midLng, north: cell.north, east: cell.east, depth: cell.depth + 1 },
         ];
         for (const sc of subCells) {
-          if (!hasBoundary || rectIntersectsBoundary(sc, boundary)) {
+          const relevant = hasBoundary
+            ? rectIntersectsBoundary(sc, boundary)
+            : rectIntersectsCircle(sc, center, radiusMeters);
+          if (relevant) {
             queue.push(sc);
+            totalPlannedTiles += 1;
           }
         }
       }
     }
+
+    onProgress?.(completedTiles, totalPlannedTiles);
   }
 
   return Array.from(deduped.values());
@@ -723,7 +862,7 @@ async function fetchGugikAddressesInArea(params: {
 
 /**
  * Fetches named streets & addressed houses within a parish boundary or radius.
- * Runs complete adaptive PRG (GUGiK UUG without 1000-limit truncation) AND
+ * Runs complete adaptive PRG (GUGiK UUG with <1 km² metric tiling & zero truncation) AND
  * OpenStreetMap Overpass in parallel, merging streets, missing houses, rural addr:place,
  * and multi-unit apartment block metadata.
  */
@@ -731,8 +870,9 @@ export async function fetchParishStreetsFromOsm(params: {
   boundary: LatLng[];
   center: LatLng;
   radiusMeters: number;
+  onProgress?: (completed: number, total: number) => void;
 }): Promise<OsmStreetGroup[]> {
-  const { boundary, center, radiusMeters } = params;
+  const { boundary, center, radiusMeters, onProgress } = params;
   const hasBoundary = boundary.length >= 3;
 
   const isInsideArea = (pt: LatLng): boolean => {
@@ -752,7 +892,7 @@ export async function fetchParishStreetsFromOsm(params: {
   )},${east.toFixed(5)})`;
 
   const overpassQuery = `
-[out:json][timeout:18];
+[out:json][timeout:10];
 (
   way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary|service|pedestrian)$"]["name"]${bbox};
   nwr["addr:housenumber"]${bbox};
@@ -761,21 +901,49 @@ export async function fetchParishStreetsFromOsm(params: {
 out center tags qt;
 `.trim();
 
-  const [gugikRes, overpassRes] = await Promise.allSettled([
-    fetchGugikAddressesInArea({ boundary, center, radiusMeters }),
-    runOverpassQuery(overpassQuery, 18000),
-  ]);
+  const gugikPromise = fetchGugikAddressesInArea({
+    boundary,
+    center,
+    radiusMeters,
+    onProgress,
+  });
+  const overpassSettled = runOverpassQuery(overpassQuery, 5500).then(
+    (elements) => ({ ok: true as const, elements }),
+    (error: unknown) => ({ ok: false as const, error })
+  );
 
-  const gugikRecords = gugikRes.status === 'fulfilled' ? gugikRes.value : [];
-  const osmElements = overpassRes.status === 'fulfilled' ? overpassRes.value : [];
+  let gugikRecords: GugikRecord[] = [];
+  let osmElements: OverpassElement[] = [];
+  let overpassError: unknown = null;
 
-  if (
-    gugikRecords.length === 0 &&
-    osmElements.length === 0 &&
-    overpassRes.status === 'rejected'
-  ) {
-    throw overpassRes.reason instanceof Error
-      ? overpassRes.reason
+  try {
+    gugikRecords = await gugikPromise;
+  } catch {
+    gugikRecords = [];
+  }
+
+  if (gugikRecords.length > 0) {
+    // GUGiK PRG already returned authoritative addresses; give Overpass up to 3.5s
+    // extra to enrich apartment-block metadata without making the user wait 15s+ on slow mirrors.
+    const graceResult = await Promise.race([
+      overpassSettled,
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 3500)),
+    ]);
+    if (graceResult && graceResult.ok) {
+      osmElements = graceResult.elements;
+    }
+  } else {
+    const res = await overpassSettled;
+    if (res.ok) {
+      osmElements = res.elements;
+    } else {
+      overpassError = res.error;
+    }
+  }
+
+  if (gugikRecords.length === 0 && osmElements.length === 0 && overpassError) {
+    throw overpassError instanceof Error
+      ? overpassError
       : new Error('Nie udało się wykryć ulic i adresów dla tego obszaru.');
   }
 
@@ -1139,16 +1307,19 @@ out center tags qt;
 out center tags qt;
 `.trim();
 
-  // Fetch PRG (around click + wider radius) & targeted Overpass street query in parallel
-  const [pointNearClickRes, pointWideRes, overpassRes] = await Promise.allSettled([
-    queryGugikReversePoint(location, 1500, 1000, 6000),
-    parishCenter
-      ? queryGugikReversePoint(parishCenter, 1500, 1000, 6000)
-      : Promise.resolve([]),
-    runOverpassQuery(overpassQuery, 11000),
-  ]);
+  // Fetch PRG (focused near click + wider radius) & targeted Overpass street query in parallel
+  const [pointTightRes, pointNearClickRes, pointWideRes, overpassRes] =
+    await Promise.allSettled([
+      queryGugikReversePoint(location, 550, 1000, 6000),
+      queryGugikReversePoint(location, 1500, 1000, 6500),
+      parishCenter
+        ? queryGugikReversePoint(parishCenter, 1500, 1000, 6500)
+        : Promise.resolve([]),
+      runOverpassQuery(overpassQuery, 7500),
+    ]);
 
   const combinedGugik = [
+    ...(pointTightRes.status === 'fulfilled' ? pointTightRes.value : []),
     ...(pointNearClickRes.status === 'fulfilled' ? pointNearClickRes.value : []),
     ...(pointWideRes.status === 'fulfilled' ? pointWideRes.value : []),
   ];

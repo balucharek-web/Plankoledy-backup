@@ -34,6 +34,10 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
 }) => {
   const [radiusMeters, setRadiusMeters] = useState(600);
   const [loading, setLoading] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [streets, setStreets] = useState<OsmStreetGroup[] | null>(null);
   const [filterText, setFilterText] = useState('');
@@ -51,6 +55,7 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
   const handleFetch = useCallback(async () => {
     if (!parish) return;
     setLoading(true);
+    setScanProgress(null);
     setError(null);
     setSelectedStreetNames({});
     setSelectedHouses({});
@@ -60,6 +65,9 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
         boundary,
         center: parish.location,
         radiusMeters,
+        onProgress: (completed, total) => {
+          setScanProgress({ completed, total });
+        },
       });
       setStreets(result);
     } catch (err) {
@@ -70,6 +78,7 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
       );
     } finally {
       setLoading(false);
+      setScanProgress(null);
     }
   }, [boundary, parish, radiusMeters]);
 
@@ -337,7 +346,11 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
             className="w-full sm:w-auto min-h-[38px] px-4 py-2 text-xs font-medium text-white bg-amber-700 hover:bg-amber-800 disabled:bg-slate-400 rounded-xl inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-            {loading ? 'Skanowanie adresów...' : 'Odśwież listę'}
+            {loading
+              ? scanProgress && scanProgress.total > 0
+                ? `Skanowanie (${scanProgress.completed}/${scanProgress.total})...`
+                : 'Skanowanie adresów...'
+              : 'Odśwież listę'}
           </button>
         </div>
 
@@ -346,8 +359,10 @@ export const OsmStreetFetcherModal: React.FC<OsmStreetFetcherModalProps> = ({
           {loading && !streets && (
             <div className="py-12 text-center space-y-2">
               <Loader2 className="w-6 h-6 animate-spin text-amber-700 mx-auto" />
-              <p className="text-xs text-slate-600">
-                Wykrywanie ulic i oficjalnych adresów domów w obszarze...
+              <p className="text-xs text-slate-600 tabular-nums">
+                {scanProgress && scanProgress.total > 0
+                  ? `Skanowanie oficjalnych adresów w obszarze parafii (${scanProgress.completed} z ${scanProgress.total} sektorów)...`
+                  : 'Wykrywanie ulic i oficjalnych adresów domów w obszarze...'}
               </p>
             </div>
           )}
